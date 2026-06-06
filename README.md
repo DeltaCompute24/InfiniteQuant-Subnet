@@ -154,10 +154,6 @@ until reveal + grading. No blob by reveal ⇒ void.
 **When do emissions arrive?** Weights update every tempo (~72 min); your first
 non-dust weight lands after your 20th decisive trade, assuming ≥ 52 %.
 
-**Where did the crypto design come from?** The envelope construction follows
-the drand-timelock payload pattern proven on Bittensor by MANTIS (SN123), MIT
-licensed.
-
 ## License
 
 MIT
