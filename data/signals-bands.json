@@ -1,0 +1,198 @@
+{
+   "bands" : {
+      "AUDCAD" : {
+         "asset_class" : "forex",
+         "sl_bps" : 25,
+         "tp_bps" : 25
+      },
+      "AUDCHF" : {
+         "asset_class" : "forex",
+         "sl_bps" : 25,
+         "tp_bps" : 25
+      },
+      "AUDJPY" : {
+         "asset_class" : "forex",
+         "sl_bps" : 25,
+         "tp_bps" : 25
+      },
+      "AUDNZD" : {
+         "asset_class" : "forex",
+         "sl_bps" : 25,
+         "tp_bps" : 25
+      },
+      "AUDUSD" : {
+         "asset_class" : "forex",
+         "sl_bps" : 25,
+         "tp_bps" : 25
+      },
+      "BTCUSD" : {
+         "asset_class" : "crypto",
+         "sl_bps" : 150,
+         "tp_bps" : 150
+      },
+      "CADCHF" : {
+         "asset_class" : "forex",
+         "sl_bps" : 25,
+         "tp_bps" : 25
+      },
+      "CADJPY" : {
+         "asset_class" : "forex",
+         "sl_bps" : 25,
+         "tp_bps" : 25
+      },
+      "CHFJPY" : {
+         "asset_class" : "forex",
+         "sl_bps" : 25,
+         "tp_bps" : 25
+      },
+      "ETHUSD" : {
+         "asset_class" : "crypto",
+         "sl_bps" : 150,
+         "tp_bps" : 150
+      },
+      "EURAUD" : {
+         "asset_class" : "forex",
+         "sl_bps" : 25,
+         "tp_bps" : 25
+      },
+      "EURCAD" : {
+         "asset_class" : "forex",
+         "sl_bps" : 25,
+         "tp_bps" : 25
+      },
+      "EURCHF" : {
+         "asset_class" : "forex",
+         "sl_bps" : 25,
+         "tp_bps" : 25
+      },
+      "EURGBP" : {
+         "asset_class" : "forex",
+         "sl_bps" : 25,
+         "tp_bps" : 25
+      },
+      "EURJPY" : {
+         "asset_class" : "forex",
+         "sl_bps" : 25,
+         "tp_bps" : 25
+      },
+      "EURNZD" : {
+         "asset_class" : "forex",
+         "sl_bps" : 25,
+         "tp_bps" : 25
+      },
+      "EURUSD" : {
+         "asset_class" : "forex",
+         "sl_bps" : 25,
+         "tp_bps" : 25
+      },
+      "GBPAUD" : {
+         "asset_class" : "forex",
+         "sl_bps" : 25,
+         "tp_bps" : 25
+      },
+      "GBPCAD" : {
+         "asset_class" : "forex",
+         "sl_bps" : 25,
+         "tp_bps" : 25
+      },
+      "GBPCHF" : {
+         "asset_class" : "forex",
+         "sl_bps" : 25,
+         "tp_bps" : 25
+      },
+      "GBPJPY" : {
+         "asset_class" : "forex",
+         "sl_bps" : 25,
+         "tp_bps" : 25
+      },
+      "GBPNZD" : {
+         "asset_class" : "forex",
+         "sl_bps" : 25,
+         "tp_bps" : 25
+      },
+      "GBPUSD" : {
+         "asset_class" : "forex",
+         "sl_bps" : 25,
+         "tp_bps" : 25
+      },
+      "HYPEUSD" : {
+         "asset_class" : "crypto",
+         "sl_bps" : 300,
+         "tp_bps" : 300
+      },
+      "NZDCAD" : {
+         "asset_class" : "forex",
+         "sl_bps" : 25,
+         "tp_bps" : 25
+      },
+      "NZDCHF" : {
+         "asset_class" : "forex",
+         "sl_bps" : 25,
+         "tp_bps" : 25
+      },
+      "NZDJPY" : {
+         "asset_class" : "forex",
+         "sl_bps" : 25,
+         "tp_bps" : 25
+      },
+      "NZDUSD" : {
+         "asset_class" : "forex",
+         "sl_bps" : 25,
+         "tp_bps" : 25
+      },
+      "SOLUSD" : {
+         "asset_class" : "crypto",
+         "sl_bps" : 150,
+         "tp_bps" : 150
+      },
+      "USDCAD" : {
+         "asset_class" : "forex",
+         "sl_bps" : 25,
+         "tp_bps" : 25
+      },
+      "USDCHF" : {
+         "asset_class" : "forex",
+         "sl_bps" : 25,
+         "tp_bps" : 25
+      },
+      "USDJPY" : {
+         "asset_class" : "forex",
+         "sl_bps" : 25,
+         "tp_bps" : 25
+      },
+      "USDMXN" : {
+         "asset_class" : "forex",
+         "sl_bps" : 25,
+         "tp_bps" : 25
+      },
+      "XAGUSD" : {
+         "asset_class" : "forex-commodities",
+         "sl_bps" : 50,
+         "tp_bps" : 50
+      },
+      "XAUUSD" : {
+         "asset_class" : "forex-commodities",
+         "sl_bps" : 50,
+         "tp_bps" : 50
+      },
+      "XPDUSD" : {
+         "asset_class" : "forex-commodities",
+         "sl_bps" : 150,
+         "tp_bps" : 150
+      },
+      "XPTUSD" : {
+         "asset_class" : "forex-commodities",
+         "sl_bps" : 120,
+         "tp_bps" : 120
+      },
+      "XRPUSD" : {
+         "asset_class" : "crypto",
+         "sl_bps" : 150,
+         "tp_bps" : 150
+      }
+   },
+   "notes" : "Vol-calibrated symmetric 1:1 bands. Bands are locked at submission time; an update never retroactively changes an in-flight signal.",
+   "refreshed_at" : "2026-06-05T12:43:45Z",
+   "version" : "2026-06-05-sol-hype-readd+sn89-no-equities",
+   "vol_window_days" : 30
+}
