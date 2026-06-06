@@ -44,7 +44,10 @@ MIN_SPACING_S = 4 * 3600            # per-hotkey spacing
 PLAGIARISM_COOLDOWN_S = 15 * 60     # any (pair, direction) across ALL miners
 MAX_HORIZON_H = 72
 DEFAULT_HORIZON_H = 72
-LATENCY_BUFFER_S = 30               # entry = Polygon mid at commit-block time + buffer
+LATENCY_BUFFER_S = 30               # entry anchor = commit-block timestamp + buffer
+ENTRY_SECOND_SCAN_S = 120           # scan window for the 1-second entry bar; if no
+                                    # 1s bar lands in it (sparse FX/metals off-hours)
+                                    # fall back to the first 1-minute bar open
 
 # ── Scoring (CONSENSUS — §7 of SPEC) ─────────────────────────────────────────
 SCORE_WINDOW_S = 8 * 24 * 3600      # trailing 8 days
@@ -73,7 +76,10 @@ def allowed_assets() -> dict:
     return load_bands().get("bands", {})
 
 
-# ── Polygon (validators + owner only; miners don't need a key) ───────────────
+# ── Massive / Polygon (validators + owner only; miners don't need a key) ─────
+# Requires a PAID Massive (formerly Polygon.io) subscription with intraday
+# (1-second + 1-minute) aggregates on the Currencies (forex + metals) and
+# Crypto feeds — see README "Running a validator".
 POLYGON_API_KEY = os.getenv("POLYGON_API_KEY", "")
 
 

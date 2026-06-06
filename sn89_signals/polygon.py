@@ -1,8 +1,9 @@
-"""Polygon.io data access for validators/owner.
+"""Massive (formerly Polygon.io) data access for validators/owner.
 
 Endpoints used:
   * 1-minute aggregates for touch detection
-  * snapshot mid for entry anchoring / still-open marks
+  * 1-second aggregates for entry anchoring (minute open as fallback)
+  * snapshot mid for still-open marks
 """
 from __future__ import annotations
 
@@ -13,12 +14,13 @@ import requests
 from . import config
 
 
-def minute_aggs(asset: str, asset_class: str, from_ms: int, to_ms: int) -> list[dict]:
+def _aggs(asset: str, asset_class: str, span: str,
+          from_ms: int, to_ms: int) -> list[dict]:
     """[{t,o,h,l,c}] ascending; [] on failure (caller treats as 'no data yet')."""
     if not config.POLYGON_API_KEY:
         return []
     ticker = config.polygon_ticker(asset, asset_class)
-    url = (f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/minute/"
+    url = (f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/{span}/"
            f"{from_ms}/{to_ms}?adjusted=true&sort=asc&limit=50000"
            f"&apiKey={config.POLYGON_API_KEY}")
     try:
@@ -31,6 +33,14 @@ def minute_aggs(asset: str, asset_class: str, from_ms: int, to_ms: int) -> list[
         ]
     except Exception:
         return []
+
+
+def minute_aggs(asset: str, asset_class: str, from_ms: int, to_ms: int) -> list[dict]:
+    return _aggs(asset, asset_class, "minute", from_ms, to_ms)
+
+
+def second_aggs(asset: str, asset_class: str, from_ms: int, to_ms: int) -> list[dict]:
+    return _aggs(asset, asset_class, "second", from_ms, to_ms)
 
 
 _price_cache: dict[str, tuple[float, float]] = {}  # asset -> (ts, price)
@@ -71,11 +81,19 @@ def snapshot_mid(asset: str, asset_class: str) -> float | None:
 
 
 def entry_price_at(asset: str, asset_class: str, t0_ms: int) -> float | None:
-    """Entry anchor (§6.2): open of the first 1-minute bar at/after
-    t0 + LATENCY_BUFFER. Deterministic and replayable — every validator that
-    asks Polygon for the same window gets the same bar.
+    """Entry anchor (§6.2, docs/entry-timing.md §2.2): open of the first
+    1-SECOND bar at/after t0 + LATENCY_BUFFER; falls back to the first
+    1-minute bar only when the second feed has no bar in the scan window
+    (sparse FX/metals off-hours). Deterministic and replayable — every
+    validator that asks for the same window gets the same bar.
     """
     anchor_ms = t0_ms + config.LATENCY_BUFFER_S * 1000
+    bars = second_aggs(asset, asset_class, anchor_ms,
+                       anchor_ms + config.ENTRY_SECOND_SCAN_S * 1000)
+    for b in bars:
+        if b["t"] >= anchor_ms:
+            return b["o"]
+    # minute fallback — pre-cutover behavior
     bars = minute_aggs(asset, asset_class, anchor_ms, anchor_ms + 30 * 60 * 1000)
     for b in bars:
         if b["t"] >= anchor_ms:

@@ -11,9 +11,12 @@ A miner builds a signal (pair + direction; TP/SL are fixed per-asset bands),
 encrypts it with a [drand timelock](https://drand.love) that opens 24 h later,
 uploads the ciphertext to a public bucket, and records `SHA256(signal)`
 on-chain via `set_commitment`. **The block the commitment lands in is the
-signal's timestamp**: validators derive the entry price from market data at
-that block's time + 30 s — the miner never states a price, so there is nothing
-to backdate or cherry-pick. After 24 h the timelock opens; validators verify
+signal's timestamp**: validators read the commitment's exact inclusion block
+from on-chain storage (millisecond-precise via the Timestamp pallet) and
+anchor the entry at the open of the first 1-second market bar at or after
+that block's time + 30 s — so every validator derives the identical entry
+price, and the miner never states one, leaving nothing to backdate or
+cherry-pick. After 24 h the timelock opens; validators verify
 the plaintext hashes to the on-chain commitment and grade it walk-forward on
 1-minute candles: first touch of TP wins, first touch of SL loses,
 both-in-one-candle loses, no touch within the horizon is a wash. Emissions are
@@ -105,14 +108,23 @@ retroactively changes an in-flight signal.
 
 ## Running a validator
 
+> **⚠️ Market-data subscription required.** Running/scoring requires a **paid
+> [Massive](https://massive.com) (formerly Polygon.io) subscription** covering
+> **both the Currencies feed (forex + metals) and the Crypto feed**, with
+> intraday aggregates — the validator pulls **1-second bars** for entry
+> anchoring and **1-minute bars** for TP/SL touch grading, across the full
+> 38-asset board on every poll cycle. The free tier (5 req/min, end-of-day
+> data) cannot grade signals; without a sufficient plan your validator will
+> leave signals stuck `pending` and your weights will diverge from consensus.
+
 ```bash
-export POLYGON_API_KEY=…           # needs 1-minute aggs (crypto + forex)
+export POLYGON_API_KEY=…           # Massive (formerly Polygon) API key — see above
 python neurons/validator.py --wallet.name myvali --wallet.hotkey vali
 ```
 
 State lives in `~/.sn89/validator.db` (SQLite). Grading is deterministic —
 same chain + same market data ⇒ same weights — so validators converge without
-coordination.
+coordination. Entry timing design rationale: `docs/entry-timing.md`.
 
 ## FAQ
 

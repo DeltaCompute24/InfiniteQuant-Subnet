@@ -45,6 +45,43 @@ def decode_commitment(data: str) -> dict | None:
     return {"commit": commit_hex, "round": int(rnd), "url_tag": tag}
 
 
+def _extract_raw_str(info) -> str | None:
+    """Pull the raw commitment string out of a CommitmentOf `info` struct.
+
+    Storage shape: Registration{ deposit, block, info: { fields: [[{"Raw70":
+    "0x736e38..."}]] } } — the Raw<N> variant name and nesting depth vary by
+    SDK version, so walk the structure and hex-decode the first Raw* leaf.
+    """
+    if isinstance(info, str):
+        return info
+    if isinstance(info, dict):
+        for k, v in info.items():
+            if isinstance(k, str) and k.startswith("Raw"):
+                if isinstance(v, str):
+                    h = v[2:] if v.startswith("0x") else v
+                    try:
+                        return bytes.fromhex(h).decode()
+                    except (ValueError, UnicodeDecodeError):
+                        return None
+                if isinstance(v, (bytes, bytearray)):
+                    return bytes(v).decode(errors="replace")
+                if isinstance(v, (list, tuple)):  # tuple-of-ints encoding
+                    try:
+                        return bytes(v).decode(errors="replace")
+                    except (ValueError, TypeError):
+                        return None
+            else:
+                r = _extract_raw_str(v)
+                if r is not None:
+                    return r
+    if isinstance(info, (list, tuple)):
+        for item in info:
+            r = _extract_raw_str(item)
+            if r is not None:
+                return r
+    return None
+
+
 class Chain:
     def __init__(self, network: str | None = None, netuid: int | None = None):
         self.netuid = netuid if netuid is not None else config.NETUID
@@ -60,11 +97,10 @@ class Chain:
         """{hotkey: decoded_commitment} for every hotkey with a valid sn89 commitment.
 
         NOTE: subtensor stores ONE commitment per hotkey (latest wins), so the
-        validator must poll every block-ish and journal what it sees — the
-        journal of (hotkey, commit, first_seen_block) is the canonical T0
-        record, exactly like MANTIS arrival logging. get_all_commitments
-        returns the current map; CommitmentOf storage can be queried at a
-        specific block hash for backfill.
+        validator must poll every block-ish and journal what it sees. T0 is the
+        commitment's INCLUSION block — use read_all_commitments_with_block()
+        (which carries `commit_block` from raw storage) for ingestion; this
+        SDK-decoded variant remains for tools that only need the payload.
         """
         out: dict[str, dict] = {}
         try:
@@ -78,14 +114,43 @@ class Chain:
                 out[hotkey] = dec
         return out
 
+    def read_all_commitments_with_block(self) -> dict[str, dict]:
+        """Like read_all_commitments, but sourced from raw CommitmentOf storage
+        so each entry carries `commit_block` — the exact inclusion block of the
+        latest set_commitment (docs/entry-timing.md §2.1).
+
+        commit_block is consensus-exact: every validator reads the identical
+        value regardless of poll phase, so T0 (and the entry price derived from
+        it) is identical across validators. The bittensor SDK's
+        get_all_commitments() strips this field, hence the raw query_map.
+        """
+        out: dict[str, dict] = {}
+        qm = self.st.substrate.query_map("Commitments", "CommitmentOf", [self.netuid])
+        for hotkey, reg in qm:
+            v = reg.value if hasattr(reg, "value") else reg
+            if not isinstance(v, dict):
+                continue
+            data = _extract_raw_str(v.get("info"))
+            dec = decode_commitment(data) if data else None
+            if not dec:
+                continue
+            hk = hotkey.value if hasattr(hotkey, "value") else str(hotkey)
+            dec["hotkey"] = hk
+            dec["commit_block"] = int(v.get("block") or 0)
+            out[hk] = dec
+        return out
+
     def current_block(self) -> int:
         return self.st.get_current_block()
 
+    def block_time_ms(self, block: int) -> int:
+        """Millisecond timestamp of a block via the chain's Timestamp pallet."""
+        bh = self.st.get_block_hash(block)
+        return int(self.st.substrate.query("Timestamp", "Now", block_hash=bh).value)
+
     def block_time_unix(self, block: int) -> float:
         """Timestamp of a block via the chain's Timestamp pallet."""
-        bh = self.st.get_block_hash(block)
-        ts_ms = self.st.substrate.query("Timestamp", "Now", block_hash=bh).value
-        return ts_ms / 1000.0
+        return self.block_time_ms(block) / 1000.0
 
     # ── weights ──────────────────────────────────────────────────────────────
     def set_weights(self, wallet: "bt.Wallet", uids: list[int], weights: list[float]) -> bool:

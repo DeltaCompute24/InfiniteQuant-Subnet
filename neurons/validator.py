@@ -2,9 +2,10 @@
 """SN89 Signals validator.
 
 Loop (every POLL_INTERVAL_S):
-  1. INGEST    — read all sn89 commitments; journal NEW (hotkey, commit) pairs
-                 with first_seen_block (canonical T0); fetch + store ciphertext
-                 blobs whose url_tag matches.
+  1. INGEST    — read all sn89 commitments (raw CommitmentOf storage, which
+                 carries the exact inclusion block = canonical T0); journal NEW
+                 (hotkey, commit) pairs; fetch + store ciphertext blobs whose
+                 url_tag matches.
   2. REVEAL    — for journaled rows whose drand round has matured: fetch the
                  round signature, decrypt W_time, verify SHA256(pt) == commit
                  and the round window (§5); parse + structurally validate.
@@ -38,8 +39,10 @@ CREATE TABLE IF NOT EXISTS signals (
   hotkey       TEXT NOT NULL,
   round        INTEGER NOT NULL,
   url_tag      TEXT NOT NULL,
-  first_seen_block INTEGER NOT NULL,
+  first_seen_block INTEGER NOT NULL,   -- observational: block our poll saw it
+  commit_block INTEGER,                -- consensus-exact: inclusion block of set_commitment
   t0_unix      REAL NOT NULL,
+  t0_ms        INTEGER,                -- ms-precise T0 from commit_block's Timestamp pallet
   blob_json    TEXT,
   plaintext    TEXT,
   status       TEXT NOT NULL DEFAULT 'sealed',
@@ -67,24 +70,38 @@ class Validator:
         os.makedirs(os.path.dirname(config.DB_PATH), exist_ok=True)
         self.db = sqlite3.connect(config.DB_PATH)
         self.db.executescript(SCHEMA)
+        self._migrate()
         self.tlock = Timelock(config.DRAND_PUBLIC_KEY)
         self._last_weights_block = 0
+
+    def _migrate(self):
+        """Additive column migration for DBs created before commit_block/t0_ms."""
+        cols = {r[1] for r in self.db.execute("PRAGMA table_info(signals)")}
+        for col, decl in (("commit_block", "INTEGER"), ("t0_ms", "INTEGER")):
+            if col not in cols:
+                self.db.execute(f"ALTER TABLE signals ADD COLUMN {col} {decl}")
+        self.db.commit()
 
     # ── 1. ingest ────────────────────────────────────────────────────────────
     def ingest(self):
         block = self.ch.current_block()
-        commits = self.ch.read_all_commitments()
+        commits = self.ch.read_all_commitments_with_block()
         now = time.time()
         for hk, c in commits.items():
             row = self.db.execute(
                 "SELECT 1 FROM signals WHERE commit_hex=?", (c["commit"],)).fetchone()
             if row:
                 continue
-            t0 = self.ch.block_time_unix(block)  # first-seen block ≈ T0 (poll ≤30s lag)
+            # T0 = the commitment's true inclusion block (docs/entry-timing.md
+            # §2.1) — consensus-exact, identical on every validator regardless
+            # of poll phase. first_seen_block stays as an observation log.
+            commit_block = c["commit_block"] or block
+            t0_ms = self.ch.block_time_ms(commit_block)
             self.db.execute(
                 "INSERT OR IGNORE INTO signals (commit_hex,hotkey,round,url_tag,"
-                "first_seen_block,t0_unix) VALUES (?,?,?,?,?,?)",
-                (c["commit"], hk, c["round"], c["url_tag"], block, t0))
+                "first_seen_block,commit_block,t0_unix,t0_ms) VALUES (?,?,?,?,?,?,?,?)",
+                (c["commit"], hk, c["round"], c["url_tag"], block, commit_block,
+                 t0_ms / 1000.0, t0_ms))
             self.db.execute(
                 "INSERT OR IGNORE INTO hotkey_meta (hotkey, first_seen_unix) VALUES (?,?)",
                 (hk, now))
@@ -185,11 +202,12 @@ class Validator:
 
         # touch-grade whatever survives and isn't decisive yet
         now_ms = int(time.time() * 1000)
-        for commit_hex, hk, t0, pt in self.db.execute(
-                "SELECT commit_hex, hotkey, t0_unix, plaintext FROM signals "
-                "WHERE status IN ('revealed','pending')").fetchall():
+        for commit_hex, hk, t0_ms, pt in self.db.execute(
+                "SELECT commit_hex, hotkey, "
+                "COALESCE(t0_ms, CAST(t0_unix * 1000 AS INTEGER)), plaintext "
+                "FROM signals WHERE status IN ('revealed','pending')").fetchall():
             s = Signal.from_bytes(pt.encode())
-            g = grade(s, int(t0 * 1000), now_ms)
+            g = grade(s, t0_ms, now_ms)
             if g.status == PENDING:
                 self.db.execute("UPDATE signals SET status='pending', entry_price=? "
                                 "WHERE commit_hex=?", (g.entry_price, commit_hex))

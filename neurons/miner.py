@@ -12,8 +12,9 @@ Both paths do the same thing (§4 of SPEC):
   3. upload the blob to your public bucket
   4. set_commitment(89) with the commitment hash + round + url tag
 
-The commit BLOCK is your timestamp — your entry price is the Polygon mid ~30s
-after that block, not anything you claim. Submit means submit *now*.
+The commit BLOCK is your timestamp — your entry price is the open of the
+first 1-second market bar ~30s after that block's on-chain timestamp, not
+anything you claim. Submit means submit *now*.
 """
 from __future__ import annotations
 
