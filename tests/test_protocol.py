@@ -13,7 +13,7 @@ import os
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from sn89_signals import config, crypto, scoring
+from sn89_signals import config, crypto, polygon, scoring
 from sn89_signals.grader import LOST, PENDING, WASHED, WON, grade
 from sn89_signals.schema import Signal, ValidationError, validate
 
@@ -168,6 +168,57 @@ class TestGrader:
         """Submission #78 lesson: the wick IS the fill."""
         g = self._grade("LONG", _bars((self.T0 + 60_000, 100, 101.5, 100, 100.1)))
         assert g.status == WON  # high exactly at tp → touched
+
+
+# ── bad-tick sanitization (HYPE 2026-06-06 lesson) ───────────────────────────
+class TestSanitize:
+    """A lone off-market print must not trigger TP or SL; a real move
+    corroborated by the second feed (Hyperliquid) must stand."""
+    T = 1_700_000_000_000
+    # body ~58, one +6.2% rogue wick on the middle candle (the real incident)
+    SPIKE = _bars((T,           58.00, 58.10, 57.90, 58.05),
+                  (T + 60_000,  58.05, 61.67, 58.00, 58.02),   # rogue high
+                  (T + 120_000, 58.02, 58.12, 57.95, 58.08))
+
+    def test_uncorroborated_spike_clamped(self):
+        out = polygon.sanitize_minute_bars("HYPEUSD", "crypto", self.SPIKE,
+                                           hl_fetch=lambda *a: None)
+        assert out[1]["h"] == pytest.approx(58.12)  # clamped to ref (neighbours' max)
+        assert out[1]["l"] == self.SPIKE[1]["l"]    # untouched side preserved
+
+    def test_hl_corroborated_spike_stands(self):
+        hl = {self.T + 60_000: {"h": 61.70, "l": 57.99}}
+        out = polygon.sanitize_minute_bars("HYPEUSD", "crypto", self.SPIKE,
+                                           hl_fetch=lambda *a: hl)
+        assert out[1]["h"] == 61.67                 # HL reached it — real move
+
+    def test_non_crypto_never_appeals(self):
+        called = []
+        out = polygon.sanitize_minute_bars("XAUUSD", "forex-commodities", self.SPIKE,
+                                           hl_fetch=lambda *a: called.append(1))
+        assert not called and out[1]["h"] == pytest.approx(58.12)
+
+    def test_normal_wicks_untouched(self):
+        bars = _bars((self.T, 100, 100.5, 99.6, 100.2),
+                     (self.T + 60_000, 100.2, 100.9, 99.9, 100.6),
+                     (self.T + 120_000, 100.6, 101.0, 100.1, 100.8))
+        assert polygon.sanitize_minute_bars("BTCUSD", "crypto", bars,
+                                            hl_fetch=lambda *a: None) == bars
+
+    def test_spike_no_longer_falsely_stops_short(self):
+        """End-to-end: the rogue wick would SL a short pre-filter; post-filter
+        the trade keeps running (and here goes on to win)."""
+        s = _sig(pair="BTCUSD", direction="SHORT")        # 150bps band on 58.0
+        entry = 58.0                                       # sl 58.87 / tp 57.13
+        dirty = _bars((self.T,           58.00, 58.10, 57.90, 58.05),
+                      (self.T + 60_000,  58.05, 61.67, 58.00, 58.02),  # rogue
+                      (self.T + 120_000, 58.02, 58.12, 57.10, 57.20))  # real TP
+        g_dirty = grade(s, self.T, self.T + 3_600_000, entry_price=entry, bars=dirty)
+        assert g_dirty.status == LOST                      # the bug
+        clean = polygon.sanitize_minute_bars("BTCUSD", "crypto", dirty,
+                                             hl_fetch=lambda *a: None)
+        g_clean = grade(s, self.T, self.T + 3_600_000, entry_price=entry, bars=clean)
+        assert (g_clean.status, g_clean.exit_reason) == (WON, "tp_touch")
 
 
 # ── validity filters ─────────────────────────────────────────────────────────

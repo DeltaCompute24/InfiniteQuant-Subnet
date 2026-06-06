@@ -49,6 +49,12 @@ ENTRY_SECOND_SCAN_S = 120           # scan window for the 1-second entry bar; if
                                     # 1s bar lands in it (sparse FX/metals off-hours)
                                     # fall back to the first 1-minute bar open
 
+# ── Grading (CONSENSUS) ──────────────────────────────────────────────────────
+WICK_TOL = 0.01                     # candle extreme >1% beyond body + both
+                                    # neighbours = uncorroborated spike; clamped
+                                    # unless a second feed (Hyperliquid, crypto)
+                                    # traded the level the same minute
+
 # ── Scoring (CONSENSUS — §7 of SPEC) ─────────────────────────────────────────
 SCORE_WINDOW_S = 8 * 24 * 3600      # trailing 8 days
 QUALIFY_MIN_DECISIVE = 20           # lifetime decisive (won+lost) to qualify

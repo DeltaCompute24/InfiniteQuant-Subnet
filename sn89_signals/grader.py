@@ -2,6 +2,10 @@
 
 Grading semantics:
   * brackets fill on TOUCH of the 1-minute bar's high/low
+  * bars are bad-tick sanitized first (polygon.sanitize_minute_bars): a spike
+    wick >WICK_TOL beyond the candle body and both neighbours is clamped
+    unless a second feed (Hyperliquid, crypto only) traded the level in the
+    same minute — a single off-market print can't trigger TP or SL
   * first bar that touches either level decides
   * a single bar touching BOTH levels grades LOST (conservative)
   * no touch by horizon ⇒ WASHED (non-decisive)
@@ -51,6 +55,7 @@ def grade(sig: Signal, t0_ms: int, now_ms: int,
 
     if bars is None:
         bars = polygon.minute_aggs(sig.trade_pair, sig.asset_class, t0_ms, scan_to)
+        bars = polygon.sanitize_minute_bars(sig.trade_pair, sig.asset_class, bars)
 
     for bar in bars:
         if bar["t"] < t0_ms or bar["t"] > horizon_ms:

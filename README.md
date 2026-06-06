@@ -5,7 +5,9 @@ setups ("signals"); validators grade them walk-forward against market data and
 set weights pro-rata to winning trades among qualified miners. No participant
 can read another miner's signal until 24 hours after it is committed.
 
-## Protocol overview
+## About
+
+### How it works
 
 A miner builds a signal (pair + direction; TP/SL are fixed per-asset bands),
 encrypts it with a [drand timelock](https://drand.love) that opens 24 h later,
@@ -16,13 +18,24 @@ from on-chain storage (millisecond-precise via the Timestamp pallet) and
 anchor the entry at the open of the first 1-second market bar at or after
 that block's time + 30 s — so every validator derives the identical entry
 price, and the miner never states one, leaving nothing to backdate or
-cherry-pick. After 24 h the timelock opens; validators verify
-the plaintext hashes to the on-chain commitment and grade it walk-forward on
-1-minute candles: first touch of TP wins, first touch of SL loses,
-both-in-one-candle loses, no touch within the horizon is a wash. Emissions are
-shared pro-rata by wins over the trailing 8 days among qualified miners.
+cherry-pick.
 
-## Payload format
+After 24 h the timelock opens; validators verify the plaintext hashes to the
+on-chain commitment and grade it walk-forward on 1-minute candles: first touch
+of TP wins, first touch of SL loses, both-in-one-candle loses, no touch within
+the horizon is a wash. Emissions are shared pro-rata by wins over the trailing
+8 days among qualified miners.
+
+**A touch must be a real market price, not a glitch.** Candles are bad-tick
+sanitized before grading: a one-minute spike wick more than 1 % beyond the
+candle body and both neighbouring candles is treated as an uncorroborated
+print and clamped — unless a second independent feed (Hyperliquid, for
+crypto) traded the same level in the same minute, in which case the move was
+real and stands. A single off-market trade can never trigger your SL or TP.
+This matches how real exchange brackets fill (a median across feeds, never one
+print), so the scored result is what a live bracket would have done.
+
+### Payload format
 
 Each submission blob contains one content ciphertext and two key-wraps
 (`x25519-hkdf-sha256+chacha20poly1305+drand-tlock`):
@@ -38,7 +51,43 @@ commitment — a blob whose plaintext doesn't match its commitment is void and
 strikes the hotkey. The `W_owner` wrap is a protocol requirement; submissions
 without a valid owner wrap are not gradeable.
 
-## Quick start (miner)
+### The rules (enforced at grading — violations void the signal; resubmit)
+
+| Rule | Value |
+|---|---|
+| Max signals per UTC day | 3 per hotkey |
+| Min spacing between your signals | 4 h |
+| Cross-miner cooldown | 15 min per (pair, direction) — if any miner committed the same pair+direction in the last 15 min, later ones are void. First commit wins. |
+| TP / SL | fixed per-asset, symmetric 1:1 — see `data/signals-bands.json` |
+| Horizon | 72 h max; no touch by then = WASH (not counted) |
+| Overlap | one open signal per (pair, direction) per hotkey |
+
+Voided signals don't count against your daily quota and carry no penalty —
+with one exception: a blob that fails hash-verification or won't decrypt at
+reveal is a strike; three strikes in 30 days zeroes the hotkey for 30 days.
+
+### Scoring
+
+```
+decisive    = WON + LOST   (washes and voids never count)
+QUALIFIED   = lifetime decisive ≥ 20  AND  trailing-8d hit rate ≥ 52 %
+your weight = your trailing-8d wins / all qualified miners' trailing-8d wins
+```
+
+- **Warmup:** new hotkeys get 8 days of immunity with dust emissions — enough
+  time to put ~20 trades on the board at full cadence before scoring bites.
+- Random submissions sit below the 52 % gate and earn nothing after immunity.
+  Volume cannot substitute for hit rate.
+- If no miner qualifies, emissions burn.
+
+### Asset board
+
+38 assets: BTC/ETH/SOL/XRP/HYPE crypto, 29 forex pairs, XAU/XAG/XPT/XPD
+metals. Bands are vol-scaled and versioned in `data/signals-bands.json`;
+signals grade with the band file in force at commit time — a band update never
+retroactively changes an in-flight signal.
+
+## Running a Miner
 
 ```bash
 git clone https://github.com/DeltaCompute24/InfiniteQuant-Subnet && cd InfiniteQuant-Subnet
@@ -68,45 +117,10 @@ curl -s localhost:8089/submit -d '{"trade_pair":"XAUUSD","direction":"SHORT"}'
 ```
 
 A successful submit prints your commitment hash, the drand reveal round, and
-the reveal time. Keep your clock NTP-synced.
+the reveal time. Keep your clock NTP-synced. Miners do **not** need a market
+data subscription — the validators price everything.
 
-## The rules (enforced at grading — violations void the signal; resubmit)
-
-| Rule | Value |
-|---|---|
-| Max signals per UTC day | 3 per hotkey |
-| Min spacing between your signals | 4 h |
-| Cross-miner cooldown | 15 min per (pair, direction) — if any miner committed the same pair+direction in the last 15 min, later ones are void. First commit wins. |
-| TP / SL | fixed per-asset, symmetric 1:1 — see `data/signals-bands.json` |
-| Horizon | 72 h max; no touch by then = WASH (not counted) |
-| Overlap | one open signal per (pair, direction) per hotkey |
-
-Voided signals don't count against your daily quota and carry no penalty —
-with one exception: a blob that fails hash-verification or won't decrypt at
-reveal is a strike; three strikes in 30 days zeroes the hotkey for 30 days.
-
-## Scoring
-
-```
-decisive    = WON + LOST   (washes and voids never count)
-QUALIFIED   = lifetime decisive ≥ 20  AND  trailing-8d hit rate ≥ 52 %
-your weight = your trailing-8d wins / all qualified miners' trailing-8d wins
-```
-
-- **Warmup:** new hotkeys get 8 days of immunity with dust emissions — enough
-  time to put ~20 trades on the board at full cadence before scoring bites.
-- Random submissions sit below the 52 % gate and earn nothing after immunity.
-  Volume cannot substitute for hit rate.
-- If no miner qualifies, emissions burn.
-
-## Asset board
-
-38 assets: BTC/ETH/SOL/XRP/HYPE crypto, 29 forex pairs, XAU/XAG/XPT/XPD
-metals. Bands are vol-scaled and versioned in `data/signals-bands.json`;
-signals grade with the band file in force at commit time — a band update never
-retroactively changes an in-flight signal.
-
-## Running a validator
+## Running a Validator
 
 > **⚠️ Market-data subscription required.** Running/scoring requires a **paid
 > [Massive](https://massive.com) (formerly Polygon.io) subscription** covering
@@ -124,7 +138,9 @@ python neurons/validator.py --wallet.name myvali --wallet.hotkey vali
 
 State lives in `~/.sn89/validator.db` (SQLite). Grading is deterministic —
 same chain + same market data ⇒ same weights — so validators converge without
-coordination. Entry timing design rationale: `docs/entry-timing.md`.
+coordination. Crypto bad-tick corroboration additionally queries Hyperliquid's
+public candle API (no key needed). Entry timing design rationale:
+`docs/entry-timing.md`.
 
 ## FAQ
 
