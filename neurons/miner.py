@@ -1,12 +1,19 @@
 #!/usr/bin/env python3
 """SN89 Signals miner.
 
-Two modes:
+Three modes:
   * CLI one-shot:   python neurons/miner.py submit --pair BTCUSD --direction LONG
-  * REST intake:    python neurons/miner.py serve --port 8089
+  * REST intake:    python neurons/miner.py serve --port 8089 [--host 0.0.0.0]
                     POST /submit {"trade_pair": "BTCUSD", "direction": "LONG"}
+                    (set SN89_INTAKE_TOKEN to require Authorization: Bearer …)
+  * IQ follow:      python neurons/miner.py follow
+                    Long-polls the IQ Signals feed for calls you submitted via
+                    the Telegram Signals Bot / Chrome extension and auto-commits
+                    them with YOUR local hotkey (non-custodial — keys never
+                    leave this box). DM /miner to the Signals Bot for a token,
+                    then set SN89_FEED_TOKEN.
 
-Both paths do the same thing (§4 of SPEC):
+All paths do the same thing (§4 of SPEC):
   1. build + validate the Signal (band/tp/sl come from the board file)
   2. dual-encrypt (tlock to T+24h round, owner X25519)
   3. upload the blob to your public bucket
@@ -114,11 +121,18 @@ def cmd_serve(args) -> int:
     w = _wallet(args)
     hotkey = w.hotkey.ss58_address
     ch = chain.Chain()
+    token = os.getenv("SN89_INTAKE_TOKEN", "")
+    if args.host != "127.0.0.1" and not token:
+        print("REFUSING to bind a public interface without SN89_INTAKE_TOKEN set "
+              "— anyone could burn your 3 daily submissions.", file=sys.stderr)
+        return 1
 
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):
             if self.path != "/submit":
                 return self._reply(404, {"error": "POST /submit"})
+            if token and self.headers.get("Authorization", "") != f"Bearer {token}":
+                return self._reply(401, {"error": "bad or missing bearer token"})
             try:
                 body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
                 sig = build_signal(hotkey, body["trade_pair"], body["direction"],
@@ -141,9 +155,75 @@ def cmd_serve(args) -> int:
         def log_message(self, fmt, *a):  # quiet
             pass
 
-    print(f"SN89 miner REST intake on 127.0.0.1:{args.port} (hotkey {hotkey})")
-    HTTPServer(("127.0.0.1", args.port), Handler).serve_forever()
+    auth = "bearer-auth" if token else "no auth (localhost only)"
+    print(f"SN89 miner REST intake on {args.host}:{args.port} (hotkey {hotkey}, {auth})")
+    HTTPServer((args.host, args.port), Handler).serve_forever()
     return 0
+
+
+def cmd_follow(args) -> int:
+    """Mirror your own IQ Signals calls (Telegram bot / Chrome extension) onto
+    SN89 with your local hotkey.
+
+    Non-custodial: the IQ platform only tells you WHAT you submitted; the
+    signing wallet, the timelock encryption, and the on-chain commitment all
+    happen here. The feed is token-scoped to your own calls — you can never
+    see (or mine) another trader's signal.
+    """
+    import requests
+
+    w = _wallet(args)
+    hotkey = w.hotkey.ss58_address
+    ch = chain.Chain()
+    feed = args.feed or os.getenv("SN89_FEED_URL",
+                                  "https://partner.infinitequant.app/api/sn89/feed")
+    token = os.getenv("SN89_FEED_TOKEN", "")
+    if not token:
+        print("SN89_FEED_TOKEN not set — DM /miner to the IQ Signals Bot to get one.",
+              file=sys.stderr)
+        return 1
+
+    state_path = os.path.expanduser("~/.sn89/follow_state.json")
+    os.makedirs(os.path.dirname(state_path), exist_ok=True)
+    try:
+        with open(state_path, encoding="utf-8") as fh:
+            state = json.load(fh)
+    except (FileNotFoundError, ValueError):
+        state = {"last_id": 0}
+
+    print(f"SN89 follow: {feed} → hotkey {hotkey} (after id {state['last_id']}, "
+          f"poll {args.interval}s)")
+    while True:
+        try:
+            r = requests.get(feed, params={"after_id": state["last_id"]},
+                             headers={"Authorization": f"Bearer {token}"}, timeout=10)
+            if r.status_code == 401:
+                print("feed: token rejected — re-issue with /miner in the Signals Bot",
+                      file=sys.stderr)
+                return 1
+            calls = r.json().get("signals", []) if r.status_code == 200 else []
+            for c in sorted(calls, key=lambda x: x["id"]):
+                try:
+                    sig = build_signal(hotkey, c["asset"], c["direction"],
+                                       c.get("horizon_hours"),
+                                       f"iq-follow:{c['id']}")
+                    res = submit(w, sig, ch)
+                    print(f"  ↗ #{c['id']} {c['direction']} {c['asset']} → "
+                          f"commit {res['commitment'][:12]}… ok={res['ok']}")
+                except ValidationError as e:
+                    print(f"  ✗ #{c['id']} skipped: {e}")
+                except Exception as e:  # noqa: BLE001 — keep following on transient errors
+                    print(f"  ✗ #{c['id']} error: {e}", file=sys.stderr)
+                    break  # retry this id next poll
+                else:
+                    state["last_id"] = max(state["last_id"], c["id"])
+                    with open(state_path, "w", encoding="utf-8") as fh:
+                        json.dump(state, fh)
+        except KeyboardInterrupt:
+            return 0
+        except Exception as e:  # noqa: BLE001
+            print(f"  feed poll error: {e}", file=sys.stderr)
+        time.sleep(args.interval)
 
 
 def main() -> int:
@@ -161,7 +241,15 @@ def main() -> int:
 
     pv = sub.add_parser("serve", help="run REST intake")
     pv.add_argument("--port", type=int, default=8089)
+    pv.add_argument("--host", default="127.0.0.1",
+                    help="bind address; non-localhost requires SN89_INTAKE_TOKEN")
     pv.set_defaults(fn=cmd_serve)
+
+    pf = sub.add_parser("follow", help="mirror your IQ Signals bot/extension calls")
+    pf.add_argument("--feed", default=None,
+                    help="feed URL (default SN89_FEED_URL or the IQ endpoint)")
+    pf.add_argument("--interval", type=int, default=5, help="poll seconds")
+    pf.set_defaults(fn=cmd_follow)
 
     args = p.parse_args()
     return args.fn(args)

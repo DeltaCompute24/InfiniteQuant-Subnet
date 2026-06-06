@@ -89,6 +89,8 @@ retroactively changes an in-flight signal.
 
 ## Running a Miner
 
+### Setup (all interfaces)
+
 ```bash
 git clone https://github.com/DeltaCompute24/InfiniteQuant-Subnet && cd InfiniteQuant-Subnet
 python3.10 -m venv .venv && . .venv/bin/activate     # timelock wheel requires 3.10
@@ -102,23 +104,59 @@ export SN89_R2_ENDPOINT=https://<account>.r2.cloudflarestorage.com
 export SN89_R2_BUCKET=<bucket>
 export SN89_R2_ACCESS_KEY_ID=… SN89_R2_SECRET_ACCESS_KEY=…
 export SN89_R2_PUBLIC_BASE=https://<public-bucket-host>
-
-# 3. submit
-python neurons/miner.py --wallet.name mywallet --wallet.hotkey miner \
-    submit --pair BTCUSD --direction LONG
 ```
 
-Or run the REST intake and POST from your own stack (TradingView webhook,
-your bot, anything):
+A successful submit (on any interface) prints your commitment hash, the drand
+reveal round, and the reveal time. Keep your clock NTP-synced. Miners do
+**not** need a market data subscription — the validators price everything.
+
+### Interface 1 — Telegram Signals Bot / Chrome extension (`follow` mode)
+
+Already trading in the IQ Signals program? Keep submitting exactly as you do
+today — through the Telegram bot or the IQ Copilot Chrome extension — and
+mirror your own calls onto SN89 automatically. DM `/miner` to the Signals Bot
+for a feed token, then run:
+
+```bash
+export SN89_FEED_TOKEN=<token from /miner>
+python neurons/miner.py --wallet.name mywallet --wallet.hotkey miner follow
+```
+
+The follower long-polls a feed of **your own submissions only** and commits
+each one with your local hotkey the moment it appears. Non-custodial by
+construction: the platform never sees your keys, and the token can't read
+anyone else's calls — so the subnet's no-copy-before-reveal property holds.
+The program's submission rules (3 calls/day, ≥ 4 h apart) match the subnet's
+consensus rules exactly, so every bot call is SN89-legal.
+
+### Interface 2 — REST API (`serve` mode)
+
+Run the intake and POST from your own stack (TradingView webhook, your bot,
+anything):
 
 ```bash
 python neurons/miner.py --wallet.name mywallet --wallet.hotkey miner serve --port 8089
 curl -s localhost:8089/submit -d '{"trade_pair":"XAUUSD","direction":"SHORT"}'
 ```
 
-A successful submit prints your commitment hash, the drand reveal round, and
-the reveal time. Keep your clock NTP-synced. Miners do **not** need a market
-data subscription — the validators price everything.
+To expose it beyond localhost, set a bearer token and bind the interface
+(the server refuses a public bind without one):
+
+```bash
+export SN89_INTAKE_TOKEN=<long random string>
+python neurons/miner.py --wallet.name mywallet --wallet.hotkey miner \
+    serve --host 0.0.0.0 --port 8089
+curl -s https://<your-host>:8089/submit \
+    -H "Authorization: Bearer $SN89_INTAKE_TOKEN" \
+    -d '{"trade_pair":"XAUUSD","direction":"SHORT"}'
+```
+
+### Interface 3 — CLI one-shot
+
+```bash
+python neurons/miner.py --wallet.name mywallet --wallet.hotkey miner \
+    submit --pair BTCUSD --direction LONG
+```
 
 ## Running a Validator
 
