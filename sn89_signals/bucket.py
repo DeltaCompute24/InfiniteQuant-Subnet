@@ -26,11 +26,30 @@ def blob_url(hotkey: str, nonce: str, base: str | None = None) -> str:
     return f"{base}/{hotkey}/{nonce}.json"
 
 
+def _relay_upload(blob: dict, hotkey: str, nonce: str) -> str:
+    """POST the blob to the owner-hosted relay; returns the public URL it
+    serves. Transport-only — the blob is already encrypted and the relay
+    can't read or forge it (integrity is the on-chain commitment)."""
+    r = requests.post(
+        config.RELAY_URL,
+        headers={"Authorization": f"Bearer {config.RELAY_TOKEN}"},
+        json={"hotkey": hotkey, "nonce": nonce, "blob": blob},
+        timeout=10,
+    )
+    if r.status_code != 200:
+        raise RuntimeError(f"relay upload failed: HTTP {r.status_code} {r.text[:200]}")
+    url = r.json().get("url")
+    if not url:
+        raise RuntimeError("relay upload: no url in response")
+    return url
+
+
 def upload(blob: dict, hotkey: str, nonce: str) -> str:
     """Upload a blob; returns its public URL.
 
-    Local mode (SN89_BLOB_DIR set): writes to disk for a co-located static
-    server. Otherwise S3/R2 via SN89_R2_* env.
+    Transport precedence: local disk (SN89_BLOB_DIR, testnet) → your own S3/R2
+    (SN89_R2_* creds) → owner-hosted relay (SN89_RELAY_TOKEN / feed token). The
+    relay is the zero-setup fallback for traders without a bucket.
     """
     if BLOB_DIR:
         d = os.path.join(BLOB_DIR, hotkey)
@@ -38,6 +57,8 @@ def upload(blob: dict, hotkey: str, nonce: str) -> str:
         with open(os.path.join(d, f"{nonce}.json"), "w", encoding="utf-8") as fh:
             json.dump(blob, fh, separators=(",", ":"))
         return blob_url(hotkey, nonce)
+    if not config.R2_ACCESS_KEY_ID and config.RELAY_TOKEN:
+        return _relay_upload(blob, hotkey, nonce)
     import boto3  # lazy — validators never need it
 
     s3 = boto3.client(
@@ -60,6 +81,8 @@ def update_index(hotkey: str, nonce: str, keep: int = 200) -> None:
     """Append nonce to {hotkey}/index.json (validators/owner discover blobs
     through this listing, then verify via the on-chain url_tag — the index is
     untrusted convenience, not integrity)."""
+    if not config.R2_ACCESS_KEY_ID and config.RELAY_TOKEN:
+        return  # relay maintains the index server-side on each blob POST
     if BLOB_DIR:
         d = os.path.join(BLOB_DIR, hotkey)
         os.makedirs(d, exist_ok=True)

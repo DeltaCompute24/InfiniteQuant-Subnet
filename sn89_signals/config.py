@@ -97,16 +97,32 @@ def polygon_ticker(asset: str, asset_class: str) -> str:
     return f"C:{asset}"  # forex + forex-commodities (metals)
 
 
-# ── R2 / bucket layout ───────────────────────────────────────────────────────
-# Miners host blobs at any HTTPS URL they control; the recommended (and the
-# reference-miner default) layout is a public R2/S3 bucket:
+# ── Blob transport ───────────────────────────────────────────────────────────
+# Miners host blobs at any HTTPS URL they control; the layout is always
 #   {base}/{hotkey}/{nonce}.json
-# The on-chain commitment carries the blob hash, so the transport is untrusted.
-R2_PUBLIC_BASE = os.getenv("SN89_R2_PUBLIC_BASE", "")
+# and the on-chain commitment carries the blob hash, so the transport is
+# untrusted. Three ways to serve, in order of how little setup they need:
+#
+#   1. Owner-hosted relay (zero setup) — push the encrypted blob through the IQ
+#      relay with your /miner feed token; it serves it at the default base
+#      below. Keys never leave your box; the relay can't read or forge a signal.
+#   2. Your own S3/R2 bucket — set the SN89_R2_* creds below.
+#   3. Local disk + any static server — set SN89_BLOB_DIR (testnet soaks).
+#
+# R2_PUBLIC_BASE defaults to the relay so validators discover relay-hosted
+# miners (the common case) with no config; self-hosters override it.
+R2_PUBLIC_BASE = os.getenv("SN89_R2_PUBLIC_BASE",
+                           "https://partner.infinitequant.app/sn89/blob")
 R2_ENDPOINT = os.getenv("SN89_R2_ENDPOINT", "")        # s3 api endpoint (miner upload)
 R2_BUCKET = os.getenv("SN89_R2_BUCKET", "")
 R2_ACCESS_KEY_ID = os.getenv("SN89_R2_ACCESS_KEY_ID", "")
 R2_SECRET_ACCESS_KEY = os.getenv("SN89_R2_SECRET_ACCESS_KEY", "")
+
+# Owner-hosted relay (option 1). Active when a token is present; the feed token
+# from /miner doubles as the relay token, so `follow` mode needs no bucket.
+RELAY_URL = os.getenv("SN89_RELAY_URL",
+                      "https://partner.infinitequant.app/api/sn89/blob")
+RELAY_TOKEN = os.getenv("SN89_RELAY_TOKEN", "") or os.getenv("SN89_FEED_TOKEN", "")
 
 # ── Validator runtime ────────────────────────────────────────────────────────
 POLL_INTERVAL_S = 30

@@ -89,26 +89,43 @@ retroactively changes an in-flight signal.
 
 ## Running a Miner
 
-### Setup (all interfaces)
+### Setup (once)
 
 ```bash
 git clone https://github.com/DeltaCompute24/InfiniteQuant-Subnet && cd InfiniteQuant-Subnet
 python3.10 -m venv .venv && . .venv/bin/activate     # timelock wheel requires 3.10
 pip install -r requirements.txt
 
-# 1. a registered hotkey on netuid 89
+# a registered hotkey on netuid 89
 btcli subnet register --netuid 89 --wallet.name mywallet --wallet.hotkey miner
-
-# 2. a public bucket for your ciphertext blobs (any S3-compatible host)
-export SN89_R2_ENDPOINT=https://<account>.r2.cloudflarestorage.com
-export SN89_R2_BUCKET=<bucket>
-export SN89_R2_ACCESS_KEY_ID=… SN89_R2_SECRET_ACCESS_KEY=…
-export SN89_R2_PUBLIC_BASE=https://<public-bucket-host>
 ```
 
 A successful submit (on any interface) prints your commitment hash, the drand
 reveal round, and the reveal time. Keep your clock NTP-synced. Miners do
 **not** need a market data subscription — the validators price everything.
+
+### Where your blobs are served (pick one)
+
+Your signal is encrypted locally and served at a public URL so validators can
+fetch it; the transport is untrusted (integrity is the on-chain commitment),
+so it doesn't matter where it lives. In order of least setup:
+
+1. **Owner-hosted relay (default — zero setup).** Push the already-encrypted
+   blob through the IQ relay with your `/miner` feed token; we serve it for
+   you. **No bucket, no server, no extra keys.** We can't read it (it's
+   drand-timelocked 24 h and bound to your hotkey) and can't forge one (the
+   on-chain hash only matches a blob your key produced). Active automatically
+   whenever `SN89_FEED_TOKEN` / `SN89_RELAY_TOKEN` is set and no bucket creds
+   are present.
+2. **Your own S3/R2 bucket.** Set the creds and the miner uploads there:
+   ```bash
+   export SN89_R2_ENDPOINT=https://<account>.r2.cloudflarestorage.com
+   export SN89_R2_BUCKET=<bucket>
+   export SN89_R2_ACCESS_KEY_ID=… SN89_R2_SECRET_ACCESS_KEY=…
+   export SN89_R2_PUBLIC_BASE=https://<public-bucket-host>
+   ```
+3. **Local disk + any static server** (testnet soaks): `export SN89_BLOB_DIR=…`
+   and serve it at `SN89_R2_PUBLIC_BASE`.
 
 ### Interface 1 — Telegram Signals Bot / Chrome extension (`follow` mode)
 
@@ -122,10 +139,12 @@ export SN89_FEED_TOKEN=<token from /miner>
 python neurons/miner.py --wallet.name mywallet --wallet.hotkey miner follow
 ```
 
-The follower long-polls a feed of **your own submissions only** and commits
-each one with your local hotkey the moment it appears. Non-custodial by
-construction: the platform never sees your keys, and the token can't read
-anyone else's calls — so the subnet's no-copy-before-reveal property holds.
+That one token is all you need — it scopes the feed to your own calls **and**
+authorizes the blob relay, so there's no bucket to set up. The follower
+long-polls a feed of **your own submissions only** and commits each one with
+your local hotkey the moment it appears. Non-custodial by construction: the
+platform never sees your keys, and the token can't read anyone else's calls —
+so the subnet's no-copy-before-reveal property holds.
 The program's submission rules (3 calls/day, ≥ 4 h apart) match the subnet's
 consensus rules exactly, so every bot call is SN89-legal.
 

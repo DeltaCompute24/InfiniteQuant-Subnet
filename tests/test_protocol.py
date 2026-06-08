@@ -13,7 +13,7 @@ import os
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from sn89_signals import config, crypto, polygon, scoring
+from sn89_signals import bucket, config, crypto, polygon, scoring
 from sn89_signals.grader import LOST, PENDING, WASHED, WON, grade
 from sn89_signals.schema import Signal, ValidationError, validate
 
@@ -219,6 +219,50 @@ class TestSanitize:
                                              hl_fetch=lambda *a: None)
         g_clean = grade(s, self.T, self.T + 3_600_000, entry_price=entry, bars=clean)
         assert (g_clean.status, g_clean.exit_reason) == (WON, "tp_touch")
+
+
+# ── blob relay transport ─────────────────────────────────────────────────────
+class TestRelay:
+    BLOB = {"C": "deadbeef", "W_time": "x", "W_owner": "y"}
+
+    def test_relay_upload_posts_and_returns_url(self, monkeypatch):
+        sent = {}
+
+        class _Resp:
+            status_code = 200
+            def json(self):
+                return {"ok": True,
+                        "url": "https://relay.example/sn89/blob/5HK/n1.json"}
+
+        def _post(url, headers=None, json=None, timeout=None):
+            sent.update(url=url, headers=headers, body=json)
+            return _Resp()
+
+        monkeypatch.setattr(bucket.requests, "post", _post)
+        monkeypatch.setattr(config, "RELAY_TOKEN", "tok123")
+        monkeypatch.setattr(config, "RELAY_URL", "https://relay.example/api/sn89/blob")
+        url = bucket._relay_upload(self.BLOB, "5HK", "n1")
+        assert url == "https://relay.example/sn89/blob/5HK/n1.json"
+        assert sent["headers"]["Authorization"] == "Bearer tok123"
+        assert sent["body"] == {"hotkey": "5HK", "nonce": "n1", "blob": self.BLOB}
+
+    def test_upload_prefers_relay_when_no_bucket_creds(self, monkeypatch):
+        monkeypatch.setattr(bucket, "BLOB_DIR", "")
+        monkeypatch.setattr(config, "R2_ACCESS_KEY_ID", "")
+        monkeypatch.setattr(config, "RELAY_TOKEN", "tok")
+        called = {}
+        def _fake(b, h, n):
+            called["hit"] = (h, n)
+            return "u"
+        monkeypatch.setattr(bucket, "_relay_upload", _fake)
+        assert bucket.upload(self.BLOB, "5HK", "n2") == "u"
+        assert called["hit"] == ("5HK", "n2")
+
+    def test_update_index_noop_in_relay_mode(self, monkeypatch):
+        monkeypatch.setattr(config, "R2_ACCESS_KEY_ID", "")
+        monkeypatch.setattr(config, "RELAY_TOKEN", "tok")
+        # would raise if it tried boto3/disk; relay mode returns immediately
+        assert bucket.update_index("5HK", "n3") is None
 
 
 # ── validity filters ─────────────────────────────────────────────────────────
