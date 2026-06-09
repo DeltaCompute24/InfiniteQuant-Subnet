@@ -87,6 +87,55 @@ metals. Bands are vol-scaled and versioned in `data/signals-bands.json`;
 signals grade with the band file in force at commit time — a band update never
 retroactively changes an in-flight signal.
 
+## Testnet (netuid 496)
+
+Rehearse a miner or validator against the live test network before touching
+mainnet — same code, same protocol, free TAO, no risk. The chain target is
+env-driven, so **every command below works on testnet by exporting two
+variables**:
+
+```bash
+export SN89_NETWORK=test      # Bittensor test network (default: finney)
+export SN89_NETUID=496        # SN89 on testnet      (default: 89)
+```
+
+### Register a testnet hotkey
+
+Testnet TAO is free from the faucet; then register on netuid 496:
+
+```bash
+btcli wallet faucet  --wallet.name mywallet --subtensor.network test
+btcli subnet register --netuid 496 --wallet.name mywallet --wallet.hotkey miner \
+    --subtensor.network test
+```
+
+### Run a testnet miner
+
+Any of the three interfaces below works unchanged — just keep the two env vars
+set. The owner-hosted relay serves your blobs on testnet too (zero setup), or
+use local disk for a fully self-contained soak:
+
+```bash
+export SN89_NETWORK=test SN89_NETUID=496
+export SN89_BLOB_DIR=$HOME/.sn89/blobs SN89_R2_PUBLIC_BASE=http://<your-host>:8799
+python neurons/miner.py --wallet.name mywallet --wallet.hotkey miner \
+    submit --pair BTCUSD --direction LONG
+```
+
+### Run a testnet validator
+
+Grading is real market data even on testnet, so a Massive/Polygon key is still
+required (see the validator section below):
+
+```bash
+export SN89_NETWORK=test SN89_NETUID=496 POLYGON_API_KEY=…
+python neurons/validator.py --wallet.name myvali --wallet.hotkey vali
+```
+
+> **Reveal delay is protocol-level.** Signals are drand-timelocked, so a commit
+> is graded ~24 h after it lands — the same on testnet as mainnet. A fresh
+> testnet miner shows dust weight until its first revealed signals grade.
+
 ## Running a Miner
 
 ### Setup (once)
