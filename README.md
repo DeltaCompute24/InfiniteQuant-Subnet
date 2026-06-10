@@ -90,10 +90,18 @@ trailing hit < 40 % over ≥10 decisive  → ELIMINATED: collateral burned,
   (after ≥20 lifetime decisive)          hotkey zeroed permanently
 ```
 
-- Deposit moves alpha to the subnet vault via a coldkey-signed
-  `transfer_stake`; balances are public on the EVM ledger
-  (`contracts/Collateral.sol`) and every slash is paired with an on-chain
-  `burn_alpha`.
+- Self-serve, keys stay local:
+
+  ```bash
+  python neurons/collateral_cli.py deposit  --amount 100 --wallet.name my --wallet.hotkey my
+  python neurons/collateral_cli.py balance  --hotkey <ss58>
+  python neurons/collateral_cli.py withdraw --amount 100 --wallet.name my --hotkey <ss58>
+  ```
+
+  Deposit moves alpha to the subnet vault via a coldkey-signed
+  `transfer_stake` (the CLI signs locally and POSTs it); balances are public
+  on the EVM ledger (`contracts/Collateral.sol`) and every slash is paired
+  with an on-chain `burn_alpha`.
 - Between 40 % and 52 % you earn nothing but keep your collateral. The floor
   only destroys sustained negative edge, never a cold streak.
 - Withdrawals settle after all open signals resolve plus a 72 h cooldown.

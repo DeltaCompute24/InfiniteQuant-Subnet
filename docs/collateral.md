@@ -57,16 +57,36 @@ participant is **auditability**, not trustlessness:
 - the per-caller invariant (vault stake on your hotkey == your ledger balance)
   is checkable by the caller at any time.
 
+## Transport — self-serve HTTP API
+
+Onboarding is self-serve: `neurons/custodian.py serve` runs the collateral
+API (the owner reverse-proxies TLS in front of it) and
+`neurons/collateral_cli.py` is the miner client. No accounts — every mutating
+request is authorized by the caller's own coldkey signature.
+
+| endpoint | auth | does |
+|---|---|---|
+| `GET /collateral/info` | — | vault coldkey, netuid, minimum, contract |
+| `GET /collateral/balance/{hotkey}` | — | ledger read (also world-readable on-chain) |
+| `POST /collateral/deposit` | the extrinsic IS the auth | validate + submit + credit |
+| `POST /collateral/query-withdraw` | — | eligibility preview |
+| `POST /collateral/withdraw` | coldkey signature + nonce | verify + execute |
+
+The server can't steal: a deposit extrinsic is only valid as signed (exact
+amount, destination already fixed to the vault), and a withdraw pays out only
+to the coldkey that owns the hotkey. The worst a compromised API can do is
+refuse service. Withdraw nonces are journaled (`~/.sn89/custodian.db`) so a
+replayed request is rejected even inside the freshness window.
+
 ## Flows
 
 ### Deposit
-1. Caller: `custodian.py make-deposit --amount 100 --wallet.name w --wallet.hotkey h`
-   → coldkey-signed `transfer_stake` (destination = vault), printed as hex.
-   Nothing is submitted; the caller's keys never leave their box.
-2. Caller sends the hex to the owner.
-3. Owner: `custodian.py deposit --extrinsic-hex …` — validates the call is
-   exactly a transfer_stake of SN89 alpha to our vault, submits it, reads the
-   credited amount from the chain's `StakeAdded` event, and credits the ledger.
+1. Miner: `collateral_cli.py deposit --amount 100 --wallet.name w --wallet.hotkey h`
+   — composes + coldkey-signs the `transfer_stake` (destination = vault)
+   locally and POSTs the hex. Keys never leave the miner's box.
+2. Custodian API validates the call is exactly a transfer_stake of SN89 alpha
+   to our vault, submits it, reads the credited amount from the chain's
+   `StakeAdded` event, and credits the ledger.
 
 ### Elimination + slash
 1. `scoring.elimination_t0` scans a hotkey's decisive history in t0 order.
@@ -86,11 +106,13 @@ participant is **auditability**, not trustlessness:
    and fresh collateral — each life costs capital.
 
 ### Withdraw
-1. Caller: `custodian.py make-withdraw-request …` → canonical JSON
-   (sorted-key, no whitespace) signed by the coldkey, with nonce + timestamp.
-2. Owner: `custodian.py withdraw --request r.json` verifies, in order:
-   signature; freshness; coldkey owns hotkey (chain `Owner` storage); hotkey
-   not eliminated; **settlement lock** — zero unsettled signals
+1. Miner: `collateral_cli.py withdraw --amount 50 --wallet.name w --hotkey h`
+   — coldkey-signs the canonical request JSON (sorted-key, no whitespace,
+   nonce + timestamp) locally and POSTs it. `preview --hotkey h` shows
+   eligibility first.
+2. Custodian API verifies, in order: signature; freshness; nonce unused
+   (replay journal); coldkey owns hotkey (chain `Owner` storage); hotkey not
+   eliminated; **settlement lock** — zero unsettled signals
    (sealed/revealed/pending) and `WITHDRAW_COOLDOWN_S` (72 h, the max signal
    horizon) elapsed since the last signal's t0; amount ≤ ledger balance.
 3. Ledger debit, then `transfer_stake` vault → caller coldkey. If the chain
@@ -158,8 +180,12 @@ Design choices already made deliberately (context for review):
    testnet (chainId 945, netuid 496) first.
 4. Set `SN89_COLLATERAL_CONTRACT`, `SN89_VAULT_COLDKEY` for validators;
    additionally `SN89_OWNER_EVM_ADDRESS/KEY`, `SN89_VAULT_WALLET` for the
-   custodian.
-5. Run a full deposit → eliminate → slash-burn → withdraw cycle on testnet
-   with a sacrificial hotkey before announcing.
-6. Announce the requirement with a funding deadline; existing callers fund
+   custodian. Ship both addresses as the in-repo defaults in `config.py` so
+   miners verify against the repo, not just the API.
+5. Run `custodian.py serve` behind TLS at the `SN89_COLLATERAL_API` default
+   (`partner.infinitequant.app/api/sn89/collateral`).
+6. Run a full deposit → eliminate → slash-burn → withdraw cycle on testnet
+   with a sacrificial hotkey, end-to-end through `collateral_cli.py`, before
+   announcing.
+7. Announce the requirement with a funding deadline; existing callers fund
    during a grace window before the dust gate activates.

@@ -152,6 +152,75 @@ class TestWithdrawRequest:
         assert collateral.verify_withdraw_request(req) is not None
 
 
+# ── custodian transport (nonce journal + withdraw eligibility) ────────────────
+class TestCustodianTransport:
+    @pytest.fixture()
+    def custodian(self):
+        import importlib
+        return importlib.import_module("neurons.custodian")
+
+    def test_nonce_replay_rejected(self, custodian):
+        import sqlite3
+        db = sqlite3.connect(":memory:")
+        db.execute("CREATE TABLE used_nonces (k TEXT PRIMARY KEY, ts REAL NOT NULL)")
+        assert custodian.consume_nonce(db, "ck", "hk", "n1") is True
+        assert custodian.consume_nonce(db, "ck", "hk", "n1") is False
+        assert custodian.consume_nonce(db, "ck", "hk", "n2") is True
+        assert custodian.consume_nonce(db, "ck2", "hk", "n1") is True
+
+    @pytest.fixture()
+    def validator_db(self, tmp_path):
+        import sqlite3
+        path = str(tmp_path / "validator.db")
+        db = sqlite3.connect(path)
+        db.execute("CREATE TABLE signals (hotkey TEXT, status TEXT, t0_unix REAL)")
+        db.execute("CREATE TABLE hotkey_meta (hotkey TEXT PRIMARY KEY, "
+                   "eliminated_t0 REAL)")
+        db.commit()
+        return path, db
+
+    @pytest.fixture()
+    def stub_ledger(self, monkeypatch):
+        from sn89_signals import collateral
+
+        class _Stub:
+            def balance_of(self, hk):
+                return 100 * RAO
+
+        monkeypatch.setattr(collateral, "CollateralLedger", lambda: _Stub())
+
+    def test_preview_clean_hotkey_eligible(self, custodian, validator_db, stub_ledger):
+        import time as _t
+        path, db = validator_db
+        db.execute("INSERT INTO signals VALUES ('hk', 'won', ?)",
+                   (_t.time() - config.WITHDRAW_COOLDOWN_S - 60,))
+        db.commit()
+        p = custodian.withdraw_preview("hk", validator_db_path=path)
+        assert p["eligible"] and p["balance_rao"] == 100 * RAO
+
+    def test_preview_open_signal_blocks(self, custodian, validator_db, stub_ledger):
+        path, db = validator_db
+        db.execute("INSERT INTO signals VALUES ('hk', 'pending', 0)")
+        db.commit()
+        p = custodian.withdraw_preview("hk", validator_db_path=path)
+        assert not p["eligible"] and any("unsettled" in r for r in p["reasons"])
+
+    def test_preview_cooldown_blocks(self, custodian, validator_db, stub_ledger):
+        import time as _t
+        path, db = validator_db
+        db.execute("INSERT INTO signals VALUES ('hk', 'won', ?)", (_t.time() - 60,))
+        db.commit()
+        p = custodian.withdraw_preview("hk", validator_db_path=path)
+        assert not p["eligible"] and any("cooldown" in r for r in p["reasons"])
+
+    def test_preview_eliminated_blocks(self, custodian, validator_db, stub_ledger):
+        path, db = validator_db
+        db.execute("INSERT INTO hotkey_meta VALUES ('hk', 12345.0)")
+        db.commit()
+        p = custodian.withdraw_preview("hk", validator_db_path=path)
+        assert not p["eligible"] and any("eliminated" in r for r in p["reasons"])
+
+
 # ── ledger keys ───────────────────────────────────────────────────────────────
 class TestLedgerKeys:
     def test_ss58_to_h160_is_account_id_prefix(self):
