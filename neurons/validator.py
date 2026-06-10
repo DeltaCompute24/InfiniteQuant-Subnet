@@ -28,7 +28,7 @@ import bittensor as bt
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from sn89_signals import bucket, chain, config, crypto, scoring
+from sn89_signals import bucket, chain, collateral, config, crypto, scoring
 from sn89_signals.grader import PENDING, grade
 from sn89_signals.schema import Signal, ValidationError, validate
 from timelock import Timelock
@@ -57,7 +57,10 @@ CREATE INDEX IF NOT EXISTS idx_signals_hotkey ON signals(hotkey);
 CREATE TABLE IF NOT EXISTS hotkey_meta (
   hotkey TEXT PRIMARY KEY,
   first_seen_unix REAL NOT NULL,
-  strikes INTEGER NOT NULL DEFAULT 0
+  strikes INTEGER NOT NULL DEFAULT 0,
+  eliminated_t0 REAL,                  -- decisive t0 that crossed the floor
+  slash_rao INTEGER,                   -- burned collateral (custodian fills)
+  slash_tx TEXT                        -- ledger slash tx hash (custodian fills)
 );
 CREATE TABLE IF NOT EXISTS drand_cache (round INTEGER PRIMARY KEY, signature BLOB);
 """
@@ -72,6 +75,7 @@ class Validator:
         self.db.executescript(SCHEMA)
         self._migrate()
         self.tlock = Timelock(config.DRAND_PUBLIC_KEY)
+        self.ledger = collateral.CollateralLedger()
         self._last_weights_block = 0
 
     def _migrate(self):
@@ -80,6 +84,11 @@ class Validator:
         for col, decl in (("commit_block", "INTEGER"), ("t0_ms", "INTEGER")):
             if col not in cols:
                 self.db.execute(f"ALTER TABLE signals ADD COLUMN {col} {decl}")
+        meta_cols = {r[1] for r in self.db.execute("PRAGMA table_info(hotkey_meta)")}
+        for col, decl in (("eliminated_t0", "REAL"), ("slash_rao", "INTEGER"),
+                          ("slash_tx", "TEXT")):
+            if col not in meta_cols:
+                self.db.execute(f"ALTER TABLE hotkey_meta ADD COLUMN {col} {decl}")
         self.db.commit()
 
     # ── 1. ingest ────────────────────────────────────────────────────────────
@@ -222,23 +231,57 @@ class Validator:
         self.db.commit()
 
     # ── 4. weights ───────────────────────────────────────────────────────────
+    def refresh_eliminations(self):
+        """Mark hotkeys whose graded journal crossed the elimination floor
+        (scoring.elimination_t0 — deterministic, so every validator agrees).
+        Marking zeroes the hotkey; the slash itself is the custodian's job
+        (neurons/custodian.py reads eliminated_t0 and burns the collateral).
+        """
+        for (hk,) in self.db.execute(
+                "SELECT hotkey FROM hotkey_meta WHERE eliminated_t0 IS NULL").fetchall():
+            decisive = [(t0, status == "won") for t0, status in self.db.execute(
+                "SELECT t0_unix, status FROM signals WHERE hotkey=? "
+                "AND status IN ('won','lost')", (hk,)).fetchall()]
+            t0 = scoring.elimination_t0(decisive)
+            if t0 is not None:
+                self.db.execute(
+                    "UPDATE hotkey_meta SET eliminated_t0=? WHERE hotkey=?", (t0, hk))
+                print(f"  ☠ eliminated {hk[:8]}… floor crossed at t0={t0:.0f}")
+        self.db.commit()
+
+    def _collateral_rao(self, hotkeys: list[str]) -> dict[str, int]:
+        """{hotkey: posted rao} from the public ledger. On any read failure the
+        whole gate is waived for this tempo (return {}) — an RPC outage must
+        not dust every funded miner."""
+        if not self.ledger.enabled:
+            return {}
+        try:
+            return {hk: self.ledger.balance_of(hk) for hk in hotkeys}
+        except Exception as e:  # noqa: BLE001
+            print(f"  ! collateral ledger unreachable, gate waived: {e}")
+            return {}
+
     def maybe_set_weights(self):
         block = self.ch.current_block()
         if block - self._last_weights_block < config.TEMPO:
             return
+        self.refresh_eliminations()
         mg = self.ch.metagraph()
         uid_by_hotkey = {hk: i for i, hk in enumerate(mg.hotkeys)}
         now = time.time()
         cutoff = now - config.SCORE_WINDOW_S
 
         states = []
-        for hk, first_seen, strikes in self.db.execute(
-                "SELECT hotkey, first_seen_unix, strikes FROM hotkey_meta").fetchall():
+        for hk, first_seen, strikes, elim_t0 in self.db.execute(
+                "SELECT hotkey, first_seen_unix, strikes, eliminated_t0 "
+                "FROM hotkey_meta").fetchall():
             uid = uid_by_hotkey.get(hk)
             if uid is None:
                 continue
             if strikes >= config.STRIKE_LIMIT:
                 continue  # zeroed (§7.4)
+            if elim_t0 is not None:
+                continue  # eliminated — zero weight, collateral burns
             lifetime = self.db.execute(
                 "SELECT COUNT(*) FROM signals WHERE hotkey=? AND status IN ('won','lost')",
                 (hk,)).fetchone()[0]
@@ -250,7 +293,14 @@ class Validator:
                 lifetime_decisive=lifetime, trailing_wins=tw or 0,
                 trailing_decisive=td or 0))
 
-        w = scoring.compute_weights(states, now)
+        balances = self._collateral_rao([s.hotkey for s in states])
+        min_rao = 0
+        if balances:
+            min_rao = int(config.COLLATERAL_MIN_ALPHA * collateral.RAO_PER_ALPHA)
+            for s in states:
+                s.collateral_rao = balances.get(s.hotkey, 0)
+
+        w = scoring.compute_weights(states, now, min_collateral_rao=min_rao)
         uids, vals = list(w.keys()), list(w.values())
         ok = self.ch.set_weights(self.wallet, uids, vals)
         self._last_weights_block = block
