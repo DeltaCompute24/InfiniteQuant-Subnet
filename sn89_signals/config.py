@@ -30,6 +30,14 @@ ALG_LABEL = "x25519-hkdf-sha256+chacha20poly1305+drand-tlock"
 REVEAL_DELAY_S = 24 * 3600          # tlock round = commit time + 24h
 ROUND_TOLERANCE_S = 600             # blob round must be within ±10min of expected
                                     # (MANTIS UID-46 lesson: wrong round ⇒ void, never hang)
+REVEAL_GRACE_S = int(os.getenv("SN89_REVEAL_GRACE_S", str(6 * 3600)))
+                                    # §6.4 forfeit: a commitment whose blob is still
+                                    # unfetchable this long AFTER its round matures is
+                                    # a FORFEIT LOSS — the timelock hides a signal from
+                                    # others but never excuses non-revelation, so a miner
+                                    # can't commit, watch the market, then publish only
+                                    # winners. Grace absorbs transient hosting/poll gaps;
+                                    # a blob we already captured is never forfeited.
 
 # Subnet owner X25519 public key (hex, 32 bytes). Miners encrypt W_owner to this.
 # The corresponding private key is held by the subnet owner.

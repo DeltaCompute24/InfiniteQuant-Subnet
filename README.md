@@ -61,10 +61,21 @@ without a valid owner wrap are not gradeable.
 | TP / SL | fixed per-asset, symmetric 1:1 — see `data/signals-bands.json` |
 | Horizon | 72 h max; no touch by then = WASH (not counted) |
 | Overlap | one open signal per (pair, direction) per hotkey |
+| Must reveal | a committed signal whose blob is never served counts as a LOSS (forfeit), 6 h past its reveal round — see below |
 
 Voided signals don't count against your daily quota and carry no penalty —
 with one exception: a blob that fails hash-verification or won't decrypt at
 reveal is a strike; three strikes in 30 days zeroes the hotkey for 30 days.
+
+**You must reveal what you commit.** The timelock hides your signal from
+*others* for 24 h — it does not hide it from *you*, and the market is public,
+so a "publish only the winners" option would otherwise be free. It isn't: a
+commitment whose ciphertext blob is still unfetchable 6 h after its reveal
+round matures is recorded as a decisive **LOSS** (`exit_reason=no_reveal`),
+exactly as if the trade had hit its stop. Withholding a loser costs what
+revealing it would, so there is nothing to game. A blob the validator already
+fetched is pinned in its journal and grades normally even if you later delete
+it; the forfeit only catches blobs that were *never served*.
 
 ### Scoring
 
@@ -255,7 +266,11 @@ a meaningful skill metric (and the 52 % gate meaningful). Vol-scaled bands
 keep the bar equivalent across assets.
 
 **What if my blob is unreachable when validators poll?** They retry every 30 s
-until reveal + grading. No blob by reveal ⇒ void.
+through reveal + a 6 h grace. A blob they manage to fetch in that window grades
+normally (and stays pinned even if you later remove it). A blob that is *never*
+served by reveal + 6 h is a forfeit **LOSS**, not a free void — keep your
+hosting up, or use the zero-setup owner relay (the relay captures your blob at
+submit, so relay-hosted signals can never be lost to a hosting outage).
 
 **When do emissions arrive?** Weights update every tempo (~72 min); your first
 non-dust weight lands after your 20th decisive trade, assuming ≥ 52 %.

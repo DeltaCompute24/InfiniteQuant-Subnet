@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS signals (
   plaintext    TEXT,
   status       TEXT NOT NULL DEFAULT 'sealed',
     -- sealed | revealed | void | pending | won | lost | washed
+    -- (lost + exit_reason='no_reveal' = forfeit: committed, blob never served)
   void_reason  TEXT,
   entry_price  REAL,
   outcome_bps  REAL,
@@ -174,6 +175,39 @@ class Validator:
                 "(SELECT hotkey FROM signals WHERE commit_hex=?)", (commit_hex,))
         print(f"  ✗ void {commit_hex[:12]}… {reason}")
 
+    def forfeit_unrevealed(self):
+        """§6.4 forfeit loss. A committed signal whose ciphertext blob never
+        becomes gradeable is recorded as a LOST decisive outcome — not a void,
+        not a free pass.
+
+        Without this the 24h timelock is a costless option: the miner already
+        knows their own signal, so they can commit at T0, watch the market, and
+        publish the blob only for trades that won — withholding losers earns no
+        strike (a strike fires only on a *fetched* blob that fails decrypt/hash,
+        never on one that was never served). Forcing a loss makes withholding
+        cost exactly what revealing would, so there is nothing to game.
+
+        Fires only once the drand round has matured AND REVEAL_GRACE_S has since
+        elapsed AND we never captured the blob (blob_json IS NULL). A blob the
+        validator already fetched is pinned in the journal and grades normally
+        even if the miner later deletes it from their bucket; a validator-side
+        drand/decrypt hiccup leaves blob_json non-NULL and is never mistaken for
+        a forfeit. Deterministic in (round, t0, capture state) so every
+        validator reaches the identical verdict.
+        """
+        now = time.time()
+        for commit_hex, hk, rnd in self.db.execute(
+                "SELECT commit_hex, hotkey, round FROM signals "
+                "WHERE status='sealed' AND blob_json IS NULL").fetchall():
+            if now < crypto.round_time(rnd) + config.REVEAL_GRACE_S:
+                continue
+            self.db.execute(
+                "UPDATE signals SET status='lost', outcome_bps=NULL, "
+                "exit_reason='no_reveal' WHERE commit_hex=?", (commit_hex,))
+            print(f"  ⊗ forfeit {commit_hex[:12]}… {hk[:8]}… "
+                  f"blob never served by reveal+grace ⇒ LOST")
+        self.db.commit()
+
     def _drand_sig(self, rnd: int) -> bytes | None:
         row = self.db.execute("SELECT signature FROM drand_cache WHERE round=?", (rnd,)).fetchone()
         if row:
@@ -190,7 +224,8 @@ class Validator:
         rows = []
         for commit_hex, hk, t0, pt, status in self.db.execute(
                 "SELECT commit_hex, hotkey, t0_unix, plaintext, status FROM signals "
-                "WHERE status IN ('revealed','pending','won','lost','washed')").fetchall():
+                "WHERE status IN ('revealed','pending','won','lost','washed') "
+                "AND plaintext IS NOT NULL").fetchall():  # forfeit losses have no plaintext
             s = Signal.from_bytes(pt.encode())
             rows.append((commit_hex, s, scoring.GradedRow(
                 hotkey=hk, trade_pair=s.trade_pair, direction=s.direction,
@@ -265,6 +300,7 @@ class Validator:
             try:
                 self.ingest()
                 self.reveal()
+                self.forfeit_unrevealed()
                 self.grade_revealed()
                 self.maybe_set_weights()
             except KeyboardInterrupt:
