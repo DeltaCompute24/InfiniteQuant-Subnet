@@ -381,3 +381,80 @@ class TestWeights:
             _state(3, self.OLD, 22, 11, 20, self.NOW),
         ], self.NOW)
         assert sum(w.values()) == pytest.approx(1.0)
+
+
+# ── forfeit on non-revelation (§6.4 — closes the selective-reveal option) ─────
+class TestForfeitUnrevealed:
+    """A committed signal whose blob is never served must grade LOST, so the
+    24h timelock can't be used as a costless option (commit, watch the market,
+    publish only winners). Exercises the real Validator.forfeit_unrevealed
+    against an in-memory journal."""
+
+    def _validator(self):
+        import sqlite3
+        import sys
+        import types
+        # validator.py imports bittensor at module top only for __init__/chain;
+        # forfeit_unrevealed needs none of it. Stub the module so the real method
+        # runs even on a box without the (heavy, no-macOS-wheel) bittensor dep.
+        if "bittensor" not in sys.modules:
+            sys.modules["bittensor"] = types.ModuleType("bittensor")
+        from neurons.validator import SCHEMA, Validator
+        v = Validator.__new__(Validator)            # skip __init__ (no chain/RPC)
+        v.db = sqlite3.connect(":memory:")
+        v.db.executescript(SCHEMA)
+        return v
+
+    def _seal(self, v, commit, *, blob=None, matured_ago_s):
+        # round whose maturity is `matured_ago_s` in the past (negative ⇒ future)
+        rnd = crypto.target_round(time.time() - matured_ago_s)
+        v.db.execute(
+            "INSERT INTO signals (commit_hex,hotkey,round,url_tag,"
+            "first_seen_block,t0_unix,blob_json,status) VALUES (?,?,?,?,?,?,?,'sealed')",
+            (commit, HK, rnd, "tag", 1, time.time() - matured_ago_s - 86_400, blob))
+        v.db.commit()
+
+    def _status(self, v, commit):
+        return v.db.execute(
+            "SELECT status, exit_reason FROM signals WHERE commit_hex=?",
+            (commit,)).fetchone()
+
+    def test_unrevealed_past_grace_forfeits_as_loss(self):
+        v = self._validator()
+        self._seal(v, "withheld", blob=None,
+                   matured_ago_s=config.REVEAL_GRACE_S + 3600)
+        v.forfeit_unrevealed()
+        assert self._status(v, "withheld") == ("lost", "no_reveal")
+
+    def test_blob_already_captured_is_never_forfeited(self):
+        # validator fetched the blob (blob_json set) — it grades normally even
+        # if the miner later deletes it; the forfeit pass must skip it.
+        v = self._validator()
+        self._seal(v, "pinned", blob='{"v":1}',
+                   matured_ago_s=config.REVEAL_GRACE_S + 3600)
+        v.forfeit_unrevealed()
+        assert self._status(v, "pinned") == ("sealed", None)
+
+    def test_within_grace_not_yet_forfeited(self):
+        # round matured 30 min ago but grace (6h default) hasn't elapsed
+        v = self._validator()
+        self._seal(v, "fresh", blob=None, matured_ago_s=1800)
+        v.forfeit_unrevealed()
+        assert self._status(v, "fresh") == ("sealed", None)
+
+    def test_round_not_matured_not_forfeited(self):
+        v = self._validator()
+        self._seal(v, "future", blob=None, matured_ago_s=-3600)  # matures in 1h
+        v.forfeit_unrevealed()
+        assert self._status(v, "future") == ("sealed", None)
+
+    def test_forfeit_counts_as_decisive_loss_for_scoring(self):
+        # the forfeit row must feed the trailing/elimination accounting like any
+        # other loss (status='lost'), regardless of having no plaintext.
+        v = self._validator()
+        self._seal(v, "f1", blob=None, matured_ago_s=config.REVEAL_GRACE_S + 10)
+        v.forfeit_unrevealed()
+        decisive = v.db.execute(
+            "SELECT COUNT(*) FROM signals WHERE hotkey=? AND status IN ('won','lost')",
+            (HK,)).fetchone()[0]
+        assert decisive == 1
