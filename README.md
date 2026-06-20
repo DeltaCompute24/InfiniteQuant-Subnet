@@ -23,8 +23,8 @@ cherry-pick.
 After 24 h the timelock opens; validators verify the plaintext hashes to the
 on-chain commitment and grade it walk-forward on 1-minute candles: first touch
 of TP wins, first touch of SL loses, both-in-one-candle loses, no touch within
-the horizon is a wash. Emissions are shared pro-rata by wins over the trailing
-8 days among qualified miners.
+the horizon is a wash. Emissions are shared among qualified miners by their wins
+in the last 30 days, scaled by each miner's lifetime hit-rate tier.
 
 **A touch must be a real market price, not a glitch.** Candles are bad-tick
 sanitized before grading: a one-minute spike wick more than 1 % beyond the
@@ -57,7 +57,7 @@ without a valid owner wrap are not gradeable.
 |---|---|
 | Max signals per UTC day | 3 per hotkey |
 | Min spacing between your signals | 4 h |
-| Cross-miner cooldown | 15 min per (pair, direction) — if any miner committed the same pair+direction in the last 15 min, later ones are void. First commit wins. |
+| Multiple miners, same trade | Allowed — two miners may independently commit the same pair+direction. Repeatedly *shadowing* another hotkey is penalized separately (see "Copy detection"). |
 | TP / SL | fixed per-asset, symmetric 1:1 — see `data/signals-bands.json` |
 | Horizon | 72 h max; no touch by then = WASH (not counted) |
 | Overlap | one open signal per (pair, direction) per hotkey |
@@ -81,15 +81,64 @@ it; the forfeit only catches blobs that were *never served*.
 
 ```
 decisive    = WON + LOST   (washes and voids never count)
-QUALIFIED   = lifetime decisive ≥ 20  AND  trailing-8d hit rate ≥ 52 %
-your weight = your trailing-8d wins / all qualified miners' trailing-8d wins
+hit rate    = your LIFETIME wins / lifetime decisive   (all-time, never resets)
+QUALIFIED   = lifetime decisive ≥ 20  AND  lifetime hit rate ≥ 53 %
+tier        = by lifetime hit rate:   QUALIFIED ≥ 53 % → 1.0×
+                                      SHARP     ≥ 60 % → 1.2×
+                                      WOLF      ≥ 70 % → 2.0×
+your weight ∝ (your WON count in the last 30 days) × your tier
+             ───────────────────────────────────────────────────
+             Σ the same over all qualified miners
 ```
 
-- **Warmup:** new hotkeys get 8 days of immunity with dust emissions — enough
-  time to put ~20 trades on the board at full cadence before scoring bites.
-- Random submissions sit below the 52 % gate and earn nothing after immunity.
-  Volume cannot substitute for hit rate.
-- If no miner qualifies, emissions burn.
+Two separate clocks: **quality is forever, pay is recent.**
+
+- **Hit-rate (gate + tier) is your whole career** — it never resets, so a hot
+  or cold streak can't flip your tier, and you can't farm a tier on a small
+  lucky sample. A 70 % WOLF over hundreds of trades earns 2× per win of a 53 %
+  QUALIFIED.
+- **Emissions are sized by your last 30 days of wins**, so you must keep trading
+  to earn: a career WOLF who stops submitting earns nothing until it puts fresh
+  wins on the board.
+- **Warmup:** new hotkeys get 8 days of immunity with dust emissions — time to
+  put ~20 trades up at full cadence and establish a hit-rate before scoring
+  bites. A new uid's hit-rate is simply over however many trades it has so far.
+- Random submissions sit below the 53 % gate and earn nothing after immunity.
+- If no qualified miner has any recent wins, emissions burn.
+
+### Copy penalty
+
+Original signals are the point of the subnet, so making a *habit* of copying
+doesn't pay. The **first** hotkey to open a given `(pair, direction)` is the
+original; any *other* hotkey that opens the same trade while the original's
+position is still live (entry → entry + horizon) is marked as having landed
+second. A hotkey whose landed-second trades exceed **half** of its decisive
+trades is a **habitual copier**, and its copied **wins stop counting toward its
+hit-rate** — they stay decisive, so they drag it below the 52 % gate. A copied
+loss is just a loss. Copying, done habitually, is strictly negative.
+
+This is the anti-Sybil mechanism, and it is **leader-agnostic** — it counts how
+often you land second into *anyone's* live trade, not how often you follow one
+specific miner. So a copier who rotates victims (multiple UIDs, or a hacked feed
+copying one leader after another) can't dodge it by spreading the copying
+around; their landed-second rate climbs all the same.
+
+Spraying one winning call across N hotkeys self-destructs. If the operator keeps
+one fixed key as the originator, that key banks the win and the other N − 1 are
+all habitual copiers → de-qualified. If they rotate which key commits first to
+spread the risk, **every** key crosses the habitual rate → *all* of them
+de-qualify. The best a Sybil operator can do is earn as one key; the new,
+independent miner making an *original* call keeps full credit and is never
+diluted out of the pool.
+
+> The first mover is always safe, and an honest miner who only *occasionally*
+> lands second on a crowded trade keeps those wins — the penalty fires only once
+> landed-second trades dominate your record (≥ 50 %, min 5). You always keep full
+> credit on the trades only you called.
+
+A separate **shadowing report** (who repeatedly commits the same `(pair,
+direction)` within 15 min / 24 h of whom, over 30 days) is surfaced to the
+operator for monitoring. It carries no automatic penalty by default.
 
 ### Asset board
 
