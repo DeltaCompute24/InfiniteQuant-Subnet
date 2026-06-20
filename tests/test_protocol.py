@@ -272,20 +272,14 @@ def _row(hk, pair, direction, t0):
 
 
 class TestValidity:
-    def test_plagiarism_cooldown_voids_second(self):
+    def test_same_pair_dir_across_miners_allowed(self):
+        # the 15-min cross-miner cooldown was retired — two miners may hold the
+        # same trade; shadowing is handled by detect_copiers, not by voiding.
         rows = scoring.apply_validity_filters([
             _row("A", "BTCUSD", "LONG", 1000),
-            _row("B", "BTCUSD", "LONG", 1000 + 600),       # 10 min later — inside 15m
+            _row("B", "BTCUSD", "LONG", 1000 + 60),        # 1 min later — still ok
         ])
-        assert rows[0].status == "ok"
-        assert (rows[1].status, rows[1].void_reason) == ("void", "plagiarism_cooldown")
-
-    def test_cooldown_expires(self):
-        rows = scoring.apply_validity_filters([
-            _row("A", "BTCUSD", "LONG", 1000),
-            _row("B", "BTCUSD", "LONG", 1000 + 901),        # 15m+1s — clean
-        ])
-        assert rows[1].status == "ok"
+        assert [r.status for r in rows] == ["ok", "ok"]
 
     def test_opposite_direction_not_blocked(self):
         rows = scoring.apply_validity_filters([
@@ -293,15 +287,6 @@ class TestValidity:
             _row("B", "BTCUSD", "SHORT", 1000 + 60),
         ])
         assert rows[1].status == "ok"
-
-    def test_first_commit_wins_ordering(self):
-        rows = scoring.apply_validity_filters([
-            _row("B", "BTCUSD", "LONG", 1000 + 60),
-            _row("A", "BTCUSD", "LONG", 1000),              # earlier — wins despite list order
-        ])
-        byhk = {r.hotkey: r for r in rows}
-        assert byhk["A"].status == "ok"
-        assert byhk["B"].status == "void"
 
     def test_min_spacing(self):
         rows = scoring.apply_validity_filters([
@@ -319,13 +304,139 @@ class TestValidity:
         ])
         assert (rows[3].status, rows[3].void_reason) == ("void", "daily_quota")
 
-    def test_voided_doesnt_start_cooldown(self):
-        rows = scoring.apply_validity_filters([
-            _row("A", "BTCUSD", "LONG", 1000),
-            _row("B", "BTCUSD", "LONG", 1000 + 60),          # void (cooldown from A)
-            _row("C", "BTCUSD", "LONG", 1000 + 901),         # past A's window — ok
+
+# ── copy penalty: mark the later entrant on a live identical trade (§7.5) ─────
+class TestMarkCopies:
+    H = 72  # horizon hours; window = t0 → t0 + 72h
+
+    def test_original_not_marked_copier_marked(self):
+        rows = scoring.mark_copies([
+            _row("A", "BTCUSD", "LONG", 0),
+            _row("B", "BTCUSD", "LONG", 3600),       # 1h later, A still open
         ])
-        assert [r.status for r in rows] == ["ok", "void", "ok"]
+        byhk = {r.hotkey: r for r in rows}
+        assert byhk["A"].is_copy is False            # first mover safe
+        assert byhk["B"].is_copy is True             # copied a live trade
+
+    def test_first_mover_safe_regardless_of_list_order(self):
+        rows = scoring.mark_copies([
+            _row("B", "BTCUSD", "LONG", 3600),
+            _row("A", "BTCUSD", "LONG", 0),           # earlier → original despite order
+        ])
+        byhk = {r.hotkey: r for r in rows}
+        assert byhk["A"].is_copy is False
+        assert byhk["B"].is_copy is True
+
+    def test_no_overlap_not_a_copy(self):
+        rows = scoring.mark_copies([
+            _row("A", "BTCUSD", "LONG", 0),
+            _row("B", "BTCUSD", "LONG", self.H * 3600 + 1),   # opens after A's horizon
+        ])
+        assert all(r.is_copy is False for r in rows)
+
+    def test_opposite_direction_not_a_copy(self):
+        rows = scoring.mark_copies([
+            _row("A", "BTCUSD", "LONG", 0),
+            _row("B", "BTCUSD", "SHORT", 3600),
+        ])
+        assert all(r.is_copy is False for r in rows)
+
+    def test_same_hotkey_reentry_not_a_copy(self):
+        rows = scoring.mark_copies([
+            _row("A", "BTCUSD", "LONG", 0),
+            _row("A", "BTCUSD", "LONG", 3600),        # same operator, not copying another
+        ])
+        assert all(r.is_copy is False for r in rows)
+
+    def test_sybil_spray_all_but_first_marked(self):
+        rows = scoring.mark_copies([
+            _row(f"k{i}", "BTCUSD", "LONG", i * 60) for i in range(10)
+        ])
+        marked = [r.hotkey for r in rows if r.is_copy]
+        assert "k0" not in marked                     # original banks the win
+        assert len(marked) == 9                        # other 9 keys penalized
+
+
+class TestHabitualCopier:
+    def test_consistent_copier_is_habitual(self):
+        # 9 of 12 decisive trades landed second → rotating copier caught
+        assert scoring.is_habitual_copier(copies=9, decisive=12) is True
+
+    def test_occasional_second_lander_protected(self):
+        # an honest miner who lands second 3 of 20 times is NOT penalized
+        assert scoring.is_habitual_copier(copies=3, decisive=20) is False
+
+    def test_new_miner_below_min_copies_safe(self):
+        # 2/2 looks like 100% but is below COPY_MIN_COPIES — not flagged
+        assert scoring.is_habitual_copier(copies=2, decisive=2) is False
+
+    def test_at_threshold_fires(self):
+        assert scoring.is_habitual_copier(
+            copies=config.COPY_MIN_COPIES,
+            decisive=int(config.COPY_MIN_COPIES / config.COPY_HABITUAL_RATE)) is True
+
+    def test_no_decisive_is_safe(self):
+        assert scoring.is_habitual_copier(copies=0, decisive=0) is False
+
+
+# ── copy / collusion forensics: 30-day shadowing report (§7.5) ────────────────
+class TestCopyDetection:
+    NOW = 100 * 24 * 3600.0
+
+    def _follows(self, leader_t, follower_lag, n, pair="BTCUSD", direction="LONG",
+                 leader="A", follower="B"):
+        """n leader→follower pairs, spaced a day apart so per-day quota is moot."""
+        rows = []
+        for i in range(n):
+            base = leader_t + i * 86_400
+            rows.append(_row(leader, pair, direction, base))
+            rows.append(_row(follower, pair, direction, base + follower_lag))
+        return rows
+
+    def test_sharp_copier_flagged(self):
+        rows = self._follows(self.NOW - 20 * 86_400, 300, config.COPY_SHARP_MIN_EVENTS)
+        reports = scoring.detect_copiers(rows, self.NOW)
+        assert "B" in reports
+        assert reports["B"][0].leader == "A"
+        assert reports["B"][0].flagged is True
+        assert scoring.flagged_copier_hotkeys(reports) == {"B"}
+
+    def test_leader_not_flagged(self):
+        rows = self._follows(self.NOW - 20 * 86_400, 300, config.COPY_SHARP_MIN_EVENTS)
+        reports = scoring.detect_copiers(rows, self.NOW)
+        assert "A" not in reports                       # first commit is innocent
+
+    def test_below_threshold_not_flagged(self):
+        rows = self._follows(self.NOW - 10 * 86_400, 300, config.COPY_SHARP_MIN_EVENTS - 1)
+        reports = scoring.detect_copiers(rows, self.NOW)
+        assert scoring.flagged_copier_hotkeys(reports) == set()
+
+    def test_soft_shadowing_is_report_only(self):
+        # within 24h but never within 15min: low_diversity, never flagged
+        rows = self._follows(self.NOW - 29 * 86_400, 6 * 3600, config.COPY_SOFT_MIN_EVENTS)
+        reports = scoring.detect_copiers(rows, self.NOW)
+        rep = reports["B"][0]
+        assert rep.low_diversity is True
+        assert rep.flagged is False
+        assert scoring.flagged_copier_hotkeys(reports) == set()
+
+    def test_window_rolls_off(self):
+        # all coincidences older than COPY_WINDOW_S ⇒ nothing flagged (reversible)
+        rows = self._follows(self.NOW - config.COPY_WINDOW_S - 10 * 86_400, 300,
+                             config.COPY_SHARP_MIN_EVENTS)
+        reports = scoring.detect_copiers(rows, self.NOW)
+        assert reports == {}
+
+    def test_flagged_copier_zeroed_in_weights(self):
+        states = [
+            _state(1, self.NOW - config.IMMUNITY_S - 1, 30, 6, 10, self.NOW),  # leader
+            _state(2, self.NOW - config.IMMUNITY_S - 1, 30, 6, 10, self.NOW),  # copier
+        ]
+        w_clean = scoring.compute_weights(states, self.NOW)
+        assert w_clean[1] == pytest.approx(w_clean[2])      # equal pro-rata when clean
+        w_flagged = scoring.compute_weights(states, self.NOW, excluded_uids={2})
+        assert 2 not in w_flagged
+        assert w_flagged[1] > 0.99                          # copier's share goes to leader/burn
 
 
 # ── weights ──────────────────────────────────────────────────────────────────

@@ -52,7 +52,8 @@ CREATE TABLE IF NOT EXISTS signals (
   entry_price  REAL,
   outcome_bps  REAL,
   exit_reason  TEXT,
-  exit_at_ms   INTEGER
+  exit_at_ms   INTEGER,
+  is_copy      INTEGER NOT NULL DEFAULT 0   -- §7.5: opened a live identical trade after another hotkey
 );
 CREATE INDEX IF NOT EXISTS idx_signals_hotkey ON signals(hotkey);
 CREATE TABLE IF NOT EXISTS hotkey_meta (
@@ -61,6 +62,16 @@ CREATE TABLE IF NOT EXISTS hotkey_meta (
   strikes INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS drand_cache (round INTEGER PRIMARY KEY, signature BLOB);
+CREATE TABLE IF NOT EXISTS copier_flags (
+  follower      TEXT NOT NULL,
+  leader        TEXT NOT NULL,
+  sharp_events  INTEGER NOT NULL,
+  soft_events   INTEGER NOT NULL,
+  flagged       INTEGER NOT NULL,   -- 1 = sharp copier (zero weight)
+  low_diversity INTEGER NOT NULL,   -- 1 = soft shadowing (report-only)
+  updated_unix  REAL NOT NULL,
+  PRIMARY KEY (follower, leader)
+);
 """
 
 
@@ -78,7 +89,8 @@ class Validator:
     def _migrate(self):
         """Additive column migration for DBs created before commit_block/t0_ms."""
         cols = {r[1] for r in self.db.execute("PRAGMA table_info(signals)")}
-        for col, decl in (("commit_block", "INTEGER"), ("t0_ms", "INTEGER")):
+        for col, decl in (("commit_block", "INTEGER"), ("t0_ms", "INTEGER"),
+                          ("is_copy", "INTEGER NOT NULL DEFAULT 0")):
             if col not in cols:
                 self.db.execute(f"ALTER TABLE signals ADD COLUMN {col} {decl}")
         self.db.commit()
@@ -266,6 +278,49 @@ class Validator:
         now = time.time()
         cutoff = now - config.SCORE_WINDOW_S
 
+        # ── copy penalty + forensics (§7.5) ────────────────────────────────────
+        # Build every non-void commit in the copy window once; carry the real
+        # status + horizon so mark_copies can compute live-trade overlap.
+        copy_rows, by_commit = [], []
+        for commit_hex, hk, t0, status, pt in self.db.execute(
+                "SELECT commit_hex, hotkey, t0_unix, status, plaintext FROM signals "
+                "WHERE status != 'void' AND plaintext IS NOT NULL "
+                "AND t0_unix >= ?", (now - config.COPY_WINDOW_S,)).fetchall():
+            s = Signal.from_bytes(pt.encode())
+            gr = scoring.GradedRow(
+                hotkey=hk, trade_pair=s.trade_pair, direction=s.direction,
+                t0_unix=t0, status=status, horizon_h=s.horizon_h)
+            copy_rows.append(gr)
+            by_commit.append((commit_hex, gr))
+
+        # PRIMARY: mark the later entrant on each live identical trade, persist
+        # is_copy. The scoring SQL below then declines to credit a copied win.
+        scoring.mark_copies(copy_rows)
+        for commit_hex, gr in by_commit:
+            self.db.execute("UPDATE signals SET is_copy=? WHERE commit_hex=?",
+                            (int(gr.is_copy), commit_hex))
+
+        # SECONDARY: 30-day shadowing report (report-only unless COPY_ZERO_WEIGHT).
+        reports = scoring.detect_copiers(copy_rows, now)
+        self.db.execute("DELETE FROM copier_flags")
+        for follower, rs in reports.items():
+            for r in rs:
+                self.db.execute(
+                    "INSERT OR REPLACE INTO copier_flags (follower,leader,"
+                    "sharp_events,soft_events,flagged,low_diversity,updated_unix) "
+                    "VALUES (?,?,?,?,?,?,?)",
+                    (r.follower, r.leader, r.sharp_events, r.soft_events,
+                     int(r.flagged), int(r.low_diversity), now))
+        self.db.commit()
+        flagged_hk = scoring.flagged_copier_hotkeys(reports) if config.COPY_ZERO_WEIGHT else set()
+        excluded_uids = {uid_by_hotkey[h] for h in flagged_hk if h in uid_by_hotkey}
+        for follower, rs in reports.items():
+            for r in rs:
+                tag = "⛔ COPIER(zeroed)" if (r.flagged and config.COPY_ZERO_WEIGHT) else (
+                    "⚠ repeat-copier" if r.flagged else "· low-diversity")
+                print(f"  {tag}: {follower[:8]}… shadows {r.leader[:8]}… "
+                      f"(sharp={r.sharp_events} soft={r.soft_events})")
+
         states = []
         for hk, first_seen, strikes in self.db.execute(
                 "SELECT hotkey, first_seen_unix, strikes FROM hotkey_meta").fetchall():
@@ -277,20 +332,32 @@ class Validator:
             lifetime = self.db.execute(
                 "SELECT COUNT(*) FROM signals WHERE hotkey=? AND status IN ('won','lost')",
                 (hk,)).fetchone()[0]
-            tw, td = self.db.execute(
-                "SELECT SUM(status='won'), COUNT(*) FROM signals WHERE hotkey=? "
-                "AND status IN ('won','lost') AND t0_unix >= ?", (hk, cutoff)).fetchone()
+            won_all, won_orig, copies, td = self.db.execute(
+                "SELECT SUM(status='won'), "
+                "SUM(status='won' AND COALESCE(is_copy,0)=0), "
+                "SUM(COALESCE(is_copy,0)), COUNT(*) "
+                "FROM signals WHERE hotkey=? AND status IN ('won','lost') "
+                "AND t0_unix >= ?", (hk, cutoff)).fetchone()
+            td = td or 0
+            # only a habitual copier loses credit for its copied wins; an honest
+            # occasional second-lander keeps them (COPY_PENALTY="loss").
+            habitual = scoring.is_habitual_copier(copies or 0, td)
+            tw = (won_orig if habitual else won_all) or 0
+            if habitual:
+                print(f"  ⛔ habitual copier {hk[:8]}…: {copies}/{td} trades "
+                      f"copied → {won_all - tw} wins stripped")
             states.append(scoring.MinerState(
                 hotkey=hk, uid=uid, first_seen_unix=first_seen,
-                lifetime_decisive=lifetime, trailing_wins=tw or 0,
-                trailing_decisive=td or 0))
+                lifetime_decisive=lifetime, trailing_wins=tw,
+                trailing_decisive=td))
 
-        w = scoring.compute_weights(states, now)
+        w = scoring.compute_weights(states, now, excluded_uids=excluded_uids)
         uids, vals = list(w.keys()), list(w.values())
         ok = self.ch.set_weights(self.wallet, uids, vals)
         self._last_weights_block = block
         print(f"  → set_weights ok={ok} ({len(uids)} uids, "
-              f"burn={w.get(config.BURN_UID, 0):.3f})")
+              f"burn={w.get(config.BURN_UID, 0):.3f}, "
+              f"copiers_zeroed={len(excluded_uids)})")
 
     # ── loop ─────────────────────────────────────────────────────────────────
     def run(self):

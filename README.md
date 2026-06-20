@@ -57,7 +57,7 @@ without a valid owner wrap are not gradeable.
 |---|---|
 | Max signals per UTC day | 3 per hotkey |
 | Min spacing between your signals | 4 h |
-| Cross-miner cooldown | 15 min per (pair, direction) — if any miner committed the same pair+direction in the last 15 min, later ones are void. First commit wins. |
+| Multiple miners, same trade | Allowed — two miners may independently commit the same pair+direction. Repeatedly *shadowing* another hotkey is penalized separately (see "Copy detection"). |
 | TP / SL | fixed per-asset, symmetric 1:1 — see `data/signals-bands.json` |
 | Horizon | 72 h max; no touch by then = WASH (not counted) |
 | Overlap | one open signal per (pair, direction) per hotkey |
@@ -90,6 +90,40 @@ your weight = your trailing-8d wins / all qualified miners' trailing-8d wins
 - Random submissions sit below the 52 % gate and earn nothing after immunity.
   Volume cannot substitute for hit rate.
 - If no miner qualifies, emissions burn.
+
+### Copy penalty
+
+Original signals are the point of the subnet, so making a *habit* of copying
+doesn't pay. The **first** hotkey to open a given `(pair, direction)` is the
+original; any *other* hotkey that opens the same trade while the original's
+position is still live (entry → entry + horizon) is marked as having landed
+second. A hotkey whose landed-second trades exceed **half** of its decisive
+trades is a **habitual copier**, and its copied **wins stop counting toward its
+hit-rate** — they stay decisive, so they drag it below the 52 % gate. A copied
+loss is just a loss. Copying, done habitually, is strictly negative.
+
+This is the anti-Sybil mechanism, and it is **leader-agnostic** — it counts how
+often you land second into *anyone's* live trade, not how often you follow one
+specific miner. So a copier who rotates victims (multiple UIDs, or a hacked feed
+copying one leader after another) can't dodge it by spreading the copying
+around; their landed-second rate climbs all the same.
+
+Spraying one winning call across N hotkeys self-destructs. If the operator keeps
+one fixed key as the originator, that key banks the win and the other N − 1 are
+all habitual copiers → de-qualified. If they rotate which key commits first to
+spread the risk, **every** key crosses the habitual rate → *all* of them
+de-qualify. The best a Sybil operator can do is earn as one key; the new,
+independent miner making an *original* call keeps full credit and is never
+diluted out of the pool.
+
+> The first mover is always safe, and an honest miner who only *occasionally*
+> lands second on a crowded trade keeps those wins — the penalty fires only once
+> landed-second trades dominate your record (≥ 50 %, min 5). You always keep full
+> credit on the trades only you called.
+
+A separate **shadowing report** (who repeatedly commits the same `(pair,
+direction)` within 15 min / 24 h of whom, over 30 days) is surfaced to the
+operator for monitoring. It carries no automatic penalty by default.
 
 ### Asset board
 
