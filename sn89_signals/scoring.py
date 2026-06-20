@@ -191,7 +191,8 @@ def compute_weights(states: list[MinerState], now_unix: float,
                     burn_uid: int = config.BURN_UID,
                     excluded_uids: set[int] | None = None) -> dict[int, float]:
     """{uid: normalized_weight}. Immune miners get the dust floor; qualified
-    miners split the rest pro-rata by trailing-window wins; leftovers burn.
+    miners split the rest pro-rata by trailing-window wins, each win scaled by
+    the miner's hit-rate tier (§7.3); leftovers burn.
 
     excluded_uids (flagged copiers, §7.5) earn nothing — neither the immunity
     dust floor nor a pro-rata share — for as long as they stay flagged. Their
@@ -216,13 +217,26 @@ def compute_weights(states: list[MinerState], now_unix: float,
         and s.trailing_wins > 0
     ]
 
+    # tier-weighted wins: each win counts for more at higher hit-rate (§7.3)
+    def effective_wins(s: MinerState) -> float:
+        return s.trailing_wins * win_multiplier(s.trailing_wins / s.trailing_decisive)
+
     budget = 1.0 - sum(weights.values())
-    total_wins = sum(s.trailing_wins for s in qualified)
-    if total_wins > 0 and budget > 0:
+    total_eff = sum(effective_wins(s) for s in qualified)
+    if total_eff > 0 and budget > 0:
         for s in qualified:
-            weights[s.uid] = weights.get(s.uid, 0.0) + budget * (s.trailing_wins / total_wins)
+            weights[s.uid] = weights.get(s.uid, 0.0) + budget * (effective_wins(s) / total_eff)
     else:
         weights[burn_uid] = weights.get(burn_uid, 0.0) + max(budget, 0.0)
 
     total = sum(weights.values())
     return {u: w / total for u, w in weights.items()} if total > 0 else {burn_uid: 1.0}
+
+
+def win_multiplier(hit_rate: float) -> float:
+    """Per-win tier multiplier from config.WIN_RATE_TIERS (high → low). Returns
+    0.0 below the lowest tier (a non-qualifying hit-rate)."""
+    for threshold, mult in config.WIN_RATE_TIERS:
+        if hit_rate >= threshold:
+            return mult
+    return 0.0

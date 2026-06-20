@@ -65,7 +65,18 @@ WICK_TOL = 0.01                     # candle extreme >1% beyond body + both
 # ── Scoring (CONSENSUS — §7 of SPEC) ─────────────────────────────────────────
 SCORE_WINDOW_S = 8 * 24 * 3600      # trailing 8 days
 QUALIFY_MIN_DECISIVE = 20           # lifetime decisive (won+lost) to qualify
-QUALIFY_MIN_HIT = 0.52              # trailing hit-rate gate
+QUALIFY_MIN_HIT = 0.53              # trailing hit-rate gate (QUALIFIED tier floor)
+
+# Per-win multiplier by trailing hit-rate tier — each win is worth more the
+# higher your hit-rate, so quality is rewarded above the gate, not just volume.
+# Checked high → low; the first threshold met wins. Below QUALIFY_MIN_HIT a
+# miner isn't qualified at all (multiplier 0). Mirrors the IQ Signals program
+# tiers: QUALIFIED 53 % (1×) · SHARP 60 % (1.2×) · WOLF 70 % (2×).
+WIN_RATE_TIERS = (
+    (0.70, 2.0),   # WOLF
+    (0.60, 1.2),   # SHARP
+    (0.53, 1.0),   # QUALIFIED
+)
 IMMUNITY_S = 8 * 24 * 3600          # from first commit observed for the hotkey
 DUST_WEIGHT = 1e-4                  # normalized floor during immunity
 BURN_UID = 0                        # absorbs weight when nobody qualifies

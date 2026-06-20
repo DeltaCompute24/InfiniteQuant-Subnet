@@ -494,6 +494,42 @@ class TestWeights:
         assert sum(w.values()) == pytest.approx(1.0)
 
 
+class TestWinRateTiers:
+    NOW = 10_000_000.0
+    OLD = NOW - config.IMMUNITY_S - 1
+
+    def test_multiplier_thresholds(self):
+        assert scoring.win_multiplier(0.52) == 0.0     # below gate
+        assert scoring.win_multiplier(0.53) == 1.0     # QUALIFIED
+        assert scoring.win_multiplier(0.59) == 1.0
+        assert scoring.win_multiplier(0.60) == 1.2     # SHARP
+        assert scoring.win_multiplier(0.69) == 1.2
+        assert scoring.win_multiplier(0.70) == 2.0     # WOLF
+        assert scoring.win_multiplier(0.95) == 2.0
+
+    def test_wolf_doubles_qualified_at_equal_wins(self):
+        # equal wins (14), different hit-rate tiers → WOLF earns 2× per win
+        w = scoring.compute_weights([
+            _state(1, self.OLD, 30, 14, 20, self.NOW),   # 70% WOLF  → eff 28
+            _state(2, self.OLD, 30, 14, 26, self.NOW),   # 53.8% QUAL → eff 14
+        ], self.NOW)
+        assert w[1] / w[2] == pytest.approx(2.0)
+
+    def test_sharp_beats_qualified_at_equal_wins(self):
+        w = scoring.compute_weights([
+            _state(1, self.OLD, 30, 12, 20, self.NOW),   # 60% SHARP → eff 14.4
+            _state(2, self.OLD, 30, 12, 22, self.NOW),   # 54.5% QUAL → eff 12
+        ], self.NOW)
+        assert w[1] / w[2] == pytest.approx(1.2)
+
+    def test_53_gate_excludes_52(self):
+        w = scoring.compute_weights([
+            _state(1, self.OLD, 40, 13, 25, self.NOW),   # 52% — just below 53% gate
+        ], self.NOW)
+        assert 1 not in w
+        assert w[config.BURN_UID] > 0.99
+
+
 # ── forfeit on non-revelation (§6.4 — closes the selective-reveal option) ─────
 class TestForfeitUnrevealed:
     """A committed signal whose blob is never served must grade LOST, so the

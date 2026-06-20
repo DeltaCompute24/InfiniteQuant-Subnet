@@ -81,14 +81,21 @@ it; the forfeit only catches blobs that were *never served*.
 
 ```
 decisive    = WON + LOST   (washes and voids never count)
-QUALIFIED   = lifetime decisive ≥ 20  AND  trailing-8d hit rate ≥ 52 %
-your weight = your trailing-8d wins / all qualified miners' trailing-8d wins
+QUALIFIED   = lifetime decisive ≥ 20  AND  trailing-8d hit rate ≥ 53 %
+win value   = each trailing-8d win, scaled by your hit-rate tier:
+                QUALIFIED  ≥ 53 %  → 1.0×
+                SHARP      ≥ 60 %  → 1.2×
+                WOLF       ≥ 70 %  → 2.0×
+your weight = your tier-weighted wins / all qualified miners' tier-weighted wins
 ```
 
 - **Warmup:** new hotkeys get 8 days of immunity with dust emissions — enough
   time to put ~20 trades on the board at full cadence before scoring bites.
-- Random submissions sit below the 52 % gate and earn nothing after immunity.
-  Volume cannot substitute for hit rate.
+- Random submissions sit below the 53 % gate and earn nothing after immunity.
+- Hit-rate is rewarded above the gate, not just volume: a 70 % WOLF earns twice
+  the weight per win of a 53 % QUALIFIED, so quality pays — but you still need
+  wins on the board, so the most weight goes to high-hit-rate miners trading at
+  cadence.
 - If no miner qualifies, emissions burn.
 
 ### Copy penalty
