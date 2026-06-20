@@ -429,8 +429,8 @@ class TestCopyDetection:
 
     def test_flagged_copier_zeroed_in_weights(self):
         states = [
-            _state(1, self.NOW - config.IMMUNITY_S - 1, 30, 6, 10, self.NOW),  # leader
-            _state(2, self.NOW - config.IMMUNITY_S - 1, 30, 6, 10, self.NOW),  # copier
+            _state(1, self.NOW - config.IMMUNITY_S - 1, 18, 30, 6),  # leader (60%)
+            _state(2, self.NOW - config.IMMUNITY_S - 1, 18, 30, 6),  # copier (identical)
         ]
         w_clean = scoring.compute_weights(states, self.NOW)
         assert w_clean[1] == pytest.approx(w_clean[2])      # equal pro-rata when clean
@@ -440,10 +440,12 @@ class TestCopyDetection:
 
 
 # ── weights ──────────────────────────────────────────────────────────────────
-def _state(uid, first_seen, lifetime, wins, decisive, now):
+# _state(uid, first_seen, lifetime_wins, lifetime_decisive, trailing_wins):
+#   hit-rate/tier come from lifetime_wins / lifetime_decisive (forever);
+#   the emission share is sized by trailing_wins (last 30 days).
+def _state(uid, first_seen, lw, ld, tw):
     return scoring.MinerState(hotkey=f"hk{uid}", uid=uid, first_seen_unix=first_seen,
-                              lifetime_decisive=lifetime, trailing_wins=wins,
-                              trailing_decisive=decisive)
+                              lifetime_wins=lw, lifetime_decisive=ld, trailing_wins=tw)
 
 
 class TestWeights:
@@ -452,44 +454,53 @@ class TestWeights:
 
     def test_pro_rata_among_qualified(self):
         w = scoring.compute_weights([
-            _state(1, self.OLD, 30, 6, 10, self.NOW),    # 60% hit, 6 wins
-            _state(2, self.OLD, 25, 3, 5, self.NOW),     # 60% hit, 3 wins
+            _state(1, self.OLD, 18, 30, 6),    # 60% lifetime (SHARP), 6 recent wins
+            _state(2, self.OLD, 15, 25, 3),    # 60% lifetime (SHARP), 3 recent wins
         ], self.NOW)
-        assert abs(w[1] / w[2] - 2.0) < 1e-9             # 6:3 pro-rata
+        assert abs(w[1] / w[2] - 2.0) < 1e-9   # 6:3 on recent wins (same tier)
 
     def test_coinflipper_gets_zero(self):
         w = scoring.compute_weights([
-            _state(1, self.OLD, 40, 10, 20, self.NOW),   # 50% — below gate
-            _state(2, self.OLD, 30, 6, 10, self.NOW),    # qualified
+            _state(1, self.OLD, 20, 40, 10),   # 50% lifetime — below gate
+            _state(2, self.OLD, 18, 30, 6),    # 60% lifetime — qualified
         ], self.NOW)
         assert 1 not in w
         assert w[2] > 0.99
 
     def test_under_20_lifetime_not_qualified(self):
         w = scoring.compute_weights([
-            _state(1, self.OLD, 19, 8, 10, self.NOW),    # 80% but only 19 decisive
+            _state(1, self.OLD, 16, 19, 8),    # 84% but only 19 lifetime decisive
         ], self.NOW)
         assert 1 not in w
         assert w[config.BURN_UID] > 0.99
 
+    def test_qualified_but_idle_earns_zero(self):
+        # career WOLF with zero recent wins earns nothing — must keep trading
+        w = scoring.compute_weights([
+            _state(1, self.OLD, 70, 100, 0),   # 70% lifetime, 0 recent wins
+            _state(2, self.OLD, 18, 30, 6),    # 60% lifetime, 6 recent wins
+        ], self.NOW)
+        assert w.get(1, 0.0) == pytest.approx(0.0)
+        assert w[2] > 0.99
+
     def test_immunity_dust(self):
         w = scoring.compute_weights([
-            _state(1, self.NOW - 86_400, 0, 0, 0, self.NOW),  # day-old miner
-            _state(2, self.OLD, 30, 6, 10, self.NOW),
+            _state(1, self.NOW - 86_400, 0, 0, 0),   # day-old miner
+            _state(2, self.OLD, 18, 30, 6),
         ], self.NOW)
         assert w[1] == pytest.approx(config.DUST_WEIGHT, rel=1e-6)
 
     def test_nobody_qualified_burns(self):
         w = scoring.compute_weights([
-            _state(1, self.OLD, 5, 2, 4, self.NOW),
+            _state(1, self.OLD, 2, 4, 2),      # 50%, 4 lifetime decisive
         ], self.NOW)
         assert w == {config.BURN_UID: 1.0}
 
     def test_weights_normalized(self):
         w = scoring.compute_weights([
-            _state(1, self.NOW - 100, 0, 0, 0, self.NOW),
-            _state(2, self.OLD, 30, 6, 10, self.NOW),
-            _state(3, self.OLD, 22, 11, 20, self.NOW),
+            _state(1, self.NOW - 100, 0, 0, 0),
+            _state(2, self.OLD, 18, 30, 6),
+            _state(3, self.OLD, 12, 22, 11),
         ], self.NOW)
         assert sum(w.values()) == pytest.approx(1.0)
 
@@ -507,24 +518,24 @@ class TestWinRateTiers:
         assert scoring.win_multiplier(0.70) == 2.0     # WOLF
         assert scoring.win_multiplier(0.95) == 2.0
 
-    def test_wolf_doubles_qualified_at_equal_wins(self):
-        # equal wins (14), different hit-rate tiers → WOLF earns 2× per win
+    def test_wolf_doubles_qualified_at_equal_recent_wins(self):
+        # equal recent wins (14), different LIFETIME tiers → WOLF earns 2× per win
         w = scoring.compute_weights([
-            _state(1, self.OLD, 30, 14, 20, self.NOW),   # 70% WOLF  → eff 28
-            _state(2, self.OLD, 30, 14, 26, self.NOW),   # 53.8% QUAL → eff 14
+            _state(1, self.OLD, 14, 20, 14),   # 70% lifetime WOLF  → eff 28
+            _state(2, self.OLD, 14, 26, 14),   # 53.8% lifetime QUAL → eff 14
         ], self.NOW)
         assert w[1] / w[2] == pytest.approx(2.0)
 
-    def test_sharp_beats_qualified_at_equal_wins(self):
+    def test_sharp_beats_qualified_at_equal_recent_wins(self):
         w = scoring.compute_weights([
-            _state(1, self.OLD, 30, 12, 20, self.NOW),   # 60% SHARP → eff 14.4
-            _state(2, self.OLD, 30, 12, 22, self.NOW),   # 54.5% QUAL → eff 12
+            _state(1, self.OLD, 12, 20, 12),   # 60% lifetime SHARP → eff 14.4
+            _state(2, self.OLD, 12, 22, 12),   # 54.5% lifetime QUAL → eff 12
         ], self.NOW)
         assert w[1] / w[2] == pytest.approx(1.2)
 
     def test_53_gate_excludes_52(self):
         w = scoring.compute_weights([
-            _state(1, self.OLD, 40, 13, 25, self.NOW),   # 52% — just below 53% gate
+            _state(1, self.OLD, 13, 25, 13),   # 52% lifetime — just below 53% gate
         ], self.NOW)
         assert 1 not in w
         assert w[config.BURN_UID] > 0.99

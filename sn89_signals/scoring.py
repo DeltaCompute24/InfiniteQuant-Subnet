@@ -182,17 +182,21 @@ class MinerState:
     hotkey: str
     uid: int
     first_seen_unix: float   # first commit observed (immunity clock)
-    lifetime_decisive: int
-    trailing_wins: int       # decisive WONs inside SCORE_WINDOW_S (trailing 30d)
-    trailing_decisive: int
+    lifetime_wins: int       # all-time WONs — drives LIFETIME hit-rate + tier
+    lifetime_decisive: int   # all-time decisive (won+lost) — gate + hit-rate denom
+    trailing_wins: int       # WONs inside SCORE_WINDOW_S (30d) — sizes the emission
 
 
 def compute_weights(states: list[MinerState], now_unix: float,
                     burn_uid: int = config.BURN_UID,
                     excluded_uids: set[int] | None = None) -> dict[int, float]:
     """{uid: normalized_weight}. Immune miners get the dust floor; qualified
-    miners split the rest pro-rata by trailing-window wins, each win scaled by
-    the miner's hit-rate tier (§7.3); leftovers burn.
+    miners split the rest by their LAST-30-DAY wins, each scaled by the miner's
+    LIFETIME hit-rate tier (§7.3); leftovers burn.
+
+    Hit-rate (gate + tier) is career-long and never resets — a large, stable
+    sample. Emission size is the trailing-30d win count, so a miner must keep
+    trading to earn: a qualified WOLF with zero recent wins gets nothing.
 
     excluded_uids (flagged copiers, §7.5) earn nothing — neither the immunity
     dust floor nor a pro-rata share — for as long as they stay flagged. Their
@@ -212,14 +216,14 @@ def compute_weights(states: list[MinerState], now_unix: float,
         s for s in states
         if s.uid not in excluded_uids
         and s.lifetime_decisive >= config.QUALIFY_MIN_DECISIVE
-        and s.trailing_decisive > 0
-        and (s.trailing_wins / s.trailing_decisive) >= config.QUALIFY_MIN_HIT
-        and s.trailing_wins > 0
+        and (s.lifetime_wins / s.lifetime_decisive) >= config.QUALIFY_MIN_HIT
     ]
 
-    # tier-weighted wins: each win counts for more at higher hit-rate (§7.3)
+    # emission = last-30d wins × LIFETIME hit-rate tier (§7.3). A qualified miner
+    # with no recent wins contributes 0 and earns 0 (lifetime_decisive ≥ 20
+    # guarantees the hit-rate denominator is non-zero).
     def effective_wins(s: MinerState) -> float:
-        return s.trailing_wins * win_multiplier(s.trailing_wins / s.trailing_decisive)
+        return s.trailing_wins * win_multiplier(s.lifetime_wins / s.lifetime_decisive)
 
     budget = 1.0 - sum(weights.values())
     total_eff = sum(effective_wins(s) for s in qualified)

@@ -329,9 +329,13 @@ class Validator:
                 continue
             if strikes >= config.STRIKE_LIMIT:
                 continue  # zeroed (§7.4)
-            lifetime = self.db.execute(
-                "SELECT COUNT(*) FROM signals WHERE hotkey=? AND status IN ('won','lost')",
-                (hk,)).fetchone()[0]
+            # LIFETIME (forever) — hit-rate gate + tier.
+            lt_won, lt_decisive = self.db.execute(
+                "SELECT SUM(status='won'), COUNT(*) FROM signals "
+                "WHERE hotkey=? AND status IN ('won','lost')", (hk,)).fetchone()
+            # TRAILING 30d — sizes the emission; habitual copiers lose recent
+            # copied wins (COPY_PENALTY="loss"), honest occasional second-landers
+            # keep them.
             won_all, won_orig, copies, td = self.db.execute(
                 "SELECT SUM(status='won'), "
                 "SUM(status='won' AND COALESCE(is_copy,0)=0), "
@@ -339,17 +343,15 @@ class Validator:
                 "FROM signals WHERE hotkey=? AND status IN ('won','lost') "
                 "AND t0_unix >= ?", (hk, cutoff)).fetchone()
             td = td or 0
-            # only a habitual copier loses credit for its copied wins; an honest
-            # occasional second-lander keeps them (COPY_PENALTY="loss").
             habitual = scoring.is_habitual_copier(copies or 0, td)
             tw = (won_orig if habitual else won_all) or 0
             if habitual:
-                print(f"  ⛔ habitual copier {hk[:8]}…: {copies}/{td} trades "
-                      f"copied → {won_all - tw} wins stripped")
+                print(f"  ⛔ habitual copier {hk[:8]}…: {copies}/{td} recent trades "
+                      f"copied → {(won_all or 0) - tw} recent wins stripped")
             states.append(scoring.MinerState(
                 hotkey=hk, uid=uid, first_seen_unix=first_seen,
-                lifetime_decisive=lifetime, trailing_wins=tw,
-                trailing_decisive=td))
+                lifetime_wins=lt_won or 0, lifetime_decisive=lt_decisive or 0,
+                trailing_wins=tw))
 
         w = scoring.compute_weights(states, now, excluded_uids=excluded_uids)
         uids, vals = list(w.keys()), list(w.values())

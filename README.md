@@ -23,8 +23,8 @@ cherry-pick.
 After 24 h the timelock opens; validators verify the plaintext hashes to the
 on-chain commitment and grade it walk-forward on 1-minute candles: first touch
 of TP wins, first touch of SL loses, both-in-one-candle loses, no touch within
-the horizon is a wash. Emissions are shared pro-rata by hit-rate-weighted wins
-over the trailing 30 days among qualified miners.
+the horizon is a wash. Emissions are shared among qualified miners by their wins
+in the last 30 days, scaled by each miner's lifetime hit-rate tier.
 
 **A touch must be a real market price, not a glitch.** Candles are bad-tick
 sanitized before grading: a one-minute spike wick more than 1 % beyond the
@@ -81,22 +81,30 @@ it; the forfeit only catches blobs that were *never served*.
 
 ```
 decisive    = WON + LOST   (washes and voids never count)
-QUALIFIED   = lifetime decisive ≥ 20  AND  trailing-30d hit rate ≥ 53 %
-win value   = each trailing-30d win, scaled by your hit-rate tier:
-                QUALIFIED  ≥ 53 %  → 1.0×
-                SHARP      ≥ 60 %  → 1.2×
-                WOLF       ≥ 70 %  → 2.0×
-your weight = your tier-weighted wins / all qualified miners' tier-weighted wins
+hit rate    = your LIFETIME wins / lifetime decisive   (all-time, never resets)
+QUALIFIED   = lifetime decisive ≥ 20  AND  lifetime hit rate ≥ 53 %
+tier        = by lifetime hit rate:   QUALIFIED ≥ 53 % → 1.0×
+                                      SHARP     ≥ 60 % → 1.2×
+                                      WOLF      ≥ 70 % → 2.0×
+your weight ∝ (your WON count in the last 30 days) × your tier
+             ───────────────────────────────────────────────────
+             Σ the same over all qualified miners
 ```
 
-- **Warmup:** new hotkeys get 8 days of immunity with dust emissions — enough
-  time to put ~20 trades on the board at full cadence before scoring bites.
+Two separate clocks: **quality is forever, pay is recent.**
+
+- **Hit-rate (gate + tier) is your whole career** — it never resets, so a hot
+  or cold streak can't flip your tier, and you can't farm a tier on a small
+  lucky sample. A 70 % WOLF over hundreds of trades earns 2× per win of a 53 %
+  QUALIFIED.
+- **Emissions are sized by your last 30 days of wins**, so you must keep trading
+  to earn: a career WOLF who stops submitting earns nothing until it puts fresh
+  wins on the board.
+- **Warmup:** new hotkeys get 8 days of immunity with dust emissions — time to
+  put ~20 trades up at full cadence and establish a hit-rate before scoring
+  bites. A new uid's hit-rate is simply over however many trades it has so far.
 - Random submissions sit below the 53 % gate and earn nothing after immunity.
-- Hit-rate is rewarded above the gate, not just volume: a 70 % WOLF earns twice
-  the weight per win of a 53 % QUALIFIED, so quality pays — but you still need
-  wins on the board, so the most weight goes to high-hit-rate miners trading at
-  cadence.
-- If no miner qualifies, emissions burn.
+- If no qualified miner has any recent wins, emissions burn.
 
 ### Copy penalty
 

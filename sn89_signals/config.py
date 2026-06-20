@@ -63,16 +63,20 @@ WICK_TOL = 0.01                     # candle extreme >1% beyond body + both
                                     # traded the level the same minute
 
 # ── Scoring (CONSENSUS — §7 of SPEC) ─────────────────────────────────────────
-SCORE_WINDOW_S = 30 * 24 * 3600     # trailing 30 days (hit-rate + win count;
-                                    # ~90 decisive at the 3/day cap → stable tiers)
+SCORE_WINDOW_S = 30 * 24 * 3600     # EMISSION window: a miner's share is sized by
+                                    # its WON count in the trailing 30 days, so you
+                                    # must keep trading to earn. (Hit-rate/tier do
+                                    # NOT use this window — they're lifetime.)
 QUALIFY_MIN_DECISIVE = 20           # lifetime decisive (won+lost) to qualify
-QUALIFY_MIN_HIT = 0.53              # trailing hit-rate gate (QUALIFIED tier floor)
+QUALIFY_MIN_HIT = 0.53              # LIFETIME hit-rate gate (QUALIFIED tier floor) —
+                                    # career win-rate, never resets
 
-# Per-win multiplier by trailing hit-rate tier — each win is worth more the
-# higher your hit-rate, so quality is rewarded above the gate, not just volume.
-# Checked high → low; the first threshold met wins. Below QUALIFY_MIN_HIT a
-# miner isn't qualified at all (multiplier 0). Mirrors the IQ Signals program
-# tiers: QUALIFIED 53 % (1×) · SHARP 60 % (1.2×) · WOLF 70 % (2×).
+# Per-win multiplier by LIFETIME hit-rate tier — each recent win is worth more the
+# higher your career hit-rate, so quality is rewarded above the gate, not just
+# volume. Lifetime is a large, stable sample, so tier assignment doesn't flip on a
+# hot/cold streak. Checked high → low; the first threshold met wins. Below
+# QUALIFY_MIN_HIT a miner isn't qualified (multiplier 0). Mirrors the IQ Signals
+# program tiers: QUALIFIED 53 % (1×) · SHARP 60 % (1.2×) · WOLF 70 % (2×).
 WIN_RATE_TIERS = (
     (0.70, 2.0),   # WOLF
     (0.60, 1.2),   # SHARP
