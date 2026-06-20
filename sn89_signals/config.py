@@ -63,7 +63,8 @@ WICK_TOL = 0.01                     # candle extreme >1% beyond body + both
                                     # traded the level the same minute
 
 # ── Scoring (CONSENSUS — §7 of SPEC) ─────────────────────────────────────────
-SCORE_WINDOW_S = 8 * 24 * 3600      # trailing 8 days
+SCORE_WINDOW_S = 30 * 24 * 3600     # trailing 30 days (hit-rate + win count;
+                                    # ~90 decisive at the 3/day cap → stable tiers)
 QUALIFY_MIN_DECISIVE = 20           # lifetime decisive (won+lost) to qualify
 QUALIFY_MIN_HIT = 0.53              # trailing hit-rate gate (QUALIFIED tier floor)
 

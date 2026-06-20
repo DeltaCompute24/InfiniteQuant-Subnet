@@ -23,8 +23,8 @@ cherry-pick.
 After 24 h the timelock opens; validators verify the plaintext hashes to the
 on-chain commitment and grade it walk-forward on 1-minute candles: first touch
 of TP wins, first touch of SL loses, both-in-one-candle loses, no touch within
-the horizon is a wash. Emissions are shared pro-rata by wins over the trailing
-8 days among qualified miners.
+the horizon is a wash. Emissions are shared pro-rata by hit-rate-weighted wins
+over the trailing 30 days among qualified miners.
 
 **A touch must be a real market price, not a glitch.** Candles are bad-tick
 sanitized before grading: a one-minute spike wick more than 1 % beyond the
@@ -81,8 +81,8 @@ it; the forfeit only catches blobs that were *never served*.
 
 ```
 decisive    = WON + LOST   (washes and voids never count)
-QUALIFIED   = lifetime decisive ≥ 20  AND  trailing-8d hit rate ≥ 53 %
-win value   = each trailing-8d win, scaled by your hit-rate tier:
+QUALIFIED   = lifetime decisive ≥ 20  AND  trailing-30d hit rate ≥ 53 %
+win value   = each trailing-30d win, scaled by your hit-rate tier:
                 QUALIFIED  ≥ 53 %  → 1.0×
                 SHARP      ≥ 60 %  → 1.2×
                 WOLF       ≥ 70 %  → 2.0×

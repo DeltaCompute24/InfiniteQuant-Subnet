@@ -176,14 +176,14 @@ def flagged_copier_hotkeys(reports: dict[str, list[CopyReport]]) -> set[str]:
     return {f for f, rs in reports.items() if any(r.flagged for r in rs)}
 
 
-# ── weights (§7.2 CONFIRMED: gate → pro-rata wins, trailing 8 days) ───────────
+# ── weights (§7.2 CONFIRMED: gate → tier-weighted pro-rata wins, trailing 30 days) ─
 @dataclass
 class MinerState:
     hotkey: str
     uid: int
     first_seen_unix: float   # first commit observed (immunity clock)
     lifetime_decisive: int
-    trailing_wins: int       # decisive WONs inside SCORE_WINDOW_S
+    trailing_wins: int       # decisive WONs inside SCORE_WINDOW_S (trailing 30d)
     trailing_decisive: int
 
 

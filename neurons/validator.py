@@ -11,7 +11,7 @@ Loop (every POLL_INTERVAL_S):
                  and the round window (§5); parse + structurally validate.
   3. GRADE     — run validity filters (§6.4) over the revealed set, then
                  walk-forward touch-grade decisive outcomes from Polygon.
-  4. WEIGHTS   — every tempo: gate → pro-rata trailing-8d wins → set_weights.
+  4. WEIGHTS   — every tempo: gate → tier-weighted pro-rata trailing-30d wins → set_weights.
 
 All state lives in one SQLite journal so a restarted validator replays to the
 same conclusions (grading is deterministic given the same chain + Polygon).
