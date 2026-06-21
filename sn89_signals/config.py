@@ -57,10 +57,20 @@ ENTRY_SECOND_SCAN_S = 120           # scan window for the 1-second entry bar; if
                                     # fall back to the first 1-minute bar open
 
 # ── Grading (CONSENSUS) ──────────────────────────────────────────────────────
-WICK_TOL = 0.01                     # candle extreme >1% beyond body + both
+WICK_TOL = 0.01                     # CRYPTO: candle extreme >1% beyond body + both
                                     # neighbours = uncorroborated spike; clamped
-                                    # unless a second feed (Hyperliquid, crypto)
-                                    # traded the level the same minute
+                                    # unless a second feed (Hyperliquid) traded the
+                                    # level the same minute
+WICK_TOL_NONCRYPTO = 0.0025         # forex/metals/equities bands are tens of bps,
+                                    # so a 1% gate lets a 0.5% rogue rollover wick
+                                    # (#665 CADJPY 2026-06-10) through while being 2×
+                                    # the whole SL band. A 1-min non-crypto move
+                                    # beyond BOTH neighbours by >0.25% is data error.
+# Polygon's consolidated forex feed is untrustworthy through the 5pm-ET daily
+# rollover (liquidity vanishes, one contributor prints 20-60bps phantom wicks for
+# ~15-20 min). Non-crypto bars in this UTC window are dropped from touch grading;
+# a real breach persists past the window and is caught on the next clean bar.
+FOREX_ROLLOVER_UTC = ((20, 55), (21, 20))   # [20:55, 21:20)
 
 # ── Scoring (CONSENSUS — §7 of SPEC) ─────────────────────────────────────────
 SCORE_WINDOW_S = 30 * 24 * 3600     # EMISSION window: a miner's share is sized by

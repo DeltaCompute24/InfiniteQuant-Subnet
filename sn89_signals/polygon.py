@@ -76,13 +76,26 @@ def fetch_hl_minute_aggs(asset: str, from_ms: int, to_ms: int) -> dict | None:
         return None
 
 
+def _in_forex_rollover(t_ms: int) -> bool:
+    """True if t_ms (UTC) falls in the daily forex-rollover junk window."""
+    import datetime as _dt
+    d = _dt.datetime.utcfromtimestamp(t_ms / 1000.0)
+    (h0, m0), (h1, m1) = config.FOREX_ROLLOVER_UTC
+    return (d.hour == h0 and d.minute >= m0) or (d.hour == h1 and d.minute < m1)
+
+
 def sanitize_minute_bars(asset: str, asset_class: str, bars: list[dict],
                          hl_fetch=fetch_hl_minute_aggs) -> list[dict]:
-    """Clamp uncorroborated spike wicks before touch grading (see above).
-    `hl_fetch` injectable for tests."""
+    """Sanitize bars before touch grading: drop the daily forex-rollover window
+    for non-crypto assets, then clamp uncorroborated spike wicks (class-aware
+    tolerance). `hl_fetch` injectable for tests."""
+    # drop the rollover junk window entirely (non-crypto only; crypto is 24/7)
+    if asset_class != "crypto":
+        bars = [b for b in bars if not _in_forex_rollover(b["t"])]
+    wick_tol = config.WICK_TOL if asset_class == "crypto" else config.WICK_TOL_NONCRYPTO
     if len(bars) < 3:
         return bars
-    # pass 1: suspects = extreme > WICK_TOL beyond body + both neighbours
+    # pass 1: suspects = extreme > wick_tol beyond body + both neighbours
     suspects, refs = [], []
     for i, b in enumerate(bars):
         prev = bars[i - 1] if i > 0 else None
@@ -93,7 +106,7 @@ def sanitize_minute_bars(asset: str, asset_class: str, bars: list[dict],
         ref_lo = min(b["o"], b["c"],
                      prev["l"] if prev else float("inf"),
                      nxt["l"] if nxt else float("inf"))
-        if b["h"] > ref_hi * (1 + config.WICK_TOL) or b["l"] < ref_lo * (1 - config.WICK_TOL):
+        if b["h"] > ref_hi * (1 + wick_tol) or b["l"] < ref_lo * (1 - wick_tol):
             suspects.append(i)
         refs.append((ref_hi, ref_lo))
     if not suspects:
@@ -106,14 +119,14 @@ def sanitize_minute_bars(asset: str, asset_class: str, bars: list[dict],
         b, (ref_hi, ref_lo) = bars[i], refs[i]
         hl_bar = (hl or {}).get(b["t"])
         h, l = b["h"], b["l"]
-        if b["h"] > ref_hi * (1 + config.WICK_TOL):
+        if b["h"] > ref_hi * (1 + wick_tol):
             if hl_bar and hl_bar["h"] >= b["h"] * (1 - 0.001):
                 pass  # corroborated by HL — real move, keep
             else:
                 h = max(ref_hi, hl_bar["h"] if hl_bar else float("-inf"))
                 print(f"  [BAD TICK] {asset} t={b['t']} high {b['h']} "
                       f"uncorroborated (ref {ref_hi:.6f}) → clamped to {h}")
-        if b["l"] < ref_lo * (1 - config.WICK_TOL):
+        if b["l"] < ref_lo * (1 - wick_tol):
             if hl_bar and hl_bar["l"] <= b["l"] * (1 + 0.001):
                 pass  # corroborated by HL — real move, keep
             else:
