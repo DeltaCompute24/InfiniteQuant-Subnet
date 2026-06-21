@@ -328,7 +328,6 @@ class Validator:
             return
 
         now = time.time()
-        cutoff = now - config.SCORE_WINDOW_S
 
         # ── copy penalty + forensics (§7.5) ────────────────────────────────────
         # Build every non-void commit in the copy window once; carry the real
@@ -384,29 +383,23 @@ class Validator:
                 continue  # zeroed (§7.4)
             if elim_t0 is not None:
                 continue  # eliminated — zero weight, collateral burns
-            # LIFETIME (forever) — hit-rate gate + tier.
-            lt_won, lt_decisive = self.db.execute(
-                "SELECT SUM(status='won'), COUNT(*) FROM signals "
-                "WHERE hotkey=? AND status IN ('won','lost')", (hk,)).fetchone()
-            # TRAILING 30d — sizes the emission; habitual copiers lose recent
-            # copied wins (COPY_PENALTY="loss"), honest occasional second-landers
-            # keep them.
-            won_all, won_orig, copies, td = self.db.execute(
-                "SELECT SUM(status='won'), "
-                "SUM(status='won' AND COALESCE(is_copy,0)=0), "
-                "SUM(COALESCE(is_copy,0)), COUNT(*) "
-                "FROM signals WHERE hotkey=? AND status IN ('won','lost') "
-                "AND t0_unix >= ?", (hk, cutoff)).fetchone()
-            td = td or 0
-            habitual = scoring.is_habitual_copier(copies or 0, td)
-            tw = (won_orig if habitual else won_all) or 0
+            # one fetch of the decisive history; scoring inputs derive in a pure,
+            # tested function. Lifetime (incl. warmup) drives the gate + tier;
+            # trailing-30d wins size the emission but EXCLUDE the warmup window
+            # (warmup wins build the record, never pay — §7.2).
+            decisive = [(t0, bool(won), bool(cp)) for t0, won, cp in self.db.execute(
+                "SELECT t0_unix, status='won', COALESCE(is_copy,0) FROM signals "
+                "WHERE hotkey=? AND status IN ('won','lost')", (hk,)).fetchall()]
+            lt_won, lt_decisive, won_all, won_orig, copies, td = scoring.score_inputs(
+                decisive, first_seen, now)
+            habitual = scoring.is_habitual_copier(copies, td)
+            tw = won_orig if habitual else won_all
             if habitual:
                 print(f"  ⛔ habitual copier {hk[:8]}…: {copies}/{td} recent trades "
-                      f"copied → {(won_all or 0) - tw} recent wins stripped")
+                      f"copied → {won_all - tw} recent wins stripped")
             states.append(scoring.MinerState(
                 hotkey=hk, uid=uid, first_seen_unix=first_seen,
-                lifetime_wins=lt_won or 0, lifetime_decisive=lt_decisive or 0,
-                trailing_wins=tw))
+                lifetime_wins=lt_won, lifetime_decisive=lt_decisive, trailing_wins=tw))
 
         balances = self._collateral_rao([s.hotkey for s in states])
         min_rao = 0

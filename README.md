@@ -106,9 +106,13 @@ Two separate clocks: **quality is forever, pay is recent.**
 - **Emissions are sized by your last 30 days of wins**, so you must keep trading
   to earn: a career WOLF who stops submitting earns nothing until it puts fresh
   wins on the board.
-- **Warmup:** new hotkeys get 8 days of immunity with dust emissions — time to
-  put ~20 trades up at full cadence and establish a hit-rate before scoring
-  bites. A new uid's hit-rate is simply over however many trades it has so far.
+- **Warmup:** new hotkeys get 8 days of immunity with dust emissions (enough not
+  to be eliminated) — time to put ~20 trades up at full cadence and establish a
+  hit-rate before scoring bites. A new uid's hit-rate is simply over however many
+  trades it has so far. **Warmup trades build your record** (they count toward
+  the ≥20-decisive gate and your lifetime hit-rate/tier) **but warmup wins never
+  pay emissions** — only wins committed *after* warmup ends earn, so you must
+  post fresh wins to rise above the dust floor.
 - Random submissions sit below the 55 % gate and earn nothing after immunity.
 - If no qualified miner has any recent wins, emissions burn.
 

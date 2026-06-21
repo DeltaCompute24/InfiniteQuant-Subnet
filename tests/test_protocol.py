@@ -581,6 +581,47 @@ class TestWinRateTiers:
         assert w[config.BURN_UID] > 0.99
 
 
+class TestWarmupScoring:
+    # warmup record counts for the gate/tier; warmup WINS never pay emissions
+    NOW = 100 * 24 * 3600.0
+    DAY = 24 * 3600
+
+    def test_warmup_wins_excluded_from_emission_but_in_record(self):
+        first_seen = self.NOW - 20 * self.DAY          # warmup ends NOW-12d (inside 30d window)
+        warmup_end = first_seen + config.IMMUNITY_S
+        decisive = [
+            (warmup_end - self.DAY, True,  False),     # warmup WIN  (in window, pre-warmup-end)
+            (warmup_end - self.DAY, False, False),     # warmup LOSS
+            (warmup_end + self.DAY, True,  False),     # post-warmup WIN
+            (warmup_end + 2 * self.DAY, True, False),  # post-warmup WIN
+        ]
+        lw, ld, tw_all, tw_orig, copies, td = scoring.score_inputs(
+            decisive, first_seen, self.NOW)
+        assert (lw, ld) == (3, 4)          # record: all 3 wins / 4 decisive count
+        assert (tw_all, tw_orig) == (2, 2) # emission: only the 2 post-warmup wins
+        assert td == 4                     # all 4 are inside the trailing window
+
+    def test_immune_miner_emits_zero_even_with_warmup_wins(self):
+        # a brand-new hotkey still inside warmup: every win is pre-warmup-end
+        first_seen = self.NOW - 3 * self.DAY           # 3 days old (< 8d immunity)
+        decisive = [(self.NOW - 2 * self.DAY, True, False),
+                    (self.NOW - 1 * self.DAY, True, False)]
+        lw, ld, tw_all, tw_orig, copies, td = scoring.score_inputs(
+            decisive, first_seen, self.NOW)
+        assert (lw, ld) == (2, 2)          # record builds
+        assert tw_all == 0                 # but no emission wins yet
+
+    def test_old_wins_age_out_of_trailing_window(self):
+        first_seen = self.NOW - 60 * self.DAY          # old miner; warmup ended long ago
+        warmup_end = first_seen + config.IMMUNITY_S
+        decisive = [(warmup_end + self.DAY, True, False),     # ~51d ago → aged out of 30d
+                    (self.NOW - 5 * self.DAY, True, False)]   # recent post-warmup win
+        lw, ld, tw_all, tw_orig, copies, td = scoring.score_inputs(
+            decisive, first_seen, self.NOW)
+        assert lw == 2                     # lifetime keeps both
+        assert tw_all == 1                 # trailing-30d keeps only the recent one
+
+
 class TestCollateralGating:
     # verifies the collateral gate composes with the lifetime/excluded model
     NOW = 10_000_000.0
