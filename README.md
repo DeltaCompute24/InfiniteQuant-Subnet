@@ -65,7 +65,7 @@ without a valid owner wrap are not gradeable.
 | Min spacing between your signals | 4 h |
 | Multiple miners, same trade | Allowed — two miners may independently commit the same pair+direction. Repeatedly *shadowing* another hotkey is penalized separately (see "Copy detection"). |
 | TP / SL | fixed per-asset, symmetric 1:1 — see `data/signals-bands.json` |
-| Horizon | 72 h max; no touch by then = WASH (not counted) |
+| Horizon (wash window) | Fixed by asset class — **crypto 30 h, forex/metals 12 h** (equities 48 h). Not miner-chosen. No touch by then = WASH (not counted). |
 | Overlap | one open signal per (pair, direction) per hotkey |
 | Must reveal | a committed signal whose blob is never served counts as a LOSS (forfeit), 6 h past its reveal round — see below |
 
@@ -180,9 +180,12 @@ trailing hit < 40 % over ≥10 decisive  → ELIMINATED: collateral burned,
 metals. Bands are **per-asset volatility-scaled** (volnorm-ewma7d, 30-day
 window) and symmetric 1:1 — `sl_bps == tp_bps`, set to each asset's own
 realized-vol unit so the directional hit-rate is comparable across a 18 bps FX
-cross and a 311 bps crypto. Versioned in `data/signals-bands.json`; signals
-grade with the band file in force at commit time — a band update never
-retroactively changes an in-flight signal.
+cross and a 180 bps crypto. **Crypto bands carry a ×1.75 unit multiplier** and a
+longer 30 h grade window (vs 12 h fx/metals): crypto's follow-the-move structure
+needs more room *and* more time to develop, and the two are calibrated together
+to a ~52 % base rate. Versioned in `data/signals-bands.json`; signals grade with
+the band file in force at commit time — a band update never retroactively
+changes an in-flight signal.
 
 ## Testnet (netuid 496)
 

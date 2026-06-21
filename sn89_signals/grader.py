@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from . import polygon
+from . import config, polygon
 from .schema import Signal
 
 WON, LOST, WASHED, PENDING = "won", "lost", "washed", "pending"
@@ -52,7 +52,9 @@ def grade(sig: Signal, t0_ms: int, now_ms: int,
     sign = 1 if sig.direction == "LONG" else -1
     tp_price = entry_price * (1 + sign * sig.tp_bps / 10_000)
     sl_price = entry_price * (1 - sign * sig.sl_bps / 10_000)
-    horizon_ms = t0_ms + sig.horizon_h * 3_600_000
+    # wash window is class-fixed (crypto develops longer than fx/metals), §6.4
+    horizon_h = config.class_horizon_h(sig.asset_class)
+    horizon_ms = t0_ms + horizon_h * 3_600_000
     scan_to = min(now_ms, horizon_ms)
 
     if bars is None:

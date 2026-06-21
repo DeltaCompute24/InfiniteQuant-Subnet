@@ -68,8 +68,6 @@ def validate(sig: Signal, bands: dict | None = None) -> Signal:
         raise ValidationError("hotkey must be an SS58 address")
     if len(sig.comment or "") > 280:
         raise ValidationError("comment > 280 chars")
-    if not (0 < sig.horizon_h <= config.MAX_HORIZON_H):
-        raise ValidationError(f"horizon_h must be in (0, {config.MAX_HORIZON_H}]")
     if len(sig.nonce) < 16:
         raise ValidationError("nonce too short")
 
@@ -80,6 +78,10 @@ def validate(sig: Signal, bands: dict | None = None) -> Signal:
 
     # Board class is canonical; overwrite whatever the miner claimed.
     sig.asset_class = band.get("asset_class", sig.asset_class)
+
+    # Horizon (wash window) is class-fixed, not miner-chosen — normalize it to
+    # the asset's class window so the miner's Nh token can't change grading.
+    sig.horizon_h = config.class_horizon_h(sig.asset_class)
 
     # 1:1 brackets at exactly the board band (program rule — fixed bands,
     # not miner-chosen, same as today's bot).
