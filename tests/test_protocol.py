@@ -551,7 +551,7 @@ class TestWinRateTiers:
 
     def test_multiplier_thresholds(self):
         assert scoring.win_multiplier(0.52) == 0.0     # below gate
-        assert scoring.win_multiplier(0.53) == 1.0     # QUALIFIED
+        assert scoring.win_multiplier(0.55) == 1.0     # QUALIFIED
         assert scoring.win_multiplier(0.59) == 1.0
         assert scoring.win_multiplier(0.60) == 1.2     # SHARP
         assert scoring.win_multiplier(0.69) == 1.2

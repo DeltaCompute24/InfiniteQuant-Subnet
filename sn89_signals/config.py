@@ -96,7 +96,7 @@ SCORE_WINDOW_S = 30 * 24 * 3600     # EMISSION window: a miner's share is sized 
                                     # must keep trading to earn. (Hit-rate/tier do
                                     # NOT use this window — they're lifetime.)
 QUALIFY_MIN_DECISIVE = 20           # lifetime decisive (won+lost) to qualify
-QUALIFY_MIN_HIT = 0.53              # LIFETIME hit-rate gate (QUALIFIED tier floor) —
+QUALIFY_MIN_HIT = 0.55              # LIFETIME hit-rate gate (QUALIFIED tier floor) —
                                     # career win-rate, never resets
 
 # Per-win multiplier by LIFETIME hit-rate tier — each recent win is worth more the
@@ -104,11 +104,11 @@ QUALIFY_MIN_HIT = 0.53              # LIFETIME hit-rate gate (QUALIFIED tier flo
 # volume. Lifetime is a large, stable sample, so tier assignment doesn't flip on a
 # hot/cold streak. Checked high → low; the first threshold met wins. Below
 # QUALIFY_MIN_HIT a miner isn't qualified (multiplier 0). Mirrors the IQ Signals
-# program tiers: QUALIFIED 53 % (1×) · SHARP 60 % (1.2×) · WOLF 70 % (2×).
+# program tiers: QUALIFIED 55 % (1×) · SHARP 60 % (1.2×) · WOLF 70 % (2×).
 WIN_RATE_TIERS = (
     (0.70, 2.0),   # WOLF
     (0.60, 1.2),   # SHARP
-    (0.53, 1.0),   # QUALIFIED
+    (0.55, 1.0),   # QUALIFIED
 )
 IMMUNITY_S = 8 * 24 * 3600          # from first commit observed for the hotkey
 DUST_WEIGHT = 1e-4                  # normalized floor during immunity
