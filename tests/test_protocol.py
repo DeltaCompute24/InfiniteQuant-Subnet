@@ -220,6 +220,28 @@ class TestSanitize:
         g_clean = grade(s, self.T, self.T + 3_600_000, entry_price=entry, bars=clean)
         assert (g_clean.status, g_clean.exit_reason) == (WON, "tp_touch")
 
+    def test_noncrypto_wick_tol_is_tighter(self):
+        # a +0.5% wick passes the crypto 1% gate but trips the non-crypto 0.25% gate
+        bars = _bars((self.T,           100.0, 100.05, 99.95, 100.0),
+                     (self.T + 60_000,  100.0, 100.50, 99.95, 100.0),   # +0.5% high
+                     (self.T + 120_000, 100.0, 100.05, 99.95, 100.0))
+        cy = polygon.sanitize_minute_bars("BTCUSD", "crypto", bars, hl_fetch=lambda *a: None)
+        assert cy[1]["h"] == pytest.approx(100.50)        # crypto: kept
+        fx = polygon.sanitize_minute_bars("EURUSD", "forex", bars, hl_fetch=lambda *a: None)
+        assert fx[1]["h"] == pytest.approx(100.05)        # forex: clamped to ref
+
+    def test_forex_rollover_bars_dropped(self):
+        import datetime as _dt
+        ms = lambda h, m: int(_dt.datetime(2024, 1, 2, h, m, tzinfo=_dt.timezone.utc)
+                              .timestamp() * 1000)
+        bars = _bars((ms(20, 54), 1.10, 1.101, 1.099, 1.100),
+                     (ms(21, 0),  1.10, 1.500, 1.099, 1.100),   # rollover junk wick
+                     (ms(21, 25), 1.10, 1.101, 1.099, 1.100))
+        fx = polygon.sanitize_minute_bars("EURUSD", "forex", bars, hl_fetch=lambda *a: None)
+        assert [b["t"] for b in fx] == [ms(20, 54), ms(21, 25)]   # 21:00 bar dropped
+        cy = polygon.sanitize_minute_bars("BTCUSD", "crypto", bars, hl_fetch=lambda *a: None)
+        assert len(cy) == 3                                       # crypto: 24/7, nothing dropped
+
 
 # ── blob relay transport ─────────────────────────────────────────────────────
 class TestRelay:

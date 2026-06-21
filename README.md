@@ -27,13 +27,19 @@ the horizon is a wash. Emissions are shared among qualified miners by their wins
 in the last 30 days, scaled by each miner's lifetime hit-rate tier.
 
 **A touch must be a real market price, not a glitch.** Candles are bad-tick
-sanitized before grading: a one-minute spike wick more than 1 % beyond the
-candle body and both neighbouring candles is treated as an uncorroborated
-print and clamped — unless a second independent feed (Hyperliquid, for
-crypto) traded the same level in the same minute, in which case the move was
-real and stands. A single off-market trade can never trigger your SL or TP.
-This matches how real exchange brackets fill (a median across feeds, never one
-print), so the scored result is what a live bracket would have done.
+sanitized before grading: a one-minute spike wick beyond the candle body and
+both neighbouring candles is treated as an uncorroborated print and clamped —
+unless a second independent feed (Hyperliquid, for crypto) traded the same
+level in the same minute, in which case the move was real and stands. The
+tolerance is **class-aware**: 1 % for crypto, but **0.25 %** for forex / metals
+/ equities, whose bands are only tens of bps (a 0.5 % rogue quote is 2× the
+whole band). Non-crypto bars in the daily **forex-rollover window
+[20:55–21:20 UTC]** — when liquidity vanishes and one contributor prints
+20–60 bps phantom wicks — are **dropped from touch grading entirely**; a real
+breach persists past the window and is caught on the next clean bar. A single
+off-market trade can never trigger your SL or TP. This matches how real
+exchange brackets fill (a median across feeds, never one print), so the scored
+result is what a live bracket would have done.
 
 ### Payload format
 
@@ -171,8 +177,11 @@ trailing hit < 40 % over ≥10 decisive  → ELIMINATED: collateral burned,
 ### Asset board
 
 38 assets: BTC/ETH/SOL/XRP/HYPE crypto, 29 forex pairs, XAU/XAG/XPT/XPD
-metals. Bands are vol-scaled and versioned in `data/signals-bands.json`;
-signals grade with the band file in force at commit time — a band update never
+metals. Bands are **per-asset volatility-scaled** (volnorm-ewma7d, 30-day
+window) and symmetric 1:1 — `sl_bps == tp_bps`, set to each asset's own
+realized-vol unit so the directional hit-rate is comparable across a 18 bps FX
+cross and a 311 bps crypto. Versioned in `data/signals-bands.json`; signals
+grade with the band file in force at commit time — a band update never
 retroactively changes an in-flight signal.
 
 ## Testnet (netuid 496)

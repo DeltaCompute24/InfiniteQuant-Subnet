@@ -3,9 +3,11 @@
 Grading semantics:
   * brackets fill on TOUCH of the 1-minute bar's high/low
   * bars are bad-tick sanitized first (polygon.sanitize_minute_bars): a spike
-    wick >WICK_TOL beyond the candle body and both neighbours is clamped
-    unless a second feed (Hyperliquid, crypto only) traded the level in the
-    same minute — a single off-market print can't trigger TP or SL
+    wick beyond the candle body and both neighbours by >tolerance (1% crypto,
+    0.25% forex/metals/equities) is clamped unless a second feed (Hyperliquid,
+    crypto only) traded the level in the same minute; non-crypto bars in the
+    daily forex-rollover window [20:55,21:20) UTC are dropped outright — a
+    single off-market print can't trigger TP or SL
   * first bar that touches either level decides
   * a single bar touching BOTH levels grades LOST (conservative)
   * no touch by horizon ⇒ WASHED (non-decisive)
