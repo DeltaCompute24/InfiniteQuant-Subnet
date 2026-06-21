@@ -11,7 +11,7 @@ Loop (every POLL_INTERVAL_S):
                  and the round window (§5); parse + structurally validate.
   3. GRADE     — run validity filters (§6.4) over the revealed set, then
                  walk-forward touch-grade decisive outcomes from Polygon.
-  4. WEIGHTS   — every tempo: gate → pro-rata trailing-8d wins → set_weights.
+  4. WEIGHTS   — every tempo: gate → tier-weighted pro-rata trailing-30d wins → set_weights.
 
 All state lives in one SQLite journal so a restarted validator replays to the
 same conclusions (grading is deterministic given the same chain + Polygon).
@@ -47,11 +47,13 @@ CREATE TABLE IF NOT EXISTS signals (
   plaintext    TEXT,
   status       TEXT NOT NULL DEFAULT 'sealed',
     -- sealed | revealed | void | pending | won | lost | washed
+    -- (lost + exit_reason='no_reveal' = forfeit: committed, blob never served)
   void_reason  TEXT,
   entry_price  REAL,
   outcome_bps  REAL,
   exit_reason  TEXT,
-  exit_at_ms   INTEGER
+  exit_at_ms   INTEGER,
+  is_copy      INTEGER NOT NULL DEFAULT 0   -- §7.5: opened a live identical trade after another hotkey
 );
 CREATE INDEX IF NOT EXISTS idx_signals_hotkey ON signals(hotkey);
 CREATE TABLE IF NOT EXISTS hotkey_meta (
@@ -63,6 +65,16 @@ CREATE TABLE IF NOT EXISTS hotkey_meta (
   slash_tx TEXT                        -- ledger slash tx hash (custodian fills)
 );
 CREATE TABLE IF NOT EXISTS drand_cache (round INTEGER PRIMARY KEY, signature BLOB);
+CREATE TABLE IF NOT EXISTS copier_flags (
+  follower      TEXT NOT NULL,
+  leader        TEXT NOT NULL,
+  sharp_events  INTEGER NOT NULL,
+  soft_events   INTEGER NOT NULL,
+  flagged       INTEGER NOT NULL,   -- 1 = sharp copier (zero weight)
+  low_diversity INTEGER NOT NULL,   -- 1 = soft shadowing (report-only)
+  updated_unix  REAL NOT NULL,
+  PRIMARY KEY (follower, leader)
+);
 """
 
 
@@ -81,7 +93,8 @@ class Validator:
     def _migrate(self):
         """Additive column migration for DBs created before commit_block/t0_ms."""
         cols = {r[1] for r in self.db.execute("PRAGMA table_info(signals)")}
-        for col, decl in (("commit_block", "INTEGER"), ("t0_ms", "INTEGER")):
+        for col, decl in (("commit_block", "INTEGER"), ("t0_ms", "INTEGER"),
+                          ("is_copy", "INTEGER NOT NULL DEFAULT 0")):
             if col not in cols:
                 self.db.execute(f"ALTER TABLE signals ADD COLUMN {col} {decl}")
         meta_cols = {r[1] for r in self.db.execute("PRAGMA table_info(hotkey_meta)")}
@@ -183,6 +196,39 @@ class Validator:
                 "(SELECT hotkey FROM signals WHERE commit_hex=?)", (commit_hex,))
         print(f"  ✗ void {commit_hex[:12]}… {reason}")
 
+    def forfeit_unrevealed(self):
+        """§6.4 forfeit loss. A committed signal whose ciphertext blob never
+        becomes gradeable is recorded as a LOST decisive outcome — not a void,
+        not a free pass.
+
+        Without this the 24h timelock is a costless option: the miner already
+        knows their own signal, so they can commit at T0, watch the market, and
+        publish the blob only for trades that won — withholding losers earns no
+        strike (a strike fires only on a *fetched* blob that fails decrypt/hash,
+        never on one that was never served). Forcing a loss makes withholding
+        cost exactly what revealing would, so there is nothing to game.
+
+        Fires only once the drand round has matured AND REVEAL_GRACE_S has since
+        elapsed AND we never captured the blob (blob_json IS NULL). A blob the
+        validator already fetched is pinned in the journal and grades normally
+        even if the miner later deletes it from their bucket; a validator-side
+        drand/decrypt hiccup leaves blob_json non-NULL and is never mistaken for
+        a forfeit. Deterministic in (round, t0, capture state) so every
+        validator reaches the identical verdict.
+        """
+        now = time.time()
+        for commit_hex, hk, rnd in self.db.execute(
+                "SELECT commit_hex, hotkey, round FROM signals "
+                "WHERE status='sealed' AND blob_json IS NULL").fetchall():
+            if now < crypto.round_time(rnd) + config.REVEAL_GRACE_S:
+                continue
+            self.db.execute(
+                "UPDATE signals SET status='lost', outcome_bps=NULL, "
+                "exit_reason='no_reveal' WHERE commit_hex=?", (commit_hex,))
+            print(f"  ⊗ forfeit {commit_hex[:12]}… {hk[:8]}… "
+                  f"blob never served by reveal+grace ⇒ LOST")
+        self.db.commit()
+
     def _drand_sig(self, rnd: int) -> bytes | None:
         row = self.db.execute("SELECT signature FROM drand_cache WHERE round=?", (rnd,)).fetchone()
         if row:
@@ -199,7 +245,8 @@ class Validator:
         rows = []
         for commit_hex, hk, t0, pt, status in self.db.execute(
                 "SELECT commit_hex, hotkey, t0_unix, plaintext, status FROM signals "
-                "WHERE status IN ('revealed','pending','won','lost','washed')").fetchall():
+                "WHERE status IN ('revealed','pending','won','lost','washed') "
+                "AND plaintext IS NOT NULL").fetchall():  # forfeit losses have no plaintext
             s = Signal.from_bytes(pt.encode())
             rows.append((commit_hex, s, scoring.GradedRow(
                 hotkey=hk, trade_pair=s.trade_pair, direction=s.direction,
@@ -271,6 +318,49 @@ class Validator:
         now = time.time()
         cutoff = now - config.SCORE_WINDOW_S
 
+        # ── copy penalty + forensics (§7.5) ────────────────────────────────────
+        # Build every non-void commit in the copy window once; carry the real
+        # status + horizon so mark_copies can compute live-trade overlap.
+        copy_rows, by_commit = [], []
+        for commit_hex, hk, t0, status, pt in self.db.execute(
+                "SELECT commit_hex, hotkey, t0_unix, status, plaintext FROM signals "
+                "WHERE status != 'void' AND plaintext IS NOT NULL "
+                "AND t0_unix >= ?", (now - config.COPY_WINDOW_S,)).fetchall():
+            s = Signal.from_bytes(pt.encode())
+            gr = scoring.GradedRow(
+                hotkey=hk, trade_pair=s.trade_pair, direction=s.direction,
+                t0_unix=t0, status=status, horizon_h=s.horizon_h)
+            copy_rows.append(gr)
+            by_commit.append((commit_hex, gr))
+
+        # PRIMARY: mark the later entrant on each live identical trade, persist
+        # is_copy. The scoring SQL below then declines to credit a copied win.
+        scoring.mark_copies(copy_rows)
+        for commit_hex, gr in by_commit:
+            self.db.execute("UPDATE signals SET is_copy=? WHERE commit_hex=?",
+                            (int(gr.is_copy), commit_hex))
+
+        # SECONDARY: 30-day shadowing report (report-only unless COPY_ZERO_WEIGHT).
+        reports = scoring.detect_copiers(copy_rows, now)
+        self.db.execute("DELETE FROM copier_flags")
+        for follower, rs in reports.items():
+            for r in rs:
+                self.db.execute(
+                    "INSERT OR REPLACE INTO copier_flags (follower,leader,"
+                    "sharp_events,soft_events,flagged,low_diversity,updated_unix) "
+                    "VALUES (?,?,?,?,?,?,?)",
+                    (r.follower, r.leader, r.sharp_events, r.soft_events,
+                     int(r.flagged), int(r.low_diversity), now))
+        self.db.commit()
+        flagged_hk = scoring.flagged_copier_hotkeys(reports) if config.COPY_ZERO_WEIGHT else set()
+        excluded_uids = {uid_by_hotkey[h] for h in flagged_hk if h in uid_by_hotkey}
+        for follower, rs in reports.items():
+            for r in rs:
+                tag = "⛔ COPIER(zeroed)" if (r.flagged and config.COPY_ZERO_WEIGHT) else (
+                    "⚠ repeat-copier" if r.flagged else "· low-diversity")
+                print(f"  {tag}: {follower[:8]}… shadows {r.leader[:8]}… "
+                      f"(sharp={r.sharp_events} soft={r.soft_events})")
+
         states = []
         for hk, first_seen, strikes, elim_t0 in self.db.execute(
                 "SELECT hotkey, first_seen_unix, strikes, eliminated_t0 "
@@ -282,16 +372,29 @@ class Validator:
                 continue  # zeroed (§7.4)
             if elim_t0 is not None:
                 continue  # eliminated — zero weight, collateral burns
-            lifetime = self.db.execute(
-                "SELECT COUNT(*) FROM signals WHERE hotkey=? AND status IN ('won','lost')",
-                (hk,)).fetchone()[0]
-            tw, td = self.db.execute(
-                "SELECT SUM(status='won'), COUNT(*) FROM signals WHERE hotkey=? "
-                "AND status IN ('won','lost') AND t0_unix >= ?", (hk, cutoff)).fetchone()
+            # LIFETIME (forever) — hit-rate gate + tier.
+            lt_won, lt_decisive = self.db.execute(
+                "SELECT SUM(status='won'), COUNT(*) FROM signals "
+                "WHERE hotkey=? AND status IN ('won','lost')", (hk,)).fetchone()
+            # TRAILING 30d — sizes the emission; habitual copiers lose recent
+            # copied wins (COPY_PENALTY="loss"), honest occasional second-landers
+            # keep them.
+            won_all, won_orig, copies, td = self.db.execute(
+                "SELECT SUM(status='won'), "
+                "SUM(status='won' AND COALESCE(is_copy,0)=0), "
+                "SUM(COALESCE(is_copy,0)), COUNT(*) "
+                "FROM signals WHERE hotkey=? AND status IN ('won','lost') "
+                "AND t0_unix >= ?", (hk, cutoff)).fetchone()
+            td = td or 0
+            habitual = scoring.is_habitual_copier(copies or 0, td)
+            tw = (won_orig if habitual else won_all) or 0
+            if habitual:
+                print(f"  ⛔ habitual copier {hk[:8]}…: {copies}/{td} recent trades "
+                      f"copied → {(won_all or 0) - tw} recent wins stripped")
             states.append(scoring.MinerState(
                 hotkey=hk, uid=uid, first_seen_unix=first_seen,
-                lifetime_decisive=lifetime, trailing_wins=tw or 0,
-                trailing_decisive=td or 0))
+                lifetime_wins=lt_won or 0, lifetime_decisive=lt_decisive or 0,
+                trailing_wins=tw))
 
         balances = self._collateral_rao([s.hotkey for s in states])
         min_rao = 0
@@ -300,12 +403,14 @@ class Validator:
             for s in states:
                 s.collateral_rao = balances.get(s.hotkey, 0)
 
-        w = scoring.compute_weights(states, now, min_collateral_rao=min_rao)
+        w = scoring.compute_weights(states, now, excluded_uids=excluded_uids,
+                                    min_collateral_rao=min_rao)
         uids, vals = list(w.keys()), list(w.values())
         ok = self.ch.set_weights(self.wallet, uids, vals)
         self._last_weights_block = block
         print(f"  → set_weights ok={ok} ({len(uids)} uids, "
-              f"burn={w.get(config.BURN_UID, 0):.3f})")
+              f"burn={w.get(config.BURN_UID, 0):.3f}, "
+              f"copiers_zeroed={len(excluded_uids)})")
 
     # ── loop ─────────────────────────────────────────────────────────────────
     def run(self):
@@ -315,6 +420,7 @@ class Validator:
             try:
                 self.ingest()
                 self.reveal()
+                self.forfeit_unrevealed()
                 self.grade_revealed()
                 self.maybe_set_weights()
             except KeyboardInterrupt:

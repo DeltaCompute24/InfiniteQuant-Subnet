@@ -30,6 +30,14 @@ ALG_LABEL = "x25519-hkdf-sha256+chacha20poly1305+drand-tlock"
 REVEAL_DELAY_S = 24 * 3600          # tlock round = commit time + 24h
 ROUND_TOLERANCE_S = 600             # blob round must be within ±10min of expected
                                     # (MANTIS UID-46 lesson: wrong round ⇒ void, never hang)
+REVEAL_GRACE_S = int(os.getenv("SN89_REVEAL_GRACE_S", str(6 * 3600)))
+                                    # §6.4 forfeit: a commitment whose blob is still
+                                    # unfetchable this long AFTER its round matures is
+                                    # a FORFEIT LOSS — the timelock hides a signal from
+                                    # others but never excuses non-revelation, so a miner
+                                    # can't commit, watch the market, then publish only
+                                    # winners. Grace absorbs transient hosting/poll gaps;
+                                    # a blob we already captured is never forfeited.
 
 # Subnet owner X25519 public key (hex, 32 bytes). Miners encrypt W_owner to this.
 # The corresponding private key is held by the subnet owner.
@@ -41,7 +49,6 @@ OWNER_PK_HEX = os.getenv(
 # ── Submission rules (CONSENSUS — §6.4 of SPEC) ──────────────────────────────
 MAX_SIGNALS_PER_UTC_DAY = 3
 MIN_SPACING_S = 4 * 3600            # per-hotkey spacing
-PLAGIARISM_COOLDOWN_S = 15 * 60     # any (pair, direction) across ALL miners
 MAX_HORIZON_H = 72
 DEFAULT_HORIZON_H = 72
 LATENCY_BUFFER_S = 30               # entry anchor = commit-block timestamp + buffer
@@ -56,9 +63,25 @@ WICK_TOL = 0.01                     # candle extreme >1% beyond body + both
                                     # traded the level the same minute
 
 # ── Scoring (CONSENSUS — §7 of SPEC) ─────────────────────────────────────────
-SCORE_WINDOW_S = 8 * 24 * 3600      # trailing 8 days
+SCORE_WINDOW_S = 30 * 24 * 3600     # EMISSION window: a miner's share is sized by
+                                    # its WON count in the trailing 30 days, so you
+                                    # must keep trading to earn. (Hit-rate/tier do
+                                    # NOT use this window — they're lifetime.)
 QUALIFY_MIN_DECISIVE = 20           # lifetime decisive (won+lost) to qualify
-QUALIFY_MIN_HIT = 0.52              # trailing hit-rate gate
+QUALIFY_MIN_HIT = 0.53              # LIFETIME hit-rate gate (QUALIFIED tier floor) —
+                                    # career win-rate, never resets
+
+# Per-win multiplier by LIFETIME hit-rate tier — each recent win is worth more the
+# higher your career hit-rate, so quality is rewarded above the gate, not just
+# volume. Lifetime is a large, stable sample, so tier assignment doesn't flip on a
+# hot/cold streak. Checked high → low; the first threshold met wins. Below
+# QUALIFY_MIN_HIT a miner isn't qualified (multiplier 0). Mirrors the IQ Signals
+# program tiers: QUALIFIED 53 % (1×) · SHARP 60 % (1.2×) · WOLF 70 % (2×).
+WIN_RATE_TIERS = (
+    (0.70, 2.0),   # WOLF
+    (0.60, 1.2),   # SHARP
+    (0.53, 1.0),   # QUALIFIED
+)
 IMMUNITY_S = 8 * 24 * 3600          # from first commit observed for the hotkey
 DUST_WEIGHT = 1e-4                  # normalized floor during immunity
 BURN_UID = 0                        # absorbs weight when nobody qualifies
@@ -81,6 +104,48 @@ ELIM_MIN_TRAILING = 10         # trailing decisive sample before it can trigger
 ELIM_FLOOR_HIT = 0.40          # trailing hit-rate elimination floor (absolute)
 ELIM_SLASH_PROPORTION = 1.0    # fraction of posted collateral burned
 WITHDRAW_COOLDOWN_S = MAX_HORIZON_H * 3600   # after last signal settles
+
+# ── Copy / collusion detection (§7.5 — replaces the retired 15-min cooldown) ──
+# Multiple miners holding the same trade is now allowed; what we penalize is one
+# hotkey *repeatedly* shadowing another. Detection is a pairwise coincidence
+# counter over a 30-day rolling window — deterministic over the journal, so every
+# validator flags the same hotkeys. The LATER of two same-(pair,direction)
+# commits is the copier (first commit is always innocent).
+# PRIMARY enforcement: a per-signal scoring penalty on the copier. The earliest
+# entrant on a trade is the original; any DIFFERENT hotkey that opens the same
+# (pair, direction) while the original's position is still live is a copier, and
+# its outcome is penalized (a copied WIN does not count as a win). Spraying one
+# winning call across N keys therefore self-destructs: the original key keeps the
+# win, the other N-1 book penalized wins that drag their hit-rate below the gate.
+COPY_PENALTY = os.getenv("SN89_COPY_PENALTY", "loss")
+                                    # "loss" — a HABITUAL copier's copied wins count
+                                    #          toward decisive but NOT toward wins
+                                    #          (tanks hit-rate below the gate);
+                                    # "off"  — report-only, no scoring impact (calibration)
+
+# A copied win is only stripped for a *habitual* copier: a hotkey whose share of
+# decisive trades that landed second into another hotkey's live trade exceeds
+# this rate. This is aggregated across ALL leaders, so a copier who rotates
+# victims (multiple UIDs / a hacked feed copying one leader after another) can't
+# escape it — and an honest miner who only occasionally lands second on a
+# crowded trade is NOT penalized.
+COPY_HABITUAL_RATE = float(os.getenv("SN89_COPY_HABITUAL_RATE", "0.5"))
+COPY_MIN_COPIES = int(os.getenv("SN89_COPY_MIN_COPIES", "5"))
+                                    # need at least this many copied trades in the
+                                    # window before the rate gate can fire (a new
+                                    # miner with 2 unlucky second-landings is safe)
+
+# SECONDARY forensic: a 30-day pairwise shadowing report (who repeatedly follows
+# whom). Report-only by default — surfaced to the operator, no automatic penalty;
+# the per-signal COPY_PENALTY above is what actually bites.
+COPY_WINDOW_S = 30 * 24 * 3600      # rolling lookback for the shadowing report
+COPY_SHARP_LAG_S = 15 * 60          # same (pair,dir) within 15 min = sharp coincidence
+COPY_SOFT_LAG_S = 24 * 3600         # same (pair,dir) within 24 h = soft overlap
+COPY_SHARP_MIN_EVENTS = 3           # sharp coincidences vs one leader ⇒ report as copier
+COPY_SOFT_MIN_EVENTS = 8            # soft coincidences vs one leader ⇒ report low-diversity
+COPY_ZERO_WEIGHT = bool(int(os.getenv("SN89_COPY_ZERO_WEIGHT", "0")))
+                                    # set 1 to ALSO zero forensic-flagged copiers' weight
+                                    # (off by default — COPY_PENALTY is the real lever)
 
 # ── Asset universe / bands (CONSENSUS — vendored from the live IQ Signals board)
 _BANDS_PATH = Path(os.getenv(
