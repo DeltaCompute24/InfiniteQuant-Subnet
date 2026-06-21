@@ -316,6 +316,17 @@ class Validator:
         self.refresh_eliminations()
         mg = self.ch.metagraph()
         uid_by_hotkey = {hk: i for i, hk in enumerate(mg.hotkeys)}
+
+        # A hotkey with no validator permit can commit weights, but the chain
+        # never reveals them — they pile up until `TooManyUnrevealedCommits` and
+        # the validator earns nothing. Skip (don't commit junk) and say why.
+        if not self.ch.has_validator_permit(self.wallet.hotkey.ss58_address, mg=mg):
+            print(f"  ⚠️  skipping weights: hotkey {self.wallet.hotkey.ss58_address} "
+                  f"has no validator permit on netuid {config.NETUID} — commits "
+                  f"would never reveal. Stake this hotkey to earn a permit.")
+            self._last_weights_block = block  # throttle this warning to once per tempo
+            return
+
         now = time.time()
         cutoff = now - config.SCORE_WINDOW_S
 
@@ -417,6 +428,13 @@ class Validator:
     def run(self):
         print(f"SN89 validator · netuid={config.NETUID} · network={config.NETWORK} "
               f"· db={config.DB_PATH}")
+        hk = self.wallet.hotkey.ss58_address
+        permit = self.ch.has_validator_permit(hk)
+        if permit is None:
+            print(f"  ⚠️  hotkey {hk} is not registered on netuid {config.NETUID}.")
+        elif not permit:
+            print(f"  ⚠️  hotkey {hk} holds NO validator permit — weight commits "
+                  f"will never reveal until it is staked into the validator set.")
         while True:
             try:
                 self.ingest()

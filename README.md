@@ -342,6 +342,13 @@ export POLYGON_API_KEY=…           # Massive (formerly Polygon) API key — se
 python neurons/validator.py --wallet.name myvali --wallet.hotkey vali
 ```
 
+> **The validator hotkey must hold a validator permit** — i.e. be staked into
+> the subnet's validator set. Weights are set with commit-reveal: a hotkey with
+> no permit can submit commits, but the chain never reveals them; they pile up
+> until `TooManyUnrevealedCommits` and the validator earns nothing. The
+> validator logs a warning and skips weight-setting in that state. Stake the
+> hotkey (or run from one already in the validator set) before validating.
+
 State lives in `~/.sn89/validator.db` (SQLite). Grading is deterministic —
 same chain + same market data ⇒ same weights — so validators converge without
 coordination. Crypto bad-tick corroboration additionally queries Hyperliquid's

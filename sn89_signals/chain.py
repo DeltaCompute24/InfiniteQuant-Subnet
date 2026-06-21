@@ -161,6 +161,19 @@ class Chain:
     def metagraph(self):
         return self.st.metagraph(netuid=self.netuid)
 
+    def has_validator_permit(self, hotkey_ss58: str, mg=None) -> bool | None:
+        """Whether `hotkey_ss58` holds a validator permit on this subnet.
+
+        Returns None if the hotkey is not registered here. A hotkey WITHOUT a
+        permit can still submit weight commits, but the chain will never reveal
+        them — they accumulate until `TooManyUnrevealedCommits` and the validator
+        earns nothing. Pass an already-fetched `mg` to avoid a second query.
+        """
+        mg = mg if mg is not None else self.metagraph()
+        if hotkey_ss58 not in mg.hotkeys:
+            return None
+        return bool(mg.validator_permit[mg.hotkeys.index(hotkey_ss58)])
+
 
 def now_unix() -> float:
     return time.time()
