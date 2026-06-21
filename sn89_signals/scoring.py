@@ -63,7 +63,7 @@ def apply_validity_filters(rows: list[GradedRow]) -> list[GradedRow]:
 
         # accepted
         times.append(r.t0_unix)
-        open_pair_dir[okey] = r.t0_unix + config.MAX_HORIZON_H * 3600
+        open_pair_dir[okey] = r.t0_unix + r.horizon_h * 3600   # class-fixed window
 
     return rows
 

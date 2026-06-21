@@ -169,6 +169,24 @@ class TestGrader:
         g = self._grade("LONG", _bars((self.T0 + 60_000, 100, 101.5, 100, 100.1)))
         assert g.status == WON  # high exactly at tp → touched
 
+    def test_crypto_wash_window_is_30h(self):
+        # class-fixed: crypto develops over 30h regardless of submitted horizon
+        bars = _bars((self.T0 + 60_000, 100, 100.5, 99.5, 100.2))   # no touch (BTC 150bps)
+        s = _sig(pair="BTCUSD", direction="LONG")
+        assert grade(s, self.T0, self.T0 + 29 * 3_600_000,
+                     entry_price=self.ENTRY, bars=bars).status == PENDING
+        assert grade(s, self.T0, self.T0 + 31 * 3_600_000,
+                     entry_price=self.ENTRY, bars=bars).status == WASHED
+
+    def test_metals_wash_window_is_12h(self):
+        # fx/metals wash sooner than crypto (12h vs 30h)
+        bars = _bars((self.T0 + 60_000, 100, 100.4, 99.6, 100.1))   # no touch (XAU 50bps)
+        s = _sig(pair="XAUUSD", direction="LONG")
+        assert grade(s, self.T0, self.T0 + 11 * 3_600_000,
+                     entry_price=self.ENTRY, bars=bars).status == PENDING
+        assert grade(s, self.T0, self.T0 + 13 * 3_600_000,
+                     entry_price=self.ENTRY, bars=bars).status == WASHED
+
 
 # ── bad-tick sanitization (HYPE 2026-06-06 lesson) ───────────────────────────
 class TestSanitize:
