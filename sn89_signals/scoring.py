@@ -213,6 +213,38 @@ class MinerState:
     collateral_rao: int = 0  # posted collateral (0 when gating is off)
 
 
+def score_inputs(decisive: list[tuple[float, bool, bool]], first_seen_unix: float,
+                 now_unix: float) -> tuple[int, int, int, int, int, int]:
+    """From a hotkey's decisive history [(t0_unix, won, is_copy)] compute the
+    scoring inputs:
+      (lifetime_wins, lifetime_decisive,
+       trailing_wins_all, trailing_wins_orig, trailing_copies, trailing_decisive)
+
+    * lifetime_* span ALL of history INCLUDING warmup — they drive the ≥20
+      decisive gate and the lifetime hit-rate tier (the warmup record counts).
+    * trailing_* span the last SCORE_WINDOW_S, and a win only counts toward
+      EMISSIONS if it was committed AFTER this hotkey's warmup (immunity) ended
+      (t0 ≥ first_seen + IMMUNITY_S). Warmup wins build the record but never pay;
+      a miner must post NEW wins after warmup to earn above the dust floor.
+    """
+    cutoff = now_unix - config.SCORE_WINDOW_S
+    warmup_end = first_seen_unix + config.IMMUNITY_S
+    lw = ld = tw_all = tw_orig = tcopies = tdec = 0
+    for t0, won, is_copy in decisive:
+        ld += 1
+        if won:
+            lw += 1
+        if t0 >= cutoff:
+            tdec += 1
+            if is_copy:
+                tcopies += 1
+            if won and t0 >= warmup_end:        # post-warmup wins only earn
+                tw_all += 1
+                if not is_copy:
+                    tw_orig += 1
+    return lw, ld, tw_all, tw_orig, tcopies, tdec
+
+
 def compute_weights(states: list[MinerState], now_unix: float,
                     burn_uid: int = config.BURN_UID,
                     excluded_uids: set[int] | None = None,
