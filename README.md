@@ -50,12 +50,13 @@ Each submission blob contains one content ciphertext and two key-wraps
 |---|---|---|
 | `C` | the signal, ChaCha20-Poly1305, AAD-bound to hotkey + round | with the content key |
 | `W_time` | content key, drand-timelocked | at the reveal round (24 h) |
-| `W_owner` | content key, wrapped to the subnet-owner X25519 key | immediately, by the subnet owner |
+| `W_owner` | content key, wrapped to the subnet-owner X25519 key | protocol-required wrap |
 
-Both wraps open to the same key and the plaintext must hash to the on-chain
-commitment — a blob whose plaintext doesn't match its commitment is void and
-strikes the hotkey. The `W_owner` wrap is a protocol requirement; submissions
-without a valid owner wrap are not gradeable.
+The signal is graded after the timelock opens at the reveal round: the
+plaintext is recovered via `W_time` and must hash to the on-chain commitment —
+a blob whose plaintext doesn't match its commitment is void and strikes the
+hotkey. The `W_owner` wrap is a protocol requirement; submissions without a
+valid owner wrap are not gradeable.
 
 ### The rules (enforced at grading — violations void the signal; resubmit)
 

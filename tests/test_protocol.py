@@ -65,43 +65,40 @@ class TestSchema:
 
 # ── crypto ────────────────────────────────────────────────────────────────────
 class TestCrypto:
-    def test_owner_path_roundtrip(self):
-        sk, pk = crypto.owner_keypair()
-        s = _sig()
-        pt = s.canonical_bytes()
-        rnd = crypto.target_round(time.time() + 3600)
-        blob = crypto.encrypt(pt, HK, rnd, pk)
-        assert crypto.decrypt_owner(blob, sk) == pt
+    @staticmethod
+    def _owner_pk() -> str:
+        """A throwaway X25519 public key to encrypt the (required) owner wrap to.
+        Opening that wrap is the subnet owner's job and not part of this code."""
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+        return X25519PrivateKey.generate().public_key().public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw).hex()
 
-    def test_owner_path_wrong_key_fails(self):
-        sk1, pk1 = crypto.owner_keypair()
-        sk2, _ = crypto.owner_keypair()
-        blob = crypto.encrypt(b"x" * 100, HK, 123456, pk1)
-        assert crypto.decrypt_owner(blob, sk2) is None
-
-    def test_binding_blocks_hotkey_swap(self):
-        sk, pk = crypto.owner_keypair()
-        blob = crypto.encrypt(b"y" * 50, HK, 123456, pk)
-        blob["hk"] = "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty"
-        assert crypto.decrypt_owner(blob, sk) is None
-
-    def test_commit_mismatch_rejected(self):
-        sk, pk = crypto.owner_keypair()
-        blob = crypto.encrypt(b"z" * 50, HK, 123456, pk)
-        blob["commit"] = "00" * 32
-        assert crypto.decrypt_owner(blob, sk) is None
-
-    def test_timelock_roundtrip_past_round(self):
-        """Use an already-matured drand round so tld works immediately
-        (network call to drand API)."""
-        sk, pk = crypto.owner_keypair()
-        rnd = crypto.target_round(time.time() - 60)  # already matured
+    def _matured_blob(self, pt: bytes):
+        """Encrypt at an already-matured drand round and return (blob, sig) so
+        the validator timelock path can open it immediately. Skips if drand is
+        unreachable."""
+        rnd = crypto.target_round(time.time() - 60)
         sig = crypto.fetch_drand_signature(rnd)
         if sig is None:
             pytest.skip("drand API unreachable")
+        return crypto.encrypt(pt, HK, rnd, self._owner_pk()), sig
+
+    def test_timelock_roundtrip_past_round(self):
         pt = _sig().canonical_bytes()
-        blob = crypto.encrypt(pt, HK, rnd, pk)
+        blob, sig = self._matured_blob(pt)
         assert crypto.decrypt_timelock(blob, sig) == pt
+
+    def test_binding_blocks_hotkey_swap(self):
+        blob, sig = self._matured_blob(_sig().canonical_bytes())
+        blob["hk"] = "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty"
+        assert crypto.decrypt_timelock(blob, sig) is None
+
+    def test_commit_mismatch_rejected(self):
+        blob, sig = self._matured_blob(_sig().canonical_bytes())
+        blob["commit"] = "00" * 32
+        assert crypto.decrypt_timelock(blob, sig) is None
 
     def test_round_window(self):
         t0 = time.time()
