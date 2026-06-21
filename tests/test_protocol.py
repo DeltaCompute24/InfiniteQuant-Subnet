@@ -561,21 +561,21 @@ class TestWinRateTiers:
     def test_wolf_doubles_qualified_at_equal_recent_wins(self):
         # equal recent wins (14), different LIFETIME tiers → WOLF earns 2× per win
         w = scoring.compute_weights([
-            _state(1, self.OLD, 14, 20, 14),   # 70% lifetime WOLF  → eff 28
-            _state(2, self.OLD, 14, 26, 14),   # 53.8% lifetime QUAL → eff 14
+            _state(1, self.OLD, 14, 20, 14),   # 70% lifetime WOLF → eff 28
+            _state(2, self.OLD, 14, 25, 14),   # 56% lifetime QUAL → eff 14
         ], self.NOW)
         assert w[1] / w[2] == pytest.approx(2.0)
 
     def test_sharp_beats_qualified_at_equal_recent_wins(self):
         w = scoring.compute_weights([
             _state(1, self.OLD, 12, 20, 12),   # 60% lifetime SHARP → eff 14.4
-            _state(2, self.OLD, 12, 22, 12),   # 54.5% lifetime QUAL → eff 12
+            _state(2, self.OLD, 12, 21, 12),   # 57% lifetime QUAL → eff 12
         ], self.NOW)
         assert w[1] / w[2] == pytest.approx(1.2)
 
-    def test_53_gate_excludes_52(self):
+    def test_55_gate_excludes_just_below(self):
         w = scoring.compute_weights([
-            _state(1, self.OLD, 13, 25, 13),   # 52% lifetime — just below 53% gate
+            _state(1, self.OLD, 27, 50, 27),   # 54% lifetime — just below 55% gate
         ], self.NOW)
         assert 1 not in w
         assert w[config.BURN_UID] > 0.99
