@@ -183,7 +183,7 @@ def cmd_follow(args) -> int:
               file=sys.stderr)
         return 1
 
-    state_path = os.path.expanduser("~/.sn89/follow_state.json")
+    state_path = os.getenv("SN89_FOLLOW_STATE") or os.path.expanduser("~/.sn89/follow_state.json")
     os.makedirs(os.path.dirname(state_path), exist_ok=True)
     try:
         with open(state_path, encoding="utf-8") as fh:
