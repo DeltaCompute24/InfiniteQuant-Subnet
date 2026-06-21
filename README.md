@@ -140,6 +140,34 @@ A separate **shadowing report** (who repeatedly commits the same `(pair,
 direction)` within 15 min / 24 h of whom, over 30 days) is surfaced to the
 operator for monitoring. It carries no automatic penalty by default.
 
+### Collateral
+
+Miners post SN89 alpha as collateral to earn emissions (`docs/collateral.md`):
+
+```
+no collateral                          → dust weight (track record only)
+trailing hit < 40 % over ≥10 decisive  → ELIMINATED: collateral burned,
+  (after ≥20 lifetime decisive)          hotkey zeroed permanently
+```
+
+- Self-serve, keys stay local:
+
+  ```bash
+  python neurons/collateral_cli.py deposit  --amount 100 --wallet.name my --wallet.hotkey my
+  python neurons/collateral_cli.py balance  --hotkey <ss58>
+  python neurons/collateral_cli.py withdraw --amount 100 --wallet.name my --hotkey <ss58>
+  ```
+
+  Deposit moves alpha to the subnet vault via a coldkey-signed
+  `transfer_stake` (the CLI signs locally and POSTs it); balances are public
+  on the EVM ledger (`contracts/Collateral.sol`) and every slash is paired
+  with an on-chain `burn_alpha`.
+- Between 40 % and 52 % you earn nothing but keep your collateral. The floor
+  only destroys sustained negative edge, never a cold streak.
+- Withdrawals settle after all open signals resolve plus a 72 h cooldown.
+- Not yet active: gating turns on when the ledger contract address ships in a
+  release (`SN89_COLLATERAL_CONTRACT`).
+
 ### Asset board
 
 38 assets: BTC/ETH/SOL/XRP/HYPE crypto, 29 forex pairs, XAU/XAG/XPT/XPD

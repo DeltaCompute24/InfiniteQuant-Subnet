@@ -88,6 +88,23 @@ BURN_UID = 0                        # absorbs weight when nobody qualifies
 STRIKE_LIMIT = 3                    # consistency failures in 30d ⇒ zeroed 30d
 STRIKE_WINDOW_S = 30 * 24 * 3600
 
+# ── Collateral (CONSENSUS — docs/collateral.md) ──────────────────────────────
+# Callers post SN89 alpha as collateral (vault custody + public EVM ledger).
+# Unfunded hotkeys earn dust only; crossing the elimination floor burns the
+# collateral and zeroes the hotkey for good (coming back = new hotkey + fresh
+# collateral). Gating is OFF until a ledger contract address is configured.
+COLLATERAL_CONTRACT = os.getenv("SN89_COLLATERAL_CONTRACT", "")  # ledger proxy
+EVM_ENDPOINT = os.getenv("SN89_EVM_ENDPOINT",
+                         "https://lite.chain.opentensor.ai")
+VAULT_COLDKEY = os.getenv("SN89_VAULT_COLDKEY", "")    # vault wallet coldkey ss58
+COLLATERAL_MIN_ALPHA = float(os.getenv("SN89_COLLATERAL_MIN_ALPHA", "100"))
+
+ELIM_MIN_DECISIVE = 20         # lifetime decisive before the floor can trigger
+ELIM_MIN_TRAILING = 10         # trailing decisive sample before it can trigger
+ELIM_FLOOR_HIT = 0.40          # trailing hit-rate elimination floor (absolute)
+ELIM_SLASH_PROPORTION = 1.0    # fraction of posted collateral burned
+WITHDRAW_COOLDOWN_S = MAX_HORIZON_H * 3600   # after last signal settles
+
 # ── Copy / collusion detection (§7.5 — replaces the retired 15-min cooldown) ──
 # Multiple miners holding the same trade is now allowed; what we penalize is one
 # hotkey *repeatedly* shadowing another. Detection is a pairwise coincidence

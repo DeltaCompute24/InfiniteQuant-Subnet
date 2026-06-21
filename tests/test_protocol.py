@@ -541,6 +541,38 @@ class TestWinRateTiers:
         assert w[config.BURN_UID] > 0.99
 
 
+class TestCollateralGating:
+    # verifies the collateral gate composes with the lifetime/excluded model
+    NOW = 10_000_000.0
+    OLD = NOW - config.IMMUNITY_S - 1
+
+    def _s(self, uid, lw, ld, tw, rao):
+        return scoring.MinerState(
+            hotkey=f"hk{uid}", uid=uid, first_seen_unix=self.OLD,
+            lifetime_wins=lw, lifetime_decisive=ld, trailing_wins=tw, collateral_rao=rao)
+
+    def test_unfunded_held_to_dust(self):
+        w = scoring.compute_weights(
+            [self._s(1, 18, 30, 6, 1_000_000),    # funded, qualified
+             self._s(2, 18, 30, 6, 0)],           # qualified by hit-rate but unfunded
+            self.NOW, min_collateral_rao=500_000)
+        assert w[1] > 0.99
+        assert w[2] == pytest.approx(config.DUST_WEIGHT, rel=1e-6)
+
+    def test_gating_off_ignores_funds(self):
+        w = scoring.compute_weights(
+            [self._s(1, 18, 30, 6, 0), self._s(2, 18, 30, 3, 0)],
+            self.NOW, min_collateral_rao=0)
+        assert abs(w[1] / w[2] - 2.0) < 1e-9       # pure 6:3 emission split
+
+    def test_excluded_copier_gets_nothing_even_if_funded(self):
+        w = scoring.compute_weights(
+            [self._s(1, 18, 30, 6, 1_000_000), self._s(2, 18, 30, 6, 1_000_000)],
+            self.NOW, excluded_uids={2}, min_collateral_rao=500_000)
+        assert 2 not in w
+        assert w[1] > 0.99
+
+
 # ── forfeit on non-revelation (§6.4 — closes the selective-reveal option) ─────
 class TestForfeitUnrevealed:
     """A committed signal whose blob is never served must grade LOST, so the
