@@ -348,6 +348,25 @@ coordination. Crypto bad-tick corroboration additionally queries Hyperliquid's
 public candle API (no key needed). Entry timing design rationale:
 `docs/entry-timing.md`.
 
+## Staying updated (recommended: `run.sh`)
+
+Grading code evolves, and **validators must run a compatible version or their
+weights diverge from consensus** (miners likewise need the current submission
+format). Launch your neuron through the auto-updater so it tracks releases
+itself — on a timer it checks `origin/master`, and when a new version ships it
+pulls, reinstalls changed deps, and restarts the neuron (and it restarts the
+neuron if it crashes):
+
+```bash
+# validator
+bash run.sh validator --wallet.name myvali --wallet.hotkey vali
+# miner (any mode: follow / submit / serve)
+bash run.sh miner follow --wallet.name mywallet --wallet.hotkey miner
+```
+
+Run it from the repo root (where `.venv` lives). Knobs: `SN89_AUTO_UPDATE=0`
+disables updates, `SN89_UPDATE_INTERVAL_S` sets the check cadence (default 30 m).
+
 ## FAQ
 
 **Why can't I set my own TP/SL?** Symmetric fixed bands are what make hit rate
