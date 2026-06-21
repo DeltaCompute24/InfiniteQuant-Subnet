@@ -88,8 +88,8 @@ it; the forfeit only catches blobs that were *never served*.
 ```
 decisive    = WON + LOST   (washes and voids never count)
 hit rate    = your LIFETIME wins / lifetime decisive   (all-time, never resets)
-QUALIFIED   = lifetime decisive ≥ 20  AND  lifetime hit rate ≥ 53 %
-tier        = by lifetime hit rate:   QUALIFIED ≥ 53 % → 1.0×
+QUALIFIED   = lifetime decisive ≥ 20  AND  lifetime hit rate ≥ 55 %
+tier        = by lifetime hit rate:   QUALIFIED ≥ 55 % → 1.0×
                                       SHARP     ≥ 60 % → 1.2×
                                       WOLF      ≥ 70 % → 2.0×
 your weight ∝ (your WON count in the last 30 days) × your tier
@@ -101,7 +101,7 @@ Two separate clocks: **quality is forever, pay is recent.**
 
 - **Hit-rate (gate + tier) is your whole career** — it never resets, so a hot
   or cold streak can't flip your tier, and you can't farm a tier on a small
-  lucky sample. A 70 % WOLF over hundreds of trades earns 2× per win of a 53 %
+  lucky sample. A 70 % WOLF over hundreds of trades earns 2× per win of a 55 %
   QUALIFIED.
 - **Emissions are sized by your last 30 days of wins**, so you must keep trading
   to earn: a career WOLF who stops submitting earns nothing until it puts fresh
@@ -113,7 +113,7 @@ Two separate clocks: **quality is forever, pay is recent.**
   the ≥20-decisive gate and your lifetime hit-rate/tier) **but warmup wins never
   pay emissions** — only wins committed *after* warmup ends earn, so you must
   post fresh wins to rise above the dust floor.
-- Random submissions sit below the 53 % gate and earn nothing after immunity.
+- Random submissions sit below the 55 % gate and earn nothing after immunity.
 - If no qualified miner has any recent wins, emissions burn.
 
 ### Copy penalty
