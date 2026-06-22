@@ -330,6 +330,22 @@ python neurons/miner.py --wallet.name mywallet --wallet.hotkey miner \
     submit --pair BTCUSD --direction LONG
 ```
 
+### Link your X (Twitter) handle
+
+Put your handle on the public leaderboard and let us tag you in social proof of
+your setups and earnings:
+
+```bash
+python neurons/miner.py --wallet.name mywallet --wallet.hotkey miner \
+    register-x --handle @yourname
+```
+
+This signs the message `sn89-register-x:<hotkey>:<handle>:<timestamp>` with your
+hotkey and sends only `{hotkey, handle, timestamp, signature}` — your keys never
+leave the box. The server verifies the signature against your hotkey before
+storing the handle, so no one can claim a handle under a hotkey they don't
+control. Re-run any time to update or change your handle.
+
 ## Running a Validator
 
 > **⚠️ Market-data subscription required.** Running/scoring requires a **paid
