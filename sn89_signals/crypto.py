@@ -1,19 +1,21 @@
 """Dual-envelope encryption — adapted from MANTIS (SN123) v2 payloads, MIT.
 
-One content ciphertext, two ways to open it:
+One content ciphertext, with two key-wraps on every submission:
 
     pt ──ChaCha20Poly1305(key, AAD=binding)──► C
     key wrapped to owner:    W_owner = ChaCha(HKDF(X25519(ske, owner_pk)), key)
     (ske‖key) timelocked:    W_time  = tlock(round, ske‖key)
 
-* The OWNER decrypts immediately: X25519(owner_sk, pke) → unwrap key → open C.
+* `W_owner` is a key-wrap to the subnet-owner X25519 key — a protocol
+  requirement on every blob; a submission without a valid owner wrap is not
+  gradeable.
 * VALIDATORS/public decrypt after `round` matures: drand sig → tld → ske‖key
   → verify pke = pub(ske) → open C.
 * `binding = SHA256(hotkey:round:owner_pk:pke)` is the AAD on every AEAD —
   a blob can't be replayed under another hotkey or round.
 
 The plaintext is the Signal's canonical bytes; SHA256(pt) must equal the
-on-chain commitment (checked by both paths before anything is trusted).
+on-chain commitment (checked before anything is trusted).
 """
 from __future__ import annotations
 
@@ -101,28 +103,6 @@ def encrypt(pt: bytes, hotkey: str, rnd: int, owner_pk_hex: str) -> dict:
     }
 
 
-# ── decrypt: owner path (instant) ────────────────────────────────────────────
-def decrypt_owner(blob: dict, owner_sk_hex: str) -> bytes | None:
-    try:
-        owner_sk = X25519PrivateKey.from_private_bytes(bytes.fromhex(owner_sk_hex))
-        owner_pk = owner_sk.public_key().public_bytes(
-            encoding=serialization.Encoding.Raw, format=serialization.PublicFormat.Raw)
-        pke = bytes.fromhex(blob["W_owner"]["pke"])
-        binding = _binding(blob["hk"], int(blob["round"]), owner_pk, pke)
-        if binding != bytes.fromhex(blob["binding"]):
-            return None
-        shared = owner_sk.exchange(X25519PublicKey.from_public_bytes(pke))
-        key = ChaCha20Poly1305(_hkdf_key(shared)).decrypt(
-            bytes.fromhex(blob["W_owner"]["nonce"]), bytes.fromhex(blob["W_owner"]["ct"]), binding)
-        pt = ChaCha20Poly1305(key).decrypt(
-            bytes.fromhex(blob["C"]["nonce"]), bytes.fromhex(blob["C"]["ct"]), binding)
-        if hashlib.sha256(pt).hexdigest() != blob.get("commit"):
-            return None
-        return pt
-    except Exception:
-        return None
-
-
 # ── decrypt: timelock path (validators / public, post-reveal) ────────────────
 def decrypt_timelock(blob: dict, drand_sig: bytes, tlock: Timelock | None = None) -> bytes | None:
     try:
@@ -159,13 +139,3 @@ def expected_round_ok(blob_round: int, commit_unix: float) -> bool:
     return abs(round_time(int(blob_round)) - want) <= config.ROUND_TOLERANCE_S
 
 
-def owner_keypair() -> tuple[str, str]:
-    """Generate (sk_hex, pk_hex) for the subnet owner. Run once; store the secret key securely."""
-    sk = X25519PrivateKey.generate()
-    sk_hex = sk.private_bytes(
-        encoding=serialization.Encoding.Raw,
-        format=serialization.PrivateFormat.Raw,
-        encryption_algorithm=serialization.NoEncryption()).hex()
-    pk_hex = sk.public_key().public_bytes(
-        encoding=serialization.Encoding.Raw, format=serialization.PublicFormat.Raw).hex()
-    return sk_hex, pk_hex
