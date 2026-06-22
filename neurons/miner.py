@@ -12,6 +12,11 @@ Three modes:
                     them with YOUR local hotkey (non-custodial — keys never
                     leave this box). DM /miner to the Signals Bot for a token,
                     then set SN89_FEED_TOKEN.
+  * link X handle:  python neurons/miner.py register-x --handle @yourname
+                    Signs a message with your hotkey and links your X (Twitter)
+                    handle to it, so your handle shows on the public leaderboard
+                    and we can tag you in social proof of your setups + earnings.
+                    Only your hotkey signature is sent — never your keys.
 
 All paths do the same thing (§4 of SPEC):
   1. build + validate the Signal (band/tp/sl come from the board file)
@@ -28,6 +33,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import time
 
@@ -226,6 +232,63 @@ def cmd_follow(args) -> int:
         time.sleep(args.interval)
 
 
+_HANDLE_RE = re.compile(r"^[A-Za-z0-9_]{1,15}$")
+
+
+def normalize_handle(raw: str) -> str:
+    """Accept '@name', 'name', or any x.com/twitter.com profile URL → 'name'."""
+    h = (raw or "").strip()
+    for pre in ("https://x.com/", "https://twitter.com/", "http://x.com/",
+                "http://twitter.com/", "x.com/", "twitter.com/", "@"):
+        if h.lower().startswith(pre):
+            h = h[len(pre):]
+            break
+    return h.strip("/").split("?")[0].split("/")[0]
+
+
+def cmd_register_x(args) -> int:
+    """Link an X (Twitter) handle to this hotkey, signed by the hotkey.
+
+    The handle is the only thing published; we send {hotkey, handle, ts,
+    signature} — the signature proves you control the hotkey. The same canonical
+    message ``sn89-register-x:<hotkey>:<handle>:<ts>`` is re-derived and verified
+    server-side; nothing but the signature ever leaves this box.
+    """
+    import requests
+
+    w = _wallet(args)
+    hotkey = w.hotkey.ss58_address
+    handle = normalize_handle(args.handle)
+    if not _HANDLE_RE.match(handle):
+        print(f"INVALID handle '{args.handle}' — X handles are 1–15 characters "
+              f"(letters, digits, underscore).", file=sys.stderr)
+        return 1
+
+    ts = int(time.time())
+    msg = f"sn89-register-x:{hotkey}:{handle}:{ts}"
+    signature = w.hotkey.sign(msg.encode()).hex()
+    url = args.url or os.getenv(
+        "SN89_REGISTER_URL", "https://partner.infinitequant.app/api/sn89/register-x")
+    try:
+        r = requests.post(url, json={"hotkey": hotkey, "handle": handle,
+                                     "ts": ts, "signature": signature}, timeout=10)
+    except Exception as e:  # noqa: BLE001
+        print(f"register-x: could not reach {url}: {e}", file=sys.stderr)
+        return 1
+    try:
+        body = r.json()
+    except ValueError:
+        body = {"raw": r.text}
+    if r.status_code == 200 and body.get("ok"):
+        print(f"✓ linked @{handle} to hotkey {hotkey}")
+        print("  It appears on the SN89 leaderboard at the next refresh "
+              "(infinitequant.app).")
+        return 0
+    print(f"register-x failed [{r.status_code}]: {body.get('error') or body}",
+          file=sys.stderr)
+    return 1
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description="SN89 Signals miner")
     p.add_argument("--wallet.name", dest="wallet_name", default="default")
@@ -250,6 +313,16 @@ def main() -> int:
                     help="feed URL (default SN89_FEED_URL or the IQ endpoint)")
     pf.add_argument("--interval", type=int, default=5, help="poll seconds")
     pf.set_defaults(fn=cmd_follow)
+
+    px = sub.add_parser("register-x",
+                        help="link your X (Twitter) handle to your hotkey "
+                             "for the leaderboard + social proof")
+    px.add_argument("--handle", required=True,
+                    help="your X handle, e.g. @yourname (or a full profile URL)")
+    px.add_argument("--url", default=None,
+                    help="override the registration endpoint (default SN89_REGISTER_URL "
+                         "or the IQ endpoint)")
+    px.set_defaults(fn=cmd_register_x)
 
     args = p.parse_args()
     return args.fn(args)
