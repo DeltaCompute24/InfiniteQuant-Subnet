@@ -169,7 +169,12 @@ Design choices already made deliberately (context for review):
   size, making conviction measurable (the capital-weighting prediction markets
   get for free).
 - **Decentralizing the custodian**: multisig on the EVM owner key / vault, or
-  a collateral pallet if subtensor ever ships one.
+  a collateral pallet if subtensor ever ships one. A concrete proposal is in
+  `contracts/voting/` (`CollateralVoting.sol`): collateral escrowed as TAO in
+  the contract, slashing governed by a stake-weighted validator vote instead of
+  a single trustee, and the disposition of slashed funds decoupled behind a
+  swappable target so burning can later become "stake into SN8 as trading
+  capital" with one governed call.
 
 ## Deployment checklist
 

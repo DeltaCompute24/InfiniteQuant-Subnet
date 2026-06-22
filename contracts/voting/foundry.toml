@@ -1,0 +1,11 @@
+# Run from contracts/voting/:
+#   forge install foundry-rs/forge-std --no-git
+#   forge test -vv
+[profile.default]
+src = "."
+test = "test"
+out = "out"
+libs = ["lib"]
+solc = "0.8.28"
+optimizer = true
+optimizer_runs = 200
