@@ -54,5 +54,5 @@ After deploying:
    authorizes upgrades. Custody of that key and of the vault coldkey is the
    trust root of the whole system; store both per the operational runbook,
    never in the repo.
-3. Testnet first: deploy on chainId 945 against netuid 496 and run a full
+3. Testnet first: deploy on chainId 945 against netuid 514 and run a full
    deposit → slash → withdraw cycle before mainnet.
