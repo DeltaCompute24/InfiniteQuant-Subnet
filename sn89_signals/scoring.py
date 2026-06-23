@@ -31,25 +31,27 @@ def apply_validity_filters(rows: list[GradedRow]) -> list[GradedRow]:
     Voided rows: not graded, don't count toward quotas, no strike.
     """
     rows = sorted(rows, key=lambda r: (r.t0_unix, r.hotkey))
-    per_hotkey_times: dict[str, list[float]] = {}           # spacing
+    per_hotkey_times: dict[str, list[float]] = {}           # daily quota
 
     # NOTE: the old 15-min cross-miner (pair, direction) cooldown was retired —
     # multiple miners may now hold the same trade. Repeated shadowing of one
     # hotkey by another is handled out-of-band by detect_copiers() (§7.5), which
     # penalizes the copier's weight rather than voting the signal.
     #
-    # The per-UTC-day signal cap and the self-overlap (one open per
-    # (hotkey, pair, direction)) rule were both removed — a hotkey may now fire
-    # any number of signals per day and hold multiple open calls on the same
-    # pair/direction simultaneously. Only the per-hotkey spacing gate remains.
+    # The per-hotkey spacing gate and the self-overlap (one open per
+    # (hotkey, pair, direction)) rule were both removed — a hotkey may fire
+    # signals with no minimum gap and hold multiple open calls on the same
+    # pair/direction. The only submission cap is MAX_SIGNALS_PER_UTC_DAY.
     for r in rows:
         if r.status == "void":
             continue
 
-        # per-hotkey spacing ≥ 4h
         times = per_hotkey_times.setdefault(r.hotkey, [])
-        if times and r.t0_unix - times[-1] < config.MIN_SPACING_S:
-            r.status, r.void_reason = "void", "min_spacing"
+
+        # ≤ MAX_SIGNALS_PER_UTC_DAY per UTC day
+        day = int(r.t0_unix // 86_400)
+        if sum(1 for t in times if int(t // 86_400) == day) >= config.MAX_SIGNALS_PER_UTC_DAY:
+            r.status, r.void_reason = "void", "daily_quota"
             continue
 
         # accepted

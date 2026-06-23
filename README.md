@@ -30,14 +30,14 @@ Quality is forever; pay is recent. Hit-rate never resets; wins decay after 30 da
 
 | Rule | Value |
 |---|---|
-| Max signals per UTC day | unlimited |
-| Min spacing | 4 h between your own signals |
+| Max signals per UTC day | 6 per hotkey |
+| Min spacing | none — fire as fast as you like |
 | TP / SL | per-asset, symmetric 1:1 — `data/signals-bands.json` |
 | Horizon | crypto 30 h · forex/metals 12 h · equities 48 h |
 | Overlap | unlimited — a hotkey may hold multiple open calls on the same (pair, direction) |
 | Unrevealed blob | LOSS 6 h past reveal round |
 
-There's no daily signal cap. Exception: a blob that fails hash-verification or won't decrypt at reveal is a strike — three strikes in 30 days zeroes the hotkey for 30 days.
+The only submission cap is 6 signals per hotkey per UTC day. Exception: a blob that fails hash-verification or won't decrypt at reveal is a strike — three strikes in 30 days zeroes the hotkey for 30 days.
 
 ### Copy penalty
 
@@ -103,7 +103,7 @@ export SN89_FEED_TOKEN=<token from /miner>
 python neurons/miner.py --wallet.name mywallet --wallet.hotkey miner follow
 ```
 
-The token scopes the feed to your own calls and authorizes the blob relay — no bucket needed. The follower long-polls your submissions only and commits each one with your local hotkey the moment it appears. Non-custodial: the platform never sees your keys, and the token can't read anyone else's calls. The program's rules (3 calls/day, ≥ 4 h apart) match the subnet's rules exactly.
+The token scopes the feed to your own calls and authorizes the blob relay — no bucket needed. The follower long-polls your submissions only and commits each one with your local hotkey the moment it appears. Non-custodial: the platform never sees your keys, and the token can't read anyone else's calls. The program's rules (6 calls/day) match the subnet's rules exactly.
 
 ### Interface 2 — REST API
 

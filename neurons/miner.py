@@ -138,7 +138,7 @@ def cmd_serve(args) -> int:
     token = os.getenv("SN89_INTAKE_TOKEN", "")
     if args.host != "127.0.0.1" and not token:
         print("REFUSING to bind a public interface without SN89_INTAKE_TOKEN set "
-              "— anyone could burn your 3 daily submissions.", file=sys.stderr)
+              "— anyone could burn your 6 daily submissions.", file=sys.stderr)
         return 1
 
     class Handler(BaseHTTPRequestHandler):

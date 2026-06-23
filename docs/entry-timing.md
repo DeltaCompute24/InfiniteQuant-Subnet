@@ -59,9 +59,10 @@ t0 = self.ch.block_time_unix(c["commit_block"])   # ms-precise, identical on eve
 ```
 
 Caveat: subtensor keeps ONE commitment per hotkey (latest wins). If a miner overwrites
-before a validator's poll observes the previous commitment, the old signal is lost —
-already true today and already bounded by `MIN_SPACING_S = 4 h`, so a ≤30 s poll can
-never miss one. Keep the journal as an *observation log*; `commit_block` is canon.
+before a validator's poll observes the previous commitment, the old signal is lost.
+With no minimum spacing a miner *can* fire back-to-back, so a fresh commit may land
+within a poll interval of the prior one; a ≤30 s poll keeps that window small. Keep the
+journal as an *observation log*; `commit_block` is canon.
 
 `t0_unix` becomes **float seconds with ms precision** (it already is — `chain.py:84`
 divides the pallet's ms value). Store `t0_ms` as INTEGER ms instead to stop precision

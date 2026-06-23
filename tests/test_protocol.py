@@ -325,19 +325,28 @@ class TestValidity:
         ])
         assert rows[1].status == "ok"
 
-    def test_min_spacing(self):
+    def test_no_min_spacing(self):
+        # the spacing gate was removed — back-to-back signals are accepted.
         rows = scoring.apply_validity_filters([
             _row("A", "BTCUSD", "LONG", 0),
-            _row("A", "XAUUSD", "LONG", 3600),               # 1h later < 4h
+            _row("A", "XAUUSD", "LONG", 60),                 # 1 min later — still ok
         ])
-        assert (rows[1].status, rows[1].void_reason) == ("void", "min_spacing")
+        assert [r.status for r in rows] == ["ok", "ok"]
 
-    def test_no_daily_cap(self):
-        # the per-UTC-day signal cap was removed — any number of signals/day is
-        # accepted as long as they respect the 4h spacing gate.
+    def test_daily_quota(self):
+        # up to MAX_SIGNALS_PER_UTC_DAY (6) accepted per hotkey per UTC day;
+        # the 7th in the same day is voided. No spacing required.
         rows = scoring.apply_validity_filters([
-            _row("A", "BTCUSD", "LONG", i * 4 * 3600) for i in range(12)
+            _row("A", "BTCUSD", "LONG", i * 600) for i in range(7)  # 10 min apart
         ])
+        assert [r.status for r in rows[:6]] == ["ok"] * 6
+        assert (rows[6].status, rows[6].void_reason) == ("void", "daily_quota")
+
+    def test_quota_resets_next_utc_day(self):
+        # the 7th signal lands on the next UTC day → accepted, not over quota.
+        rows = scoring.apply_validity_filters(
+            [_row("A", "BTCUSD", "LONG", i * 600) for i in range(6)]
+            + [_row("A", "BTCUSD", "LONG", 86_400 + 1)])
         assert all(r.status == "ok" for r in rows)
 
     def test_self_overlap_allowed(self):
