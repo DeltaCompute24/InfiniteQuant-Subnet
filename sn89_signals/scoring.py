@@ -58,7 +58,7 @@ def apply_validity_filters(rows: list[GradedRow]) -> list[GradedRow]:
     return rows
 
 
-# ── elimination floor (docs/collateral.md — terminal, collateral burned) ─────
+# ── elimination floor (terminal — hotkey zeroed permanently) ─────────────────
 def elimination_t0(decisive: list[tuple[float, bool]]) -> float | None:
     """First decisive t0 at which a hotkey crossed the elimination floor, or
     None. `decisive` is the hotkey's full decisive history as (t0_unix, won).
@@ -200,7 +200,6 @@ class MinerState:
     lifetime_wins: int       # all-time WONs — drives LIFETIME hit-rate + tier
     lifetime_decisive: int   # all-time decisive (won+lost) — gate + hit-rate denom
     trailing_wins: int       # WONs inside SCORE_WINDOW_S (30d) — sizes the emission
-    collateral_rao: int = 0  # posted collateral (0 when gating is off)
 
 
 def score_inputs(decisive: list[tuple[float, bool, bool]], first_seen_unix: float,
@@ -237,11 +236,10 @@ def score_inputs(decisive: list[tuple[float, bool, bool]], first_seen_unix: floa
 
 def compute_weights(states: list[MinerState], now_unix: float,
                     burn_uid: int = config.BURN_UID,
-                    excluded_uids: set[int] | None = None,
-                    min_collateral_rao: int = 0) -> dict[int, float]:
-    """{uid: normalized_weight}. Immune and unfunded miners get the dust floor;
-    qualified funded miners split the rest by their LAST-30-DAY wins, each scaled
-    by the miner's LIFETIME hit-rate tier (§7.3); leftovers burn.
+                    excluded_uids: set[int] | None = None) -> dict[int, float]:
+    """{uid: normalized_weight}. Immune miners get the dust floor; qualified
+    miners split the rest by their LAST-30-DAY wins, each scaled by the miner's
+    LIFETIME hit-rate tier (§7.3); leftovers burn.
 
     Hit-rate (gate + tier) is career-long and never resets — a large, stable
     sample. Emission size is the trailing-30d win count, so a miner must keep
@@ -251,9 +249,8 @@ def compute_weights(states: list[MinerState], now_unix: float,
     dust floor nor a pro-rata share — for as long as they stay flagged. Their
     forfeited budget burns; the exclusion is reversible (recomputed each cycle).
 
-    min_collateral_rao=0 disables collateral gating (pre-deployment behavior);
-    when set, unfunded hotkeys are held to dust. Eliminated hotkeys must be
-    filtered out by the caller before this — they get nothing, not dust.
+    Eliminated hotkeys must be filtered out by the caller before this — they get
+    nothing, not dust.
     """
     excluded_uids = excluded_uids or set()
     weights: dict[int, float] = {}
@@ -264,17 +261,11 @@ def compute_weights(states: list[MinerState], now_unix: float,
     for s in immune:
         weights[s.uid] = config.DUST_WEIGHT
 
-    if min_collateral_rao > 0:
-        for s in states:
-            if s.uid not in excluded_uids and s.collateral_rao < min_collateral_rao:
-                weights[s.uid] = config.DUST_WEIGHT
-
     qualified = [
         s for s in states
         if s.uid not in excluded_uids
         and s.lifetime_decisive >= config.QUALIFY_MIN_DECISIVE
         and (s.lifetime_wins / s.lifetime_decisive) >= config.QUALIFY_MIN_HIT
-        and (min_collateral_rao == 0 or s.collateral_rao >= min_collateral_rao)
     ]
 
     # emission = last-30d wins × LIFETIME hit-rate tier (§7.3). A qualified miner

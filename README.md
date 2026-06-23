@@ -141,23 +141,16 @@ python neurons/miner.py --wallet.name mywallet --wallet.hotkey miner \
 
 Signs `sn89-register-x:<hotkey>:<handle>:<timestamp>` locally — keys never leave the box. Re-run any time to update your handle.
 
-### Collateral
+### Emissions & elimination
 
-Post SN89 alpha as collateral to earn above dust weight (details: `docs/collateral.md`):
-
-```bash
-python neurons/collateral_cli.py deposit  --amount 100 --wallet.name my --wallet.hotkey my
-python neurons/collateral_cli.py balance  --hotkey <ss58>
-python neurons/collateral_cli.py withdraw --amount 100 --wallet.name my --hotkey <ss58>
-```
+Weight is earned purely on your track record — no collateral, no deposit:
 
 | State | Result |
 |---|---|
-| No collateral | Dust weight (track record only) |
-| 40–55% hit rate | No emissions, collateral kept |
-| Below 40% over ≥10 decisive (after ≥20 lifetime decisive) | **ELIMINATED** — collateral burned, hotkey zeroed permanently |
-
-Withdrawals settle after all open signals resolve plus a 72 h cooldown. Not yet active: gating turns on when `SN89_COLLATERAL_CONTRACT` ships in a release.
+| In immunity (first 8 days) | Dust weight (building a record) |
+| 40–55% hit rate | No emissions |
+| ≥55% hit rate over ≥20 lifetime decisive | Emissions, sized by trailing-30d wins × hit-rate tier |
+| Below 40% over ≥10 decisive (after ≥20 lifetime decisive) | **ELIMINATED** — hotkey zeroed permanently |
 
 ### Testnet (netuid 514)
 
