@@ -88,6 +88,26 @@ def _extract_raw_str(info) -> str | None:
     return None
 
 
+def _to_ss58(key) -> str:
+    """Normalize a query_map AccountId key to an ss58 string. Raw substrate keys
+    arrive as a (possibly nested) tuple of 32 bytes; encode to ss58 so the hotkey
+    matches metagraph.hotkeys. SDK-decoded keys already carry .value / are str."""
+    if hasattr(key, "value"):
+        key = key.value
+    if isinstance(key, str):
+        return key
+    if isinstance(key, (list, tuple)):
+        seq = key
+        while len(seq) == 1 and isinstance(seq[0], (list, tuple)):
+            seq = seq[0]
+        try:
+            from scalecodec.utils.ss58 import ss58_encode
+            return ss58_encode(bytes(seq), 42)
+        except Exception:  # noqa: BLE001
+            return str(key)
+    return str(key)
+
+
 class Chain:
     def __init__(self, network: str | None = None, netuid: int | None = None):
         self.netuid = netuid if netuid is not None else config.NETUID
@@ -140,7 +160,7 @@ class Chain:
             dec = decode_commitment(data) if data else None
             if not dec:
                 continue
-            hk = hotkey.value if hasattr(hotkey, "value") else str(hotkey)
+            hk = _to_ss58(hotkey)
             dec["hotkey"] = hk
             dec["commit_block"] = int(v.get("block") or 0)
             out[hk] = dec
