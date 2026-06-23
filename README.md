@@ -159,14 +159,14 @@ python neurons/collateral_cli.py withdraw --amount 100 --wallet.name my --hotkey
 
 Withdrawals settle after all open signals resolve plus a 72 h cooldown. Not yet active: gating turns on when `SN89_COLLATERAL_CONTRACT` ships in a release.
 
-### Testnet (netuid 496)
+### Testnet (netuid 514)
 
 Every command above works on testnet — same code, same protocol, free TAO, no risk:
 
 ```bash
-export SN89_NETWORK=test SN89_NETUID=496
+export SN89_NETWORK=test SN89_NETUID=514
 btcli wallet faucet --wallet.name mywallet --subtensor.network test
-btcli subnet register --netuid 496 --wallet.name mywallet --wallet.hotkey miner \
+btcli subnet register --netuid 514 --wallet.name mywallet --wallet.hotkey miner \
     --subtensor.network test
 ```
 
@@ -192,7 +192,7 @@ State lives in `~/.sn89/validator.db` (SQLite). Grading is deterministic — sam
 ### Testnet
 
 ```bash
-export SN89_NETWORK=test SN89_NETUID=496 POLYGON_API_KEY=…
+export SN89_NETWORK=test SN89_NETUID=514 POLYGON_API_KEY=…
 python neurons/validator.py --wallet.name myvali --wallet.hotkey vali
 ```
 
