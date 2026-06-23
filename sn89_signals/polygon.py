@@ -43,9 +43,9 @@ def minute_aggs(asset: str, asset_class: str, from_ms: int, to_ms: int) -> list[
 # Polygon's consolidated crypto feed carries occasional single-trade rogue
 # prints from thin venues (2026-06-06: one ~$12 HYPE trade at 61.67 vs a 58.0x
 # market put a +6.2% wick on a 1-min candle and falsely stopped three shorts).
-# Vanta fills real brackets on the median of a 30s multi-feed tick window, so
-# a lone print can never trigger a live bracket — paper grading must not be
-# looser than the venue.
+# A lone print can never sustain through the median-fill confirmation, so paper
+# grading must not be looser: an uncorroborated spike is clamped before it can
+# register as a candidate touch.
 #
 # Rule: a candle extreme that overshoots the candle body AND both neighbour
 # candles' extremes by >WICK_TOL is an uncorroborated spike. Crypto gets one
