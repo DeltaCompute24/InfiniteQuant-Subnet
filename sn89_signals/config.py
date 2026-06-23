@@ -94,6 +94,20 @@ WICK_TOL_NONCRYPTO = 0.0025         # forex/metals/equities bands are tens of bp
 # a real breach persists past the window and is caught on the next clean bar.
 FOREX_ROLLOVER_UTC = ((20, 55), (21, 20))   # [20:55, 21:20)
 
+# ── Median-fill confirmation (CONSENSUS) ─────────────────────────────────────
+# A practically tradeable fill requires price to PERSIST through a level, not
+# just tick it once. A single trade into a 1-minute candle's high/low is not a
+# fill anyone could capture, so we confirm any candle touch against the MEDIAN
+# CLOSE of 1-second bars over a rolling window (30s, preferring the recent 15s
+# when it holds enough samples) and trigger only on a strict crossing. A
+# momentary wick can never move the median, so it doesn't score. Polygon 1s
+# aggs are immutable, so every validator replays the confirmation identically.
+LIMIT_FILL_MEDIAN_CONFIRM = True    # gate touch grades through the median window
+LIMIT_FILL_WINDOW_S = 30            # full rolling window for the median
+LIMIT_FILL_RECENT_S = 15            # preferred recent sub-window (window / 2)
+LIMIT_FILL_MIN_SAMPLES = 10         # use the recent window when it holds >this many
+                                    # 1s bars, else fall back to the full window
+
 # ── Scoring (CONSENSUS — §7 of SPEC) ─────────────────────────────────────────
 SCORE_WINDOW_S = 30 * 24 * 3600     # EMISSION window: a miner's share is sized by
                                     # its WON count in the trailing 30 days, so you
