@@ -627,34 +627,25 @@ class TestWarmupScoring:
         assert tw_all == 1                 # trailing-30d keeps only the recent one
 
 
-class TestCollateralGating:
-    # verifies the collateral gate composes with the lifetime/excluded model
+class TestWeightModel:
+    # the emission split is purely track-record driven (no collateral)
     NOW = 10_000_000.0
     OLD = NOW - config.IMMUNITY_S - 1
 
-    def _s(self, uid, lw, ld, tw, rao):
+    def _s(self, uid, lw, ld, tw):
         return scoring.MinerState(
             hotkey=f"hk{uid}", uid=uid, first_seen_unix=self.OLD,
-            lifetime_wins=lw, lifetime_decisive=ld, trailing_wins=tw, collateral_rao=rao)
+            lifetime_wins=lw, lifetime_decisive=ld, trailing_wins=tw)
 
-    def test_unfunded_held_to_dust(self):
+    def test_qualified_split_by_trailing_wins(self):
         w = scoring.compute_weights(
-            [self._s(1, 18, 30, 6, 1_000_000),    # funded, qualified
-             self._s(2, 18, 30, 6, 0)],           # qualified by hit-rate but unfunded
-            self.NOW, min_collateral_rao=500_000)
-        assert w[1] > 0.99
-        assert w[2] == pytest.approx(config.DUST_WEIGHT, rel=1e-6)
-
-    def test_gating_off_ignores_funds(self):
-        w = scoring.compute_weights(
-            [self._s(1, 18, 30, 6, 0), self._s(2, 18, 30, 3, 0)],
-            self.NOW, min_collateral_rao=0)
+            [self._s(1, 18, 30, 6), self._s(2, 18, 30, 3)], self.NOW)
         assert abs(w[1] / w[2] - 2.0) < 1e-9       # pure 6:3 emission split
 
-    def test_excluded_copier_gets_nothing_even_if_funded(self):
+    def test_excluded_copier_gets_nothing(self):
         w = scoring.compute_weights(
-            [self._s(1, 18, 30, 6, 1_000_000), self._s(2, 18, 30, 6, 1_000_000)],
-            self.NOW, excluded_uids={2}, min_collateral_rao=500_000)
+            [self._s(1, 18, 30, 6), self._s(2, 18, 30, 6)],
+            self.NOW, excluded_uids={2})
         assert 2 not in w
         assert w[1] > 0.99
 
