@@ -43,7 +43,11 @@ REVEAL_GRACE_S = int(os.getenv("SN89_REVEAL_GRACE_S", str(6 * 3600)))
 # The corresponding private key is held by the subnet owner.
 OWNER_PK_HEX = os.getenv(
     "SN89_OWNER_PK_HEX",
-    "0000000000000000000000000000000000000000000000000000000000000000",  # set at deploy
+    # SN89 owner X25519 public key. Miners MUST wrap W_owner to this so the owner
+    # can read submissions in real time (the network only sees them after the 24h
+    # drand timelock). Validators void any reveal whose owner_pk ≠ this value, so
+    # a miner can't opt out of owner visibility while still earning.
+    "ec07fb1cc394f820e16059e17c386337f784963fc51e32f271a64c706b302d2a",
 )
 
 # ── Submission rules (CONSENSUS — §6.4 of SPEC) ──────────────────────────────
