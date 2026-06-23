@@ -44,6 +44,25 @@ def _relay_upload(blob: dict, hotkey: str, nonce: str) -> str:
     return url
 
 
+def mirror_to_relay(blob: dict, hotkey: str, nonce: str) -> bool:
+    """Best-effort: deliver the encrypted blob to the owner-hosted relay for
+    real-time owner visibility, WITHOUT changing the canonical host.
+
+    Self-hosting miners (own bucket / local disk) call this so the owner sees a
+    submission the instant it lands — the relay is the owner's realtime intake —
+    while the miner's own URL stays canonical in the on-chain commitment. The
+    blob is already encrypted; the relay can't read or forge it. No-op (returns
+    False) without a relay/feed token, and never raises: owner delivery must not
+    block a submission."""
+    if not config.RELAY_TOKEN:
+        return False
+    try:
+        _relay_upload(blob, hotkey, nonce)
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _s3_client():
     """R2/S3 client, or a clear error naming the missing config.
 
