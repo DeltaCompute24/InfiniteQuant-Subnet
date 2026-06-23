@@ -65,9 +65,15 @@ def _extract_raw_str(info) -> str | None:
                         return None
                 if isinstance(v, (bytes, bytearray)):
                     return bytes(v).decode(errors="replace")
-                if isinstance(v, (list, tuple)):  # tuple-of-ints encoding
+                if isinstance(v, (list, tuple)):  # ints, or nested [[ints]]
+                    # Some SDK builds wrap the byte list one or more levels deep
+                    # (e.g. RawN: [[115, 110, ...]]); unwrap single-element
+                    # nesting down to the flat int sequence before decoding.
+                    seq = v
+                    while len(seq) == 1 and isinstance(seq[0], (list, tuple)):
+                        seq = seq[0]
                     try:
-                        return bytes(v).decode(errors="replace")
+                        return bytes(seq).decode(errors="replace")
                     except (ValueError, TypeError):
                         return None
             else:
