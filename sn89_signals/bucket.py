@@ -44,6 +44,34 @@ def _relay_upload(blob: dict, hotkey: str, nonce: str) -> str:
     return url
 
 
+def _s3_client():
+    """R2/S3 client, or a clear error naming the missing config.
+
+    Only reached when neither SN89_BLOB_DIR nor the relay path applies, so an
+    incomplete (or absent) R2 config here would otherwise surface as a cryptic
+    botocore `ValueError: Invalid endpoint:` — name the actual fix instead.
+    """
+    missing = [name for name, val in (
+        ("SN89_R2_ENDPOINT", config.R2_ENDPOINT),
+        ("SN89_R2_BUCKET", config.R2_BUCKET),
+        ("SN89_R2_ACCESS_KEY_ID", config.R2_ACCESS_KEY_ID),
+        ("SN89_R2_SECRET_ACCESS_KEY", config.R2_SECRET_ACCESS_KEY),
+    ) if not val]
+    if missing:
+        raise RuntimeError(
+            "no blob transport configured. Set SN89_RELAY_TOKEN (or "
+            "SN89_FEED_TOKEN) to publish through the owner relay [zero setup], "
+            "or SN89_BLOB_DIR to host locally, or provide the full R2 config "
+            f"(missing: {', '.join(missing)}).")
+    import boto3  # lazy — validators never need it
+    return boto3.client(
+        "s3",
+        endpoint_url=config.R2_ENDPOINT,
+        aws_access_key_id=config.R2_ACCESS_KEY_ID,
+        aws_secret_access_key=config.R2_SECRET_ACCESS_KEY,
+    )
+
+
 def upload(blob: dict, hotkey: str, nonce: str) -> str:
     """Upload a blob; returns its public URL.
 
@@ -59,14 +87,7 @@ def upload(blob: dict, hotkey: str, nonce: str) -> str:
         return blob_url(hotkey, nonce)
     if not config.R2_ACCESS_KEY_ID and config.RELAY_TOKEN:
         return _relay_upload(blob, hotkey, nonce)
-    import boto3  # lazy — validators never need it
-
-    s3 = boto3.client(
-        "s3",
-        endpoint_url=config.R2_ENDPOINT,
-        aws_access_key_id=config.R2_ACCESS_KEY_ID,
-        aws_secret_access_key=config.R2_SECRET_ACCESS_KEY,
-    )
+    s3 = _s3_client()
     key = f"{hotkey}/{nonce}.json"
     s3.put_object(
         Bucket=config.R2_BUCKET,
@@ -96,14 +117,7 @@ def update_index(hotkey: str, nonce: str, keep: int = 200) -> None:
         with open(p, "w", encoding="utf-8") as fh:
             json.dump({"nonces": nonces[-keep:]}, fh)
         return
-    import boto3
-
-    s3 = boto3.client(
-        "s3",
-        endpoint_url=config.R2_ENDPOINT,
-        aws_access_key_id=config.R2_ACCESS_KEY_ID,
-        aws_secret_access_key=config.R2_SECRET_ACCESS_KEY,
-    )
+    s3 = _s3_client()
     key = f"{hotkey}/index.json"
     try:
         cur = json.loads(s3.get_object(Bucket=config.R2_BUCKET, Key=key)["Body"].read())
