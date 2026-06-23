@@ -2,6 +2,8 @@
 
 Bittensor subnet 89 — trading-signals. Miners commit encrypted directional trade calls; validators grade them on real market data and distribute emissions to miners who prove consistent edge.
 
+> ⚠️ **Requires Python 3.10.** The `timelock` dependency (drand sealed-bid encryption) publishes wheels only for Python 3.7–3.10 — **Python 3.11 and 3.12 will fail to install** with `No matching distribution found for timelock_wasm_wrapper`. Create your virtualenv with `python3.10` (see Setup). On 3.11/3.12, install pyenv or `apt install python3.10 python3.10-venv` and use that.
+
 ## How it works
 
 1. **Commit** — a miner picks a pair + direction, encrypts the signal with a [drand](https://drand.love) 24-hour timelock, and records `SHA256(signal)` on-chain via `set_commitment`. The block the commitment lands in is the signal's timestamp; validators anchor entry at the open of the first 1-second bar at or after that block time + 30 s, so every validator derives the same entry price.
@@ -67,7 +69,7 @@ Bands are per-asset volatility-scaled and symmetric 1:1. Crypto bands carry a ×
 
 ```bash
 git clone https://github.com/DeltaCompute24/InfiniteQuant-Subnet && cd InfiniteQuant-Subnet
-python3.10 -m venv .venv && . .venv/bin/activate     # timelock wheel requires 3.10
+python3.10 -m venv .venv && . .venv/bin/activate     # MUST be 3.10 — timelock has no 3.11/3.12 wheels
 pip install -r requirements.txt
 btcli subnet register --netuid 89 --wallet.name mywallet --wallet.hotkey miner
 ```

@@ -1,3 +1,5 @@
+# Requires Python 3.10 — `timelock` ships wheels only for 3.7–3.10; 3.11/3.12
+# fail with "No matching distribution found for timelock_wasm_wrapper".
 # pinned to the versions proven on the MANTIS stack (mantis VM venv)
 bittensor==10.2.0
 bittensor-wallet==4.0.1
