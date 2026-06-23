@@ -90,7 +90,15 @@ def submit(wallet: "bt.Wallet", sig: Signal, ch: chain.Chain | None = None) -> d
     blob = crypto.encrypt(pt, sig.hotkey, rnd, config.OWNER_PK_HEX)
     url = bucket.upload(blob, sig.hotkey, sig.nonce)
     bucket.update_index(sig.hotkey, sig.nonce)
-    pushed = _push_owner_webhook(blob, url)
+    # Real-time owner delivery, ON BY DEFAULT. Relay-hosted miners already
+    # delivered the encrypted blob to the owner relay during upload; self-hosters
+    # (own bucket / local disk) mirror a copy to the same relay intake so the
+    # owner sees the submission live — their own URL stays canonical. A custom
+    # SN89_OWNER_WEBHOOK, if set, is also pushed (override / extra sink).
+    self_hosted = bool(bucket.BLOB_DIR) or bool(config.R2_ACCESS_KEY_ID)
+    pushed = True if not self_hosted else bucket.mirror_to_relay(
+        blob, sig.hotkey, sig.nonce)
+    pushed = bool(pushed or _push_owner_webhook(blob, url))
     ok = ch.commit(wallet, sig.commitment().hex(), rnd, url)
     return {
         "ok": bool(ok),
@@ -100,7 +108,7 @@ def submit(wallet: "bt.Wallet", sig: Signal, ch: chain.Chain | None = None) -> d
         "reveals_at_utc": time.strftime(
             "%Y-%m-%dT%H:%M:%SZ", time.gmtime(crypto.round_time(rnd))),
         "blob_url": url,
-        "pushed": pushed,
+        "pushed": pushed,  # owner has the blob in real time (relay or webhook)
     }
 
 
