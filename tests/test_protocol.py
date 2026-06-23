@@ -332,14 +332,22 @@ class TestValidity:
         ])
         assert (rows[1].status, rows[1].void_reason) == ("void", "min_spacing")
 
-    def test_daily_quota(self):
+    def test_no_daily_cap(self):
+        # the per-UTC-day signal cap was removed — any number of signals/day is
+        # accepted as long as they respect the 4h spacing gate.
+        rows = scoring.apply_validity_filters([
+            _row("A", "BTCUSD", "LONG", i * 4 * 3600) for i in range(12)
+        ])
+        assert all(r.status == "ok" for r in rows)
+
+    def test_self_overlap_allowed(self):
+        # a hotkey may now hold multiple open calls on the same (pair, direction)
+        # at once — the self-overlap void was removed.
         rows = scoring.apply_validity_filters([
             _row("A", "BTCUSD", "LONG", 0),
-            _row("A", "XAUUSD", "LONG", 4 * 3600 + 1),
-            _row("A", "BTCUSD", "SHORT", 8 * 3600 + 2),
-            _row("A", "XAUUSD", "SHORT", 12 * 3600 + 3),     # 4th same UTC day
+            _row("A", "BTCUSD", "LONG", 4 * 3600 + 1),       # same pair/dir, still open
         ])
-        assert (rows[3].status, rows[3].void_reason) == ("void", "daily_quota")
+        assert [r.status for r in rows] == ["ok", "ok"]
 
 
 # ── copy penalty: mark the later entrant on a live identical trade (§7.5) ─────

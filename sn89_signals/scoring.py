@@ -31,13 +31,17 @@ def apply_validity_filters(rows: list[GradedRow]) -> list[GradedRow]:
     Voided rows: not graded, don't count toward quotas, no strike.
     """
     rows = sorted(rows, key=lambda r: (r.t0_unix, r.hotkey))
-    per_hotkey_times: dict[str, list[float]] = {}           # spacing + daily quota
-    open_pair_dir: dict[tuple[str, str, str], float] = {}   # self-overlap
+    per_hotkey_times: dict[str, list[float]] = {}           # spacing
 
     # NOTE: the old 15-min cross-miner (pair, direction) cooldown was retired —
     # multiple miners may now hold the same trade. Repeated shadowing of one
     # hotkey by another is handled out-of-band by detect_copiers() (§7.5), which
     # penalizes the copier's weight rather than voting the signal.
+    #
+    # The per-UTC-day signal cap and the self-overlap (one open per
+    # (hotkey, pair, direction)) rule were both removed — a hotkey may now fire
+    # any number of signals per day and hold multiple open calls on the same
+    # pair/direction simultaneously. Only the per-hotkey spacing gate remains.
     for r in rows:
         if r.status == "void":
             continue
@@ -48,22 +52,8 @@ def apply_validity_filters(rows: list[GradedRow]) -> list[GradedRow]:
             r.status, r.void_reason = "void", "min_spacing"
             continue
 
-        # ≤ 3 per UTC day
-        day = int(r.t0_unix // 86_400)
-        if sum(1 for t in times if int(t // 86_400) == day) >= config.MAX_SIGNALS_PER_UTC_DAY:
-            r.status, r.void_reason = "void", "daily_quota"
-            continue
-
-        # no duplicate open (hotkey, pair, direction)
-        okey = (r.hotkey, r.trade_pair, r.direction)
-        open_until = open_pair_dir.get(okey)
-        if open_until is not None and r.t0_unix < open_until:
-            r.status, r.void_reason = "void", "overlapping_open"
-            continue
-
         # accepted
         times.append(r.t0_unix)
-        open_pair_dir[okey] = r.t0_unix + r.horizon_h * 3600   # class-fixed window
 
     return rows
 
