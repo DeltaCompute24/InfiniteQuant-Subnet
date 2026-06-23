@@ -30,14 +30,14 @@ Quality is forever; pay is recent. Hit-rate never resets; wins decay after 30 da
 
 | Rule | Value |
 |---|---|
-| Max signals per UTC day | 3 per hotkey |
+| Max signals per UTC day | unlimited |
 | Min spacing | 4 h between your own signals |
 | TP / SL | per-asset, symmetric 1:1 — `data/signals-bands.json` |
 | Horizon | crypto 30 h · forex/metals 12 h · equities 48 h |
-| Overlap | one open signal per (pair, direction) per hotkey |
+| Overlap | unlimited — a hotkey may hold multiple open calls on the same (pair, direction) |
 | Unrevealed blob | LOSS 6 h past reveal round |
 
-Voided signals don't count against your daily quota. Exception: a blob that fails hash-verification or won't decrypt at reveal is a strike — three strikes in 30 days zeroes the hotkey for 30 days.
+There's no daily signal cap. Exception: a blob that fails hash-verification or won't decrypt at reveal is a strike — three strikes in 30 days zeroes the hotkey for 30 days.
 
 ### Copy penalty
 

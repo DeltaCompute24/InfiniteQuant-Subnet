@@ -51,7 +51,8 @@ OWNER_PK_HEX = os.getenv(
 )
 
 # ── Submission rules (CONSENSUS — §6.4 of SPEC) ──────────────────────────────
-MAX_SIGNALS_PER_UTC_DAY = 3
+# No per-UTC-day signal cap and no self-overlap limit: a hotkey may fire any
+# number of signals per day and hold multiple open calls on the same pair.
 MIN_SPACING_S = 4 * 3600            # per-hotkey spacing
 MAX_HORIZON_H = 72                  # upper bound / overlap cap
 DEFAULT_HORIZON_H = 72              # fallback for an unknown asset class
