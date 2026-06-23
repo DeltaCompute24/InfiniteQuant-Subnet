@@ -153,10 +153,27 @@ class Chain:
         return self.block_time_ms(block) / 1000.0
 
     # ── weights ──────────────────────────────────────────────────────────────
-    def set_weights(self, wallet: "bt.Wallet", uids: list[int], weights: list[float]) -> bool:
-        return self.st.set_weights(
+    def set_weights(
+        self, wallet: "bt.Wallet", uids: list[int], weights: list[float]
+    ) -> tuple[bool, str]:
+        """Commit weights; return (success, message).
+
+        bittensor ≥ 9 returns an `ExtrinsicResponse` (success + message, no
+        `__bool__` → always truthy if treated as a flag), older SDKs return a
+        `(success, message)` tuple, and very old ones a bare bool. Normalize all
+        three so the caller can branch on real success and SURFACE the chain's
+        rejection reason — the actual reason a commit fails (no permit,
+        TooManyUnrevealedCommits, rate limit) lives in that message.
+        """
+        resp = self.st.set_weights(
             wallet=wallet, netuid=self.netuid, uids=uids, weights=weights,
             wait_for_inclusion=False)
+        if hasattr(resp, "success"):              # ExtrinsicResponse
+            return bool(resp.success), str(getattr(resp, "message", "") or "")
+        if isinstance(resp, tuple):               # (success, message)
+            ok = bool(resp[0])
+            return ok, str(resp[1]) if len(resp) > 1 else ""
+        return bool(resp), ""                      # bare bool
 
     def metagraph(self):
         return self.st.metagraph(netuid=self.netuid)

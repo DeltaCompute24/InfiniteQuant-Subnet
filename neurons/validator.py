@@ -166,10 +166,24 @@ class Validator:
             if not crypto.expected_round_ok(rnd, t0):
                 self._void(commit_hex, "round_out_of_window", strike=False)
                 continue
+            # §: W_owner must be wrapped to the canonical owner key so the owner
+            # retains real-time visibility. A blob wrapped to any other key is
+            # opting out of that visibility — void it (deterministic, drand-
+            # independent: every validator reads the same blob owner_pk). The
+            # broken all-zero placeholder can't even encrypt (X25519 raises), so
+            # any blob that arrives with a non-canonical owner_pk is deliberate.
+            try:
+                blob = json.loads(blob_json)
+            except (ValueError, TypeError):
+                self._void(commit_hex, "blob_unparseable", strike=False)
+                continue
+            if str(blob.get("owner_pk", "")).lower() != config.OWNER_PK_HEX.lower():
+                self._void(commit_hex, "wrong_owner_pk", strike=True)
+                continue
             sig_bytes = self._drand_sig(rnd)
             if sig_bytes is None:
                 continue
-            pt = crypto.decrypt_timelock(json.loads(blob_json), sig_bytes, self.tlock)
+            pt = crypto.decrypt_timelock(blob, sig_bytes, self.tlock)
             if pt is None or __import__("hashlib").sha256(pt).hexdigest() != commit_hex:
                 self._void(commit_hex, "decrypt_or_hash_mismatch", strike=True)
                 continue
@@ -411,11 +425,20 @@ class Validator:
         w = scoring.compute_weights(states, now, excluded_uids=excluded_uids,
                                     min_collateral_rao=min_rao)
         uids, vals = list(w.keys()), list(w.values())
-        ok = self.ch.set_weights(self.wallet, uids, vals)
-        self._last_weights_block = block
+        ok, msg = self.ch.set_weights(self.wallet, uids, vals)
+        # Only advance the per-tempo throttle when the commit actually landed.
+        # Treating a failed extrinsic as done would throttle the retry by a full
+        # TEMPO (~72 min); instead retry on the next poll and surface the chain's
+        # rejection reason so the failure is diagnosable rather than silent.
+        if ok:
+            self._last_weights_block = block
         print(f"  → set_weights ok={ok} ({len(uids)} uids, "
               f"burn={w.get(config.BURN_UID, 0):.3f}, "
-              f"copiers_zeroed={len(excluded_uids)})")
+              f"copiers_zeroed={len(excluded_uids)})"
+              + (f" — {msg}" if msg else ""))
+        if not ok:
+            print(f"  ! set_weights rejected — will retry next poll. reason: "
+                  f"{msg or 'no message returned by SDK'}")
 
     # ── loop ─────────────────────────────────────────────────────────────────
     def run(self):
