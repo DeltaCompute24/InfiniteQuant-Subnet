@@ -115,7 +115,7 @@ SCORE_WINDOW_S = 30 * 24 * 3600     # EMISSION window: a miner's share is sized 
                                     # its WON count in the trailing 30 days, so you
                                     # must keep trading to earn. (Hit-rate/tier do
                                     # NOT use this window — they're lifetime.)
-QUALIFY_MIN_DECISIVE = 20           # lifetime decisive (won+lost) to qualify
+QUALIFY_MIN_DECISIVE = 10           # lifetime decisive (won+lost) to qualify
 QUALIFY_MIN_HIT = 0.55              # LIFETIME hit-rate gate (QUALIFIED tier floor) —
                                     # career win-rate, never resets
 

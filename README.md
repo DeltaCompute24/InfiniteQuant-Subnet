@@ -19,7 +19,7 @@ Bittensor subnet 89 — trading-signals. Miners commit encrypted directional tra
 ```
 decisive    = WON + LOST   (washes and voids never count)
 hit rate    = lifetime wins / lifetime decisive   (never resets)
-QUALIFIED   = lifetime decisive ≥ 30  AND  lifetime hit rate ≥ 55%
+QUALIFIED   = lifetime decisive ≥ 10  AND  lifetime hit rate ≥ 55%
 tier        = QUALIFIED ≥ 55% → 1.0×  |  SHARP ≥ 60% → 1.2×  |  WOLF ≥ 70% → 2.0×
 your weight ∝ (your wins in last 30 days × tier) / Σ same over all qualified miners
 ```
@@ -151,7 +151,7 @@ Weight is earned purely on your track record — no collateral, no deposit:
 |---|---|
 | In immunity (first 8 days) | Dust weight (building a record) |
 | 40–55% hit rate | No emissions |
-| ≥55% hit rate over ≥20 lifetime decisive | Emissions, sized by trailing-30d wins × hit-rate tier |
+| ≥55% hit rate over ≥10 lifetime decisive | Emissions, sized by trailing-30d wins × hit-rate tier |
 | Below 40% over ≥10 decisive (after ≥20 lifetime decisive) | **ELIMINATED** — hotkey zeroed permanently |
 
 ### Testnet (netuid 514)
@@ -218,7 +218,7 @@ disables updates, `SN89_UPDATE_INTERVAL_S` sets the check cadence (default 30 m)
 
 **What if my blob is unreachable when validators poll?** They retry every 30 s through reveal + a 6 h grace. A blob fetched in that window grades normally and stays pinned even if you later remove it. A blob never served is a forfeit LOSS — use the owner relay to eliminate this risk entirely.
 
-**When do emissions arrive?** Weights update every tempo (~72 min). Your first non-dust weight lands after your 30th decisive trade, assuming ≥ 55% hit rate.
+**When do emissions arrive?** Weights update every tempo (~72 min). Your first non-dust weight lands after your 10th decisive trade, assuming ≥ 55% hit rate.
 
 ---
 

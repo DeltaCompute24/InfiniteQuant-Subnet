@@ -13,7 +13,5 @@ cryptography>=42.0
 requests>=2.31
 # miner upload path only
 boto3>=1.34
-# collateral ledger (validators + custodian — docs/collateral.md)
-web3>=7.12
 # dev
 pytest>=8.0
