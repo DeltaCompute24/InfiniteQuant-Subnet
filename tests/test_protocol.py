@@ -257,6 +257,42 @@ class TestCommitmentHistoryScan:
         assert chain._account_from_event({"netuid": 89}) is None       # no account
 
 
+class TestWeightsRetryBackoff:
+    """A FAILED set_weights backs off WEIGHTS_RETRY_BLOCKS instead of retrying
+    every poll (commit-reveal is rate-limited — hammering just piles up
+    unrevealed commits). A SUCCESS throttles to once per TEMPO."""
+
+    def _validator(self):
+        import sys
+        import types
+        if "bittensor" not in sys.modules:
+            sys.modules["bittensor"] = types.ModuleType("bittensor")
+        from neurons.validator import Validator
+        v = Validator.__new__(Validator)
+        v._last_weights_block = 0
+        v._last_weights_attempt_block = 0
+        return v
+
+    def test_first_attempt_due_after_tempo(self):
+        assert self._validator()._weights_due(config.TEMPO + 1) is True
+
+    def test_failed_attempt_backs_off_then_retries(self):
+        v = self._validator()
+        b = config.TEMPO + 1
+        assert v._weights_due(b) is True
+        v._last_weights_attempt_block = b                 # a (failed) attempt
+        assert v._weights_due(b + 5) is False             # too soon — no hammer
+        assert v._weights_due(b + config.WEIGHTS_RETRY_BLOCKS) is True   # retry ok
+
+    def test_success_waits_a_full_tempo(self):
+        v = self._validator()
+        b = config.TEMPO + 1
+        v._last_weights_attempt_block = b
+        v._last_weights_block = b                          # success advances cadence
+        assert v._weights_due(b + config.WEIGHTS_RETRY_BLOCKS + 1) is False
+        assert v._weights_due(b + config.TEMPO) is True
+
+
 # ── grader semantics ───────────────────────────────────────────────────────────────────────────────
 def _bars(*rows):
     return [{"t": t, "o": o, "h": h, "l": l, "c": c} for (t, o, h, l, c) in rows]

@@ -273,6 +273,14 @@ RELAY_TOKEN = os.getenv("SN89_RELAY_TOKEN", "") or os.getenv("SN89_FEED_TOKEN", 
 # ── Validator runtime ────────────────────────────────────────────────────────
 POLL_INTERVAL_S = 30
 
+# After a FAILED set_weights, wait at least this many blocks before retrying
+# instead of re-attempting every poll. Weight commits are rate-limited
+# (commit-reveal / weights_rate_limit); retrying faster than that just piles up
+# unrevealed commits (TooManyUnrevealedCommits) without landing any sooner. Set
+# to the subnet's weights_rate_limit. (A successful commit is still throttled to
+# once per TEMPO by the normal cadence.)
+WEIGHTS_RETRY_BLOCKS = int(os.getenv("SN89_WEIGHTS_RETRY_BLOCKS", "100"))
+
 # Blob fetching is bounded so a slow or malicious host can't stall the
 # synchronous validator loop (audit #7). Each fetch has a hard wall-clock
 # deadline (bucket.fetch); per loop iteration the outstanding fetches run in a

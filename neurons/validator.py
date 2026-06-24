@@ -86,7 +86,8 @@ class Validator:
         self.db.executescript(SCHEMA)
         self._migrate()
         self.tlock = Timelock(config.DRAND_PUBLIC_KEY)
-        self._last_weights_block = 0
+        self._last_weights_block = 0          # last SUCCESSFUL commit (TEMPO cadence)
+        self._last_weights_attempt_block = 0  # last attempt (failed-retry backoff)
         self._last_scanned_block = 0   # commitment-history scan cursor (audit #5)
 
     def _migrate(self):
@@ -368,10 +369,25 @@ class Validator:
                 print(f"  ☠ eliminated {hk[:8]}… floor crossed at t0={t0:.0f}")
         self.db.commit()
 
+    def _weights_due(self, block: int) -> bool:
+        """Whether to (re)attempt set_weights now. A fresh weight cycle runs
+        every TEMPO after the last SUCCESS; but after a FAILED attempt we wait
+        WEIGHTS_RETRY_BLOCKS before retrying rather than hammering every poll —
+        commit-reveal weights are rate-limited, so a faster retry only piles up
+        unrevealed commits (TooManyUnrevealedCommits) without landing sooner.
+        (The faster fixed-cadence poll loop makes the every-poll retry especially
+        wasteful.)"""
+        if block - self._last_weights_block < config.TEMPO:
+            return False
+        if block - self._last_weights_attempt_block < config.WEIGHTS_RETRY_BLOCKS:
+            return False
+        return True
+
     def maybe_set_weights(self):
         block = self.ch.current_block()
-        if block - self._last_weights_block < config.TEMPO:
+        if not self._weights_due(block):
             return
+        self._last_weights_attempt_block = block
         self.refresh_eliminations()
         mg = self.ch.metagraph()
         uid_by_hotkey = {hk: i for i, hk in enumerate(mg.hotkeys)}
