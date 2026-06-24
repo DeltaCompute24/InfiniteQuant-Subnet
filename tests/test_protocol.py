@@ -521,9 +521,9 @@ class TestWeights:
         assert 1 not in w
         assert w[2] > 0.99
 
-    def test_under_20_lifetime_not_qualified(self):
+    def test_under_min_lifetime_not_qualified(self):
         w = scoring.compute_weights([
-            _state(1, self.OLD, 16, 19, 8),    # 84% but only 19 lifetime decisive
+            _state(1, self.OLD, 8, 9, 8),      # 89% but only 9 lifetime decisive (< QUALIFY_MIN_DECISIVE)
         ], self.NOW)
         assert 1 not in w
         assert w[config.BURN_UID] > 0.99
