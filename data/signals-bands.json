@@ -1,7 +1,7 @@
 {
   "version": "volnorm-ewma7d",
   "vol_window_days": 30,
-  "note": "vol-scaled 1:1 SL/TP per asset (sl_bps == tp_bps); forex/metals = vol unit, crypto = vol unit x1.75 (paired with the 30h crypto grade window).",
+  "note": "vol-scaled 1:1 SL/TP per asset (sl_bps == tp_bps); all classes = plain vol unit (1.0x). Crypto cut to 1.0x + 8h grade window 2026-06-24 (was vol unit x1.75 paired with a 30h window).",
   "bands": {
     "AUDCAD": {
       "asset_class": "forex",
@@ -30,8 +30,8 @@
     },
     "BTCUSD": {
       "asset_class": "crypto",
-      "sl_bps": 180,
-      "tp_bps": 180
+      "sl_bps": 103,
+      "tp_bps": 103
     },
     "CADCHF": {
       "asset_class": "forex",
@@ -50,8 +50,8 @@
     },
     "ETHUSD": {
       "asset_class": "crypto",
-      "sl_bps": 263,
-      "tp_bps": 263
+      "sl_bps": 150,
+      "tp_bps": 150
     },
     "EURAUD": {
       "asset_class": "forex",
@@ -120,8 +120,8 @@
     },
     "HYPEUSD": {
       "asset_class": "crypto",
-      "sl_bps": 544,
-      "tp_bps": 544
+      "sl_bps": 311,
+      "tp_bps": 311
     },
     "NZDCAD": {
       "asset_class": "forex",
@@ -145,8 +145,8 @@
     },
     "SOLUSD": {
       "asset_class": "crypto",
-      "sl_bps": 306,
-      "tp_bps": 306
+      "sl_bps": 175,
+      "tp_bps": 175
     },
     "USDCAD": {
       "asset_class": "forex",
@@ -190,8 +190,8 @@
     },
     "XRPUSD": {
       "asset_class": "crypto",
-      "sl_bps": 249,
-      "tp_bps": 249
+      "sl_bps": 142,
+      "tp_bps": 142
     }
   }
 }

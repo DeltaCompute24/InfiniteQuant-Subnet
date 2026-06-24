@@ -59,12 +59,12 @@ MAX_HORIZON_H = 72                  # upper bound / overlap cap
 DEFAULT_HORIZON_H = 72              # fallback for an unknown asset class
 
 # Grade window (wash time) is FIXED BY ASSET CLASS, not miner-chosen — mirrors
-# the IQ Signals program (2026-06-12). Crypto's follow-the-move structure needs
-# longer to develop, so it gets a wider band (vol unit ×1.75, in the bands file)
-# AND a longer window than fx/metals; the two are calibrated together to a ~52%
-# base rate. A miner's horizon_h field is normalized to its class value.
+# the IQ Signals program. Crypto was cut 30h→8h (2026-06-24) to align with the
+# forex/metals book: the prior 1.75×/30h "follow-the-move" calibration was
+# dropped, so crypto now uses its plain vol unit (1.0×, in the bands file) on a
+# short window like fx. A miner's horizon_h field is normalized to its class value.
 CLASS_HORIZON_H = {
-    "crypto": 30,
+    "crypto": 8,
     "forex": 12,
     "forex-commodities": 12,   # metals (XAU/XAG/XPT/XPD)
     "equities": 48,
