@@ -42,7 +42,17 @@ def decode_commitment(data: str) -> dict | None:
     v, commit_hex, rnd, tag = m.groups()
     if int(v) != _V:
         return None
-    return {"commit": commit_hex, "round": int(rnd), "url_tag": tag}
+    rnd = int(rnd)
+    # The round regex is `(\d+)` — unbounded. A drand round must be a positive
+    # signed-64-bit integer: anything larger overflows the `round INTEGER`
+    # column at ingest (an `OverflowError` that crashes the whole validator
+    # loop), and even a merely far-future round would sit sealed forever,
+    # re-pulling its blob every cycle. Reject out-of-range here; the exact
+    # commit+REVEAL_DELAY window is enforced at ingest against the consensus-
+    # exact commit-block time.
+    if not 0 < rnd < 2**63:
+        return None
+    return {"commit": commit_hex, "round": rnd, "url_tag": tag}
 
 
 def _extract_raw_str(info) -> str | None:
@@ -108,6 +118,40 @@ def _to_ss58(key) -> str:
     return str(key)
 
 
+def _account_from_event(attrs) -> object | None:
+    """Pull the committer AccountId out of a Commitments event's attributes.
+
+    Shape varies by SDK: a dict ({'netuid':…, 'who':…}), a list/tuple of values
+    ([netuid, who]), or a single value. Return the first thing that looks like an
+    account (an ss58 string, or a 32-byte sequence) — _to_ss58 normalizes it.
+    Defensive: returns None if nothing account-shaped is found.
+    """
+    def _looks_like_account(x) -> bool:
+        if isinstance(x, str):
+            return x.startswith("5") and len(x) >= 47
+        if isinstance(x, (list, tuple)):
+            seq = x
+            while len(seq) == 1 and isinstance(seq[0], (list, tuple)):
+                seq = seq[0]
+            return len(seq) == 32 and all(isinstance(b, int) for b in seq)
+        return hasattr(x, "value")
+
+    if isinstance(attrs, dict):
+        for key in ("who", "account", "account_id", "hotkey", "AccountId"):
+            if key in attrs and _looks_like_account(attrs[key]):
+                return attrs[key]
+        for v in attrs.values():
+            if _looks_like_account(v):
+                return v
+    elif isinstance(attrs, (list, tuple)):
+        for v in attrs:
+            if _looks_like_account(v):
+                return v
+    elif _looks_like_account(attrs):
+        return attrs
+    return None
+
+
 class Chain:
     def __init__(self, network: str | None = None, netuid: int | None = None):
         self.netuid = netuid if netuid is not None else config.NETUID
@@ -164,6 +208,66 @@ class Chain:
             dec["hotkey"] = hk
             dec["commit_block"] = int(v.get("block") or 0)
             out[hk] = dec
+        return out
+
+    def read_commitments_in_block_range(self, from_block: int, to_block: int) -> list[dict]:
+        """EXPERIMENTAL (audit #5) — soak on testnet before mainnet use.
+
+        Scan blocks (from_block, to_block] for commitment-setting activity so a
+        commitment a miner OVERWROTE between snapshot polls isn't lost (the
+        cross-validator split-brain: validators that polled at different phases
+        otherwise latch different commitments for the same hotkey and grade
+        different signals). For each block we read the chain events, find events
+        on the Commitments pallet, and re-read the committer's CommitmentOf AT
+        THAT BLOCK — capturing each distinct commitment with its consensus-exact
+        inclusion block. Returns decoded dicts shaped like
+        read_all_commitments_with_block() values.
+
+        Best-effort and defensive: the per-runtime event identifier for
+        set_commitment is matched loosely (Commitments pallet), and any block /
+        event / query that can't be parsed is skipped rather than aborting the
+        scan. The scan is bounded to the most recent SCAN_MAX_BLOCKS_PER_POLL
+        blocks so a long gap can't trigger an unbounded backfill (the latest
+        snapshot still covers the gap's final state). MUST be validated against a
+        live chain before SN89_SCAN_COMMITMENT_HISTORY is enabled on mainnet.
+        """
+        out: list[dict] = []
+        start = max(from_block + 1, to_block - config.SCAN_MAX_BLOCKS_PER_POLL + 1)
+        for block in range(start, to_block + 1):
+            try:
+                bh = self.st.get_block_hash(block)
+                events = self.st.substrate.get_events(bh)
+            except Exception:  # noqa: BLE001 — skip unreadable block, never abort
+                continue
+            committers: set = set()
+            for ev in events or []:
+                try:
+                    e = ev.value if hasattr(ev, "value") else ev
+                    inner = e.get("event", e) if isinstance(e, dict) else {}
+                    module = str(inner.get("module_id") or inner.get("module") or "")
+                    if "commitment" not in module.lower():
+                        continue
+                    acct = _account_from_event(inner.get("attributes"))
+                    if acct is not None:
+                        committers.add(acct)
+                except Exception:  # noqa: BLE001
+                    continue
+            for acct in committers:
+                try:
+                    reg = self.st.substrate.query(
+                        "Commitments", "CommitmentOf", [self.netuid, acct], block_hash=bh)
+                    v = reg.value if hasattr(reg, "value") else reg
+                    if not isinstance(v, dict):
+                        continue
+                    data = _extract_raw_str(v.get("info"))
+                    dec = decode_commitment(data) if data else None
+                    if not dec:
+                        continue
+                    dec["hotkey"] = _to_ss58(acct)
+                    dec["commit_block"] = int(v.get("block") or block)
+                    out.append(dec)
+                except Exception:  # noqa: BLE001
+                    continue
         return out
 
     def current_block(self) -> int:

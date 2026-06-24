@@ -1,0 +1,36 @@
+[project]
+name = "sn89-signals"
+version = "0.1.0"
+description = "InfiniteQuant SN89 — encrypted trading-signal subnet (miner + validator)"
+readme = "README.md"
+license = { text = "MIT" }
+# timelock ships wheels only for CPython 3.7–3.10; 3.11/3.12 fail to resolve
+# (see requirements.txt). Pin the interpreter so a fresh `uv sync` can never
+# silently land on an unsupported Python.
+requires-python = ">=3.10,<3.11"
+
+# Runtime deps for BOTH neurons. Pins mirror requirements.txt and are the set
+# proven on the MANTIS stack. async-substrate-interface and scalecodec are
+# pinned together on purpose: async-substrate-interface 2.x dropped scalecodec
+# for cyscale and aborts import with a namespace conflict, so we hold the
+# scalecodec-era line that bittensor 10.2.0 actually wants.
+dependencies = [
+    "bittensor==10.2.0",
+    "bittensor-wallet==4.0.1",
+    "async-substrate-interface==1.6.4",
+    "scalecodec==1.2.12",
+    "timelock==0.0.1.dev0",
+    "cryptography>=42.0",
+    "requests>=2.31",
+]
+
+[project.optional-dependencies]
+# Only a self-hosting miner that uploads to its own S3/R2 bucket needs boto3;
+# validators and relay/local-disk miners do not.
+miner = ["boto3>=1.34"]
+dev = ["pytest>=8.0"]
+
+[tool.uv]
+# This repo is run in place (neurons/ + sn89_signals/ via sys.path), not built
+# or published as a wheel — resolve and lock the dependencies only.
+package = false

@@ -13,6 +13,16 @@ import os
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# chain.py / validator.py import bittensor at module top. It has no macOS wheel
+# (timelock-wasm-wrapper is Linux-only), so on a dev box stub it just enough to
+# import — only when genuinely absent, so Linux CI exercises the real package.
+import types
+if "bittensor" not in sys.modules:
+    try:
+        import bittensor  # noqa: F401
+    except ImportError:
+        sys.modules["bittensor"] = types.ModuleType("bittensor")
+
 from sn89_signals import bucket, config, crypto, polygon, scoring
 from sn89_signals.grader import LOST, PENDING, WASHED, WON, grade
 from sn89_signals.schema import Signal, ValidationError, validate
@@ -108,6 +118,145 @@ class TestCrypto:
         assert not crypto.expected_round_ok(bad, t0)
 
 
+# ── miner-supplied drand round can't wedge the validator (audit #6) ───────────
+class TestCommitmentRoundGuard:
+    """decode_commitment bounds the round so an oversized value never reaches
+    the INTEGER column (which would OverflowError-crash the loop), and ingest
+    voids an out-of-window round by the commit-block time so a far-future round
+    can't sit sealed forever re-pulling its blob."""
+
+    def test_decode_accepts_normal_round(self):
+        from sn89_signals import chain
+        rnd = crypto.target_round(time.time() + config.REVEAL_DELAY_S)
+        data = chain.encode_commitment("a" * 64, rnd, "https://x/y.json")
+        assert chain.decode_commitment(data)["round"] == rnd
+
+    def test_decode_rejects_oversized_round(self):
+        # 26-digit round (87 bits) would raise OverflowError at the SQLite INSERT
+        from sn89_signals import chain
+        mal = "sn89:1:" + "a" * 64 + ":" + "9" * 26 + ":" + "b" * 16
+        assert chain.decode_commitment(mal) is None
+
+    def test_decode_rejects_zero_round(self):
+        from sn89_signals import chain
+        mal = "sn89:1:" + "a" * 64 + ":0:" + "b" * 16
+        assert chain.decode_commitment(mal) is None
+
+    def _validator(self, commits, t0_unix):
+        import sqlite3
+        import sys
+        import types
+        if "bittensor" not in sys.modules:
+            sys.modules["bittensor"] = types.ModuleType("bittensor")
+        from neurons.validator import SCHEMA, Validator
+        v = Validator.__new__(Validator)
+        v.db = sqlite3.connect(":memory:")
+        v.db.executescript(SCHEMA)
+
+        class _FakeChain:
+            def current_block(self):
+                return 1000
+
+            def read_all_commitments_with_block(self):
+                return commits
+
+            def block_time_ms(self, block):
+                return int(t0_unix * 1000)
+
+        v.ch = _FakeChain()
+        return v
+
+    def test_out_of_window_round_voided_at_ingest(self, monkeypatch):
+        monkeypatch.setattr(config, "R2_PUBLIC_BASE", "")   # no blob fetch
+        now = time.time()
+        good = crypto.target_round(now + config.REVEAL_DELAY_S)
+        bad_future = good + 10**8                            # ~9.5 yr past the window
+        commits = {
+            "GOOD": {"commit": "a" * 64, "round": good, "url_tag": "t1",
+                     "commit_block": 1000, "hotkey": "GOOD"},
+            "BAD":  {"commit": "b" * 64, "round": bad_future, "url_tag": "t2",
+                     "commit_block": 1000, "hotkey": "BAD"},
+        }
+        v = self._validator(commits, now)
+        v.ingest()
+        status = dict(v.db.execute("SELECT commit_hex, status FROM signals").fetchall())
+        assert status["a" * 64] == "sealed"
+        assert status["b" * 64] == "void"
+        assert v.db.execute(
+            "SELECT void_reason FROM signals WHERE commit_hex=?",
+            ("b" * 64,)).fetchone()[0] == "round_out_of_window"
+
+
+# ── commitment-history scan captures overwrites (audit #5) ────────────────────
+class TestCommitmentHistoryScan:
+    """With SCAN_COMMITMENT_HISTORY on, a commitment overwritten before the
+    snapshot poll (absent from read_all_commitments_with_block) is still
+    journaled from the per-block scan; with it off, that commitment is lost (the
+    documented limitation)."""
+
+    def _validator(self, snapshot, history):
+        import sqlite3
+        import sys
+        import types
+        if "bittensor" not in sys.modules:
+            sys.modules["bittensor"] = types.ModuleType("bittensor")
+        from neurons.validator import SCHEMA, Validator
+        v = Validator.__new__(Validator)
+        v.db = sqlite3.connect(":memory:")
+        v.db.executescript(SCHEMA)
+        v._last_scanned_block = 0
+        t0_unix = time.time()
+
+        class _FakeChain:
+            def current_block(self):
+                return 2000
+
+            def read_all_commitments_with_block(self):
+                return snapshot
+
+            def read_commitments_in_block_range(self, frm, to):
+                return history
+
+            def block_time_ms(self, block):
+                return int(t0_unix * 1000)
+
+        v.ch = _FakeChain()
+        return v
+
+    def _data(self):
+        good = crypto.target_round(time.time() + config.REVEAL_DELAY_S)
+        snapshot = {"HK": {"commit": "b" * 64, "round": good, "url_tag": "t2",
+                           "commit_block": 1999, "hotkey": "HK"}}     # latest only
+        history = [{"commit": "a" * 64, "round": good, "url_tag": "t1",
+                    "commit_block": 1990, "hotkey": "HK"}]            # overwritten earlier
+        return snapshot, history
+
+    def test_scan_on_captures_overwritten_commit(self, monkeypatch):
+        monkeypatch.setattr(config, "R2_PUBLIC_BASE", "")
+        monkeypatch.setattr(config, "SCAN_COMMITMENT_HISTORY", True)
+        snapshot, history = self._data()
+        v = self._validator(snapshot, history)
+        v.ingest()
+        got = {r[0] for r in v.db.execute("SELECT commit_hex FROM signals").fetchall()}
+        assert got == {"a" * 64, "b" * 64}          # both journaled
+
+    def test_scan_off_drops_overwritten_commit(self, monkeypatch):
+        monkeypatch.setattr(config, "R2_PUBLIC_BASE", "")
+        monkeypatch.setattr(config, "SCAN_COMMITMENT_HISTORY", False)
+        snapshot, history = self._data()
+        v = self._validator(snapshot, history)
+        v.ingest()
+        got = {r[0] for r in v.db.execute("SELECT commit_hex FROM signals").fetchall()}
+        assert got == {"b" * 64}                    # only the latest snapshot
+
+    def test_account_from_event_shapes(self):
+        from sn89_signals import chain
+        acct = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"
+        assert chain._account_from_event({"netuid": 89, "who": acct}) == acct
+        assert chain._account_from_event([89, acct]) == acct          # positional
+        assert chain._account_from_event({"netuid": 89}) is None       # no account
+
+
 # ── grader semantics ───────────────────────────────────────────────────────────────────────────────
 def _bars(*rows):
     return [{"t": t, "o": o, "h": h, "l": l, "c": c} for (t, o, h, l, c) in rows]
@@ -166,13 +315,15 @@ class TestGrader:
         g = self._grade("LONG", _bars((self.T0 + 60_000, 100, 101.5, 100, 100.1)))
         assert g.status == WON  # high exactly at tp → touched
 
-    def test_crypto_wash_window_is_30h(self):
-        # class-fixed: crypto develops over 30h regardless of submitted horizon
+    def test_crypto_wash_window_is_class_fixed(self):
+        # class-fixed: crypto washes at its class horizon regardless of the
+        # miner's submitted horizon (derive from config so this can't go stale).
+        h = config.CLASS_HORIZON_H["crypto"]
         bars = _bars((self.T0 + 60_000, 100, 100.5, 99.5, 100.2))   # no touch (BTC 150bps)
-        s = _sig(pair="BTCUSD", direction="LONG")
-        assert grade(s, self.T0, self.T0 + 29 * 3_600_000,
+        s = _sig(pair="BTCUSD", direction="LONG", horizon_h=72)     # submit 72h — ignored
+        assert grade(s, self.T0, self.T0 + (h - 1) * 3_600_000,
                      entry_price=self.ENTRY, bars=bars).status == PENDING
-        assert grade(s, self.T0, self.T0 + 31 * 3_600_000,
+        assert grade(s, self.T0, self.T0 + (h + 1) * 3_600_000,
                      entry_price=self.ENTRY, bars=bars).status == WASHED
 
     def test_metals_wash_window_is_12h(self):
@@ -302,6 +453,53 @@ class TestRelay:
         assert bucket.update_index("5HK", "n3") is None
 
 
+# ── blob fetch is size- AND time-capped (audit #7) ───────────────────────────
+class _FakeResp:
+    def __init__(self, status_code=200, chunks=()):
+        self.status_code = status_code
+        self._chunks = list(chunks)
+
+    def iter_content(self, chunk_size=1):
+        for c in self._chunks:
+            yield c
+
+    def close(self):
+        pass
+
+
+class TestBlobFetch:
+    """A malicious host must not stall the validator: fetch enforces a hard
+    wall-clock deadline (not just requests' between-bytes timeout) and a size
+    cap, returning None rather than blocking."""
+
+    def test_fetch_happy_path(self, monkeypatch):
+        monkeypatch.setattr(bucket.time, "monotonic", lambda: 0.0)
+        body = b'{"v":1,"x":2}'
+        monkeypatch.setattr(bucket.requests, "get",
+                            lambda *a, **k: _FakeResp(200, [bytes([b]) for b in body]))
+        assert bucket.fetch("https://x/y.json", deadline_s=8) == {"v": 1, "x": 2}
+
+    def test_fetch_aborts_on_deadline(self, monkeypatch):
+        # clock jumps past the deadline after the first byte → bail with None,
+        # never draining the (potentially endless) drip.
+        times = iter([0.0] + [100.0] * 10)
+        monkeypatch.setattr(bucket.time, "monotonic", lambda: next(times))
+        monkeypatch.setattr(bucket.requests, "get",
+                            lambda *a, **k: _FakeResp(200, [b"{"] * 10))
+        assert bucket.fetch("https://x/y.json", deadline_s=8) is None
+
+    def test_fetch_oversize_returns_none(self, monkeypatch):
+        monkeypatch.setattr(bucket.time, "monotonic", lambda: 0.0)
+        monkeypatch.setattr(bucket.requests, "get",
+                            lambda *a, **k: _FakeResp(200, [b"x"] * 10))
+        assert bucket.fetch("https://x/y.json", max_bytes=4, deadline_s=8) is None
+
+    def test_fetch_non_200_returns_none(self, monkeypatch):
+        monkeypatch.setattr(bucket.time, "monotonic", lambda: 0.0)
+        monkeypatch.setattr(bucket.requests, "get", lambda *a, **k: _FakeResp(404, []))
+        assert bucket.fetch("https://x/y.json") is None
+
+
 # ── validity filters ─────────────────────────────────────────────────────────
 def _row(hk, pair, direction, t0):
     return scoring.GradedRow(hotkey=hk, trade_pair=pair, direction=direction,
@@ -411,6 +609,51 @@ class TestMarkCopies:
         assert len(marked) == 9                        # other 9 keys penalized
 
 
+class TestCopyLeaderGate:
+    """Anti-grief (#4): only an ELIGIBLE leader can make a later entrant a copy,
+    and a hotkey occupying both directions of a pair is never eligible — so a
+    zero-history griefer can't manufacture copy-flags against honest miners."""
+
+    def test_both_direction_spammer_detected(self):
+        rows = [
+            _row("G", "BTCUSD", "LONG", 0),
+            _row("G", "BTCUSD", "SHORT", 60),         # same hotkey, both sides, overlapping
+            _row("H", "BTCUSD", "LONG", 120),
+        ]
+        assert scoring.both_direction_spammers(rows) == {"G"}
+
+    def test_opposite_dirs_different_hotkeys_not_spammers(self):
+        rows = [_row("A", "BTCUSD", "LONG", 0), _row("B", "BTCUSD", "SHORT", 60)]
+        assert scoring.both_direction_spammers(rows) == set()
+
+    def test_ineligible_leader_does_not_mark_copy(self):
+        # griefer "G" opens first but is NOT eligible → honest "H" is not marked
+        # despite overlapping the same (pair, direction).
+        rows = scoring.mark_copies(
+            [_row("G", "BTCUSD", "LONG", 0), _row("H", "BTCUSD", "LONG", 3600)],
+            eligible_leaders=set())
+        assert all(r.is_copy is False for r in rows)
+
+    def test_eligible_leader_still_marks_copy(self):
+        rows = scoring.mark_copies(
+            [_row("A", "BTCUSD", "LONG", 0), _row("B", "BTCUSD", "LONG", 3600)],
+            eligible_leaders={"A"})
+        byhk = {r.hotkey: r for r in rows}
+        assert byhk["A"].is_copy is False and byhk["B"].is_copy is True
+
+    def test_detect_copiers_respects_leader_eligibility(self):
+        now = 100 * 24 * 3600.0
+        rows = []
+        for i in range(config.COPY_SHARP_MIN_EVENTS):
+            base = now - 20 * 86_400 + i * 86_400
+            rows += [_row("G", "BTCUSD", "LONG", base),
+                     _row("H", "BTCUSD", "LONG", base + 300)]   # 5-min sharp lag
+        assert scoring.flagged_copier_hotkeys(
+            scoring.detect_copiers(rows, now, eligible_leaders=set())) == set()
+        assert scoring.flagged_copier_hotkeys(
+            scoring.detect_copiers(rows, now, eligible_leaders={"G"})) == {"H"}
+
+
 class TestHabitualCopier:
     def test_consistent_copier_is_habitual(self):
         # 9 of 12 decisive trades landed second → rotating copier caught
@@ -494,12 +737,12 @@ class TestCopyDetection:
 
 
 # ── weights ──────────────────────────────────────────────────────────────────
-# _state(uid, first_seen, lifetime_wins, lifetime_decisive, trailing_wins):
-#   hit-rate/tier come from lifetime_wins / lifetime_decisive (forever);
+# _state(uid, first_seen, rep_wins, rep_decisive, trailing_wins):
+#   hit-rate/tier come from rep_wins / rep_decisive (rolling reputation window);
 #   the emission share is sized by trailing_wins (last 30 days).
-def _state(uid, first_seen, lw, ld, tw):
+def _state(uid, first_seen, rw, rd, tw):
     return scoring.MinerState(hotkey=f"hk{uid}", uid=uid, first_seen_unix=first_seen,
-                              lifetime_wins=lw, lifetime_decisive=ld, trailing_wins=tw)
+                              rep_wins=rw, rep_decisive=rd, trailing_wins=tw)
 
 
 class TestWeights:
@@ -630,10 +873,56 @@ class TestWarmupScoring:
         warmup_end = first_seen + config.IMMUNITY_S
         decisive = [(warmup_end + self.DAY, True, False),     # ~51d ago → aged out of 30d
                     (self.NOW - 5 * self.DAY, True, False)]   # recent post-warmup win
-        lw, ld, tw_all, tw_orig, copies, td = scoring.score_inputs(
+        rep_w, rep_d, tw_all, tw_orig, copies, td = scoring.score_inputs(
             decisive, first_seen, self.NOW)
-        assert lw == 2                     # lifetime keeps both
-        assert tw_all == 1                 # trailing-30d keeps only the recent one
+        assert rep_w == 2                  # reputation window (60d) keeps both
+        assert tw_all == 1                 # trailing-30d emission keeps only the recent one
+
+
+class TestHitRateDecay:
+    """Hit-rate gate + tier use a ROLLING reputation window (HIT_RATE_WINDOW_S
+    capped at HIT_RATE_WINDOW_TRADES), not lifetime — a once-great miner that
+    starts trading badly loses qualification as the good history ages out, and a
+    bad ancient record can't sink a miner that has turned things around (#3)."""
+    NOW = 200 * 24 * 3600.0
+    DAY = 24 * 3600
+
+    def test_old_wins_age_out_of_reputation_window(self):
+        # 20 wins ~90d ago (outside the 60d window) + 10 recent losses. Lifetime
+        # would be 20/30 = 67 % (WOLF); the window sees only the recent 0/10.
+        first_seen = self.NOW - 120 * self.DAY
+        old = [(self.NOW - 90 * self.DAY, True, False) for _ in range(20)]
+        recent = [(self.NOW - 5 * self.DAY, False, False) for _ in range(10)]
+        rep_w, rep_d, *_ = scoring.score_inputs(old + recent, first_seen, self.NOW)
+        assert (rep_w, rep_d) == (0, 10)
+        assert rep_w / rep_d < config.QUALIFY_MIN_HIT          # falls below the gate
+
+    def test_recent_good_run_qualifies_despite_bad_ancient_history(self):
+        first_seen = self.NOW - 120 * self.DAY
+        old = [(self.NOW - 90 * self.DAY, False, False) for _ in range(30)]
+        recent = [(self.NOW - 3 * self.DAY, True, False) for _ in range(12)]
+        rep_w, rep_d, *_ = scoring.score_inputs(old + recent, first_seen, self.NOW)
+        assert (rep_w, rep_d) == (12, 12)                      # ancient losses gone
+
+    def test_reputation_capped_at_most_recent_trades(self):
+        # > HIT_RATE_WINDOW_TRADES in-window: only the most recent N count, so the
+        # window can't be diluted by piling on volume.
+        n = config.HIT_RATE_WINDOW_TRADES
+        base = self.NOW - 10 * self.DAY
+        losses = [(base + i, False, False) for i in range(n)]      # older
+        wins = [(base + n + i, True, False) for i in range(n)]     # most recent N
+        rep_w, rep_d, *_ = scoring.score_inputs(
+            losses + wins, self.NOW - 120 * self.DAY, self.NOW)
+        assert (rep_w, rep_d) == (n, n)
+
+    def test_fallen_wolf_drops_below_gate_in_weights(self):
+        # end-to-end: a once-great miner whose WINDOW hit-rate is now 5/10 (50 %)
+        # earns nothing — its share burns.
+        s = scoring.MinerState(
+            hotkey="hk1", uid=1, first_seen_unix=self.NOW - config.IMMUNITY_S - 1,
+            rep_wins=5, rep_decisive=10, trailing_wins=5)
+        w = scoring.compute_weights([s], self.NOW)
+        assert 1 not in w and w[config.BURN_UID] > 0.99
 
 
 class TestWeightModel:
@@ -641,10 +930,10 @@ class TestWeightModel:
     NOW = 10_000_000.0
     OLD = NOW - config.IMMUNITY_S - 1
 
-    def _s(self, uid, lw, ld, tw):
+    def _s(self, uid, rw, rd, tw):
         return scoring.MinerState(
             hotkey=f"hk{uid}", uid=uid, first_seen_unix=self.OLD,
-            lifetime_wins=lw, lifetime_decisive=ld, trailing_wins=tw)
+            rep_wins=rw, rep_decisive=rd, trailing_wins=tw)
 
     def test_qualified_split_by_trailing_wins(self):
         w = scoring.compute_weights(

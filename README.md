@@ -8,7 +8,7 @@ Bittensor subnet 89 — trading-signals. Miners commit encrypted directional tra
 
 1. **Commit** — a miner picks a pair + direction, encrypts the signal with a [drand](https://drand.love) 24-hour timelock, and records `SHA256(signal)` on-chain via `set_commitment`. The block the commitment lands in is the signal's timestamp; validators anchor entry at the open of the first 1-second bar at or after that block time + 30 s, so every validator derives the same entry price.
 2. **Reveal** — after 24 hours the timelock opens; validators verify the plaintext matches the on-chain hash, then grade on 1-minute candles: first touch of TP wins, first touch of SL loses, no touch by the horizon is a wash.
-3. **Earn** — emissions flow to qualified miners weighted by wins in the last 30 days × lifetime hit-rate tier.
+3. **Earn** — emissions flow to qualified miners weighted by wins in the last 30 days × hit-rate tier (hit-rate measured over a rolling reputation window, below).
 
 **You must reveal what you commit.** A blob still unfetchable 6 hours after its reveal round is a decisive LOSS — there is no free option to hide losers.
 
@@ -18,15 +18,16 @@ Bittensor subnet 89 — trading-signals. Miners commit encrypted directional tra
 
 ```
 decisive    = WON + LOST   (washes and voids never count)
-hit rate    = lifetime wins / lifetime decisive   (never resets)
-QUALIFIED   = lifetime decisive ≥ 10  AND  lifetime hit rate ≥ 55%
+reputation  = your decisive trades in the last ~60 days, capped at the most recent ~100
+hit rate    = wins / decisive  over that reputation window   (DECAYS — old trades age out)
+QUALIFIED   = window decisive ≥ 10  AND  window hit rate ≥ 55%
 tier        = QUALIFIED ≥ 55% → 1.0×  |  SHARP ≥ 60% → 1.2×  |  WOLF ≥ 70% → 2.0×
 your weight ∝ (your wins in last 30 days × tier) / Σ same over all qualified miners
 ```
 
-Quality is forever; pay is recent. Hit-rate never resets; wins decay after 30 days. If no qualified miner has recent wins, emissions burn.
+Reputation decays: hit-rate (the gate and the tier) is measured over a rolling ~60-day / ~100-trade window, so a once-great miner that starts trading badly loses its tier and falls below the gate as the good history ages out — and a bad early stretch can't sink a miner that has since turned it around. Wins decay after 30 days for emission sizing. If no qualified miner has recent wins, emissions burn.
 
-**Warmup:** new hotkeys get 8 days of immunity with dust emissions. Warmup trades build your hit-rate record but warmup wins never pay emissions — you must post fresh wins after warmup ends to rise above dust.
+**Warmup:** new hotkeys get 8 days of immunity with dust emissions. Warmup trades build your hit-rate record (within the reputation window) but warmup wins never pay emissions — you must post fresh wins after warmup ends to rise above dust.
 
 ### Rules
 
@@ -35,7 +36,7 @@ Quality is forever; pay is recent. Hit-rate never resets; wins decay after 30 da
 | Max signals per UTC day | 6 per hotkey |
 | Min spacing | none — fire as fast as you like |
 | TP / SL | per-asset, symmetric 1:1 — `data/signals-bands.json` |
-| Horizon | crypto 30 h · forex/metals 12 h · equities 48 h |
+| Horizon | crypto 8 h · forex/metals 12 h · equities 48 h |
 | Overlap | unlimited — a hotkey may hold multiple open calls on the same (pair, direction) |
 | Unrevealed blob | LOSS 6 h past reveal round |
 
@@ -43,9 +44,11 @@ The only submission cap is 6 signals per hotkey per UTC day. Exception: a blob t
 
 ### Copy penalty
 
-The first hotkey to open a `(pair, direction)` is the original. Any other hotkey opening the same trade while the original is live lands second. A hotkey whose landed-second trades exceed half its decisive trades is a habitual copier — its copied wins stop counting toward hit-rate, dragging it below the qualification gate. Occasional overlap is fine; systematic copying is strictly negative.
+The first **eligible** hotkey to open a `(pair, direction)` is the original. Any other hotkey opening the same trade while the original is live lands second. A hotkey whose landed-second trades exceed half its decisive trades is a habitual copier — its copied wins stop counting toward hit-rate, dragging it below the qualification gate. Occasional overlap is fine; systematic copying is strictly negative.
 
-The mechanism is leader-agnostic: it counts how often you land second into anyone's live trade, not how often you follow one specific miner. Rotating victims doesn't help — your landed-second rate climbs all the same.
+Only an **eligible leader** can make you land "second": a hotkey with a real track record (≥ 10 decisive outcomes), not eliminated, and not holding both directions of the same pair at once. This is the anti-grief boundary — the 24-hour timelock makes live copying impossible, so a throwaway hotkey can't register, occupy a `(pair, direction)` early (or both sides of a pair), and manufacture copy-flags against honest miners who merely traded the same pair. A hotkey caught holding LONG and SHORT on one pair simultaneously is barred from the leader role outright.
+
+The mechanism is leader-agnostic among eligible leaders: it counts how often you land second into *any* eligible miner's live trade, not how often you follow one specific miner. Rotating victims doesn't help — your landed-second rate climbs all the same.
 
 > The first mover is always safe. An honest miner who only occasionally lands second on a crowded trade keeps those wins — the penalty fires only once landed-second trades dominate your record (≥ 50%, min 5).
 
@@ -72,6 +75,12 @@ git clone https://github.com/DeltaCompute24/InfiniteQuant-Subnet && cd InfiniteQ
 python3.10 -m venv .venv && . .venv/bin/activate     # MUST be 3.10 — timelock has no 3.11/3.12 wheels
 pip install -r requirements.txt
 btcli subnet register --netuid 89 --wallet.name mywallet --wallet.hotkey miner
+```
+
+Or, for a fully pinned/reproducible install with [uv](https://docs.astral.sh/uv/) (resolves the exact versions in `uv.lock`, picks Python 3.10 automatically):
+
+```bash
+uv sync                 # validators; add --extra miner if you self-host blobs to S3/R2
 ```
 
 Miners do not need a market data subscription — validators handle all pricing.
@@ -150,9 +159,9 @@ Weight is earned purely on your track record — no collateral, no deposit:
 | State | Result |
 |---|---|
 | In immunity (first 8 days) | Dust weight (building a record) |
-| 40–55% hit rate | No emissions |
-| ≥55% hit rate over ≥10 lifetime decisive | Emissions, sized by trailing-30d wins × hit-rate tier |
-| Below 40% over ≥10 decisive (after ≥20 lifetime decisive) | **ELIMINATED** — hotkey zeroed permanently |
+| 40–55% window hit rate | No emissions |
+| ≥55% hit rate over ≥10 decisive in the reputation window | Emissions, sized by trailing-30d wins × hit-rate tier |
+| Trailing hit rate below 40% over ≥10 decisive (after ≥20 lifetime decisive) | **ELIMINATED** — hotkey zeroed permanently |
 
 ### Testnet (netuid 514)
 

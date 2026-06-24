@@ -58,11 +58,28 @@ t0 = self.ch.block_time_unix(c["commit_block"])   # ms-precise, identical on eve
 ... INSERT ... first_seen_block → commit_block ...
 ```
 
-Caveat: subtensor keeps ONE commitment per hotkey (latest wins). If a miner overwrites
-before a validator's poll observes the previous commitment, the old signal is lost.
-With no minimum spacing a miner *can* fire back-to-back, so a fresh commit may land
-within a poll interval of the prior one; a ≤30 s poll keeps that window small. Keep the
-journal as an *observation log*; `commit_block` is canon.
+Caveat (audit #5): subtensor keeps ONE commitment per hotkey (latest wins). With no
+minimum spacing a miner can overwrite back-to-back, and the snapshot poll only ever sees
+the *latest* commitment per hotkey. Two consequences, do not understate them:
+
+1. **Overwrite loss** — a commitment overwritten before a validator observes it is never
+   journaled by that validator. This is self-inflicted (a miner only loses its *own*
+   earlier signal), but it is real, not "bounded away" by the poll interval.
+2. **Cross-validator split-brain** — validators polling at different phases can latch
+   *different* commitments for the same hotkey (A overwrites to B between two polls), then
+   grade different signals and set divergent weights. `commit_block` makes T0 consensus-
+   exact *for a given commitment*, but does nothing when validators hold *different*
+   commitments. A miner can engineer this by timing overwrites.
+
+Mitigations now in place: (a) the validator polls on a **fixed wall-clock cadence**
+(sleep the *remainder* of `POLL_INTERVAL_S`, not a full interval after the work), so the
+observation window doesn't balloon with loop work-time and stays uniform across
+validators; (b) an **optional commitment-history scan** (`SCAN_COMMITMENT_HISTORY`,
+`chain.read_commitments_in_block_range`) journals every commitment set in the blocks since
+the last poll — not just the latest snapshot — which closes both overwrite-loss and the
+split-brain. The scan is OFF by default pending a testnet soak (the per-runtime
+set_commitment event shape must be confirmed). Keep the journal as an *observation log*;
+`commit_block` is canon.
 
 `t0_unix` becomes **float seconds with ms precision** (it already is — `chain.py:84`
 divides the pallet's ms value). Store `t0_ms` as INTEGER ms instead to stop precision

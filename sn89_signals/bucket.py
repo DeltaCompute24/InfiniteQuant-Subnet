@@ -7,6 +7,7 @@ public HTTPS URL; the reference layout is {base}/{hotkey}/{nonce}.json.
 from __future__ import annotations
 
 import json
+import time
 
 import requests
 
@@ -148,15 +149,45 @@ def update_index(hotkey: str, nonce: str, keep: int = 200) -> None:
                   ContentType="application/json")
 
 
-def fetch(url: str, timeout: int = 10, max_bytes: int = 64 * 1024) -> dict | None:
-    """Fetch a blob; size-capped, returns None on any failure."""
+def fetch(url: str, timeout: int = 10, max_bytes: int = 64 * 1024,
+          deadline_s: float | None = None) -> dict | None:
+    """Fetch a blob; size-capped AND total-time-capped. Returns None on any
+    failure.
+
+    The blob host is UNTRUSTED. `requests`' `timeout` only bounds the gap
+    BETWEEN bytes, so a malicious host can drip one byte just under it forever
+    and stall the caller for days (the validator runs this on its synchronous
+    loop — a stall stops it ingesting, grading, and setting weights). So we also
+    enforce a hard wall-clock `deadline_s` across the whole read, streaming
+    byte-granularly so the deadline is honoured no matter how slowly bytes
+    arrive, and cap total size. Whatever exceeds either bound is abandoned
+    (returns None); the caller retries from the durable on-chain commitment.
+    """
+    if deadline_s is None:
+        deadline_s = config.BLOB_FETCH_DEADLINE_S
+    r = None
     try:
+        start = time.monotonic()
         r = requests.get(url, timeout=timeout, stream=True)
         if r.status_code != 200:
             return None
-        raw = r.raw.read(max_bytes + 1, decode_content=True)
-        if len(raw) > max_bytes:
-            return None
-        return json.loads(raw)
+        buf = bytearray()
+        # chunk_size=1 so the deadline is checked at byte granularity — a larger
+        # chunk would let iter_content block (filling the chunk) past the
+        # deadline under a slow drip. Blobs are tiny (≤ max_bytes), so the
+        # iteration count is bounded and cheap.
+        for chunk in r.iter_content(chunk_size=1):
+            if time.monotonic() - start > deadline_s:
+                return None                     # slow-drip / stall — bail
+            buf += chunk
+            if len(buf) > max_bytes:
+                return None                     # oversize
+        return json.loads(bytes(buf))
     except Exception:
         return None
+    finally:
+        if r is not None:
+            try:
+                r.close()
+            except Exception:
+                pass
