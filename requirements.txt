@@ -1,6 +1,11 @@
 # pinned to the versions proven on the MANTIS stack (mantis VM venv)
 bittensor==10.2.0
 bittensor-wallet==4.0.1
+# bittensor 10.2.0 declares async-substrate-interface>=1.6.2 with no upper bound;
+# 2.x dropped scalecodec for cyscale and aborts import with a namespace conflict.
+# Pin to the proven scalecodec-era line (scalecodec==1.2.12 is what bittensor wants).
+async-substrate-interface==1.6.4
+scalecodec==1.2.12
 timelock==0.0.1.dev0
 cryptography>=42.0
 requests>=2.31
