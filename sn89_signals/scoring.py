@@ -86,11 +86,44 @@ def elimination_t0(decisive: list[tuple[float, bool]]) -> float | None:
 
 
 # ── copy penalty: mark the later entrant on a live identical trade (§7.5) ─────
-def mark_copies(rows: list[GradedRow]) -> list[GradedRow]:
+def both_direction_spammers(rows: list[GradedRow]) -> set[str]:
+    """Hotkeys that held LONG and SHORT on the SAME pair with overlapping live
+    windows. That is never a real directional signal — it's the tell of a
+    griefer occupying both sides of a pair so that every other miner who trades
+    it lands "second" and gets copy-flagged. Such a hotkey is barred from the
+    copy-leader role (the 24h timelock makes live copying impossible, so mere
+    overlap is not evidence anyone copied *them*). Pure/deterministic.
+    """
+    by_hk_pair: dict[tuple[str, str], list[tuple[float, float, str]]] = defaultdict(list)
+    for r in rows:
+        if r.status == "void":
+            continue
+        end = r.t0_unix + (r.horizon_h or config.MAX_HORIZON_H) * 3600
+        by_hk_pair[(r.hotkey, r.trade_pair)].append((r.t0_unix, end, r.direction))
+    spammers: set[str] = set()
+    for (hk, _pair), ivs in by_hk_pair.items():
+        longs = [(s, e) for (s, e, d) in ivs if d == "LONG"]
+        shorts = [(s, e) for (s, e, d) in ivs if d == "SHORT"]
+        if any(ls < se and ss < le for (ls, le) in longs for (ss, se) in shorts):
+            spammers.add(hk)
+    return spammers
+
+
+def mark_copies(rows: list[GradedRow],
+                eligible_leaders: set[str] | None = None) -> list[GradedRow]:
     """Sets r.is_copy=True when, at r's T0, an *identical* (pair, direction)
-    position from a DIFFERENT hotkey committed earlier was still open
-    (entry → entry + horizon). The earliest entrant on a trade is the original
-    and is never a copy; everyone who opens the same live trade after it is.
+    position from a DIFFERENT, ELIGIBLE-LEADER hotkey committed earlier was still
+    open (entry → entry + horizon). The earliest eligible entrant on a trade is
+    the original and is never a copy; a later entrant on the same live trade is.
+
+    `eligible_leaders` gates who can make someone a copier: only a real signal
+    source (track record, not a throwaway griefer; see the validator) counts as
+    a leader. When None, ANY earlier different hotkey marks — the legacy
+    behaviour, retained for unit tests. This is the anti-grief lever: without
+    it, a zero-stake hotkey could occupy a (pair, direction) early — or both
+    directions of a pair — and manufacture copy-flags against honest miners who
+    merely traded the same pair, which the 24h timelock makes impossible to have
+    actually copied.
 
     Outcome-independent and deterministic (ties broken by hotkey). The scoring
     layer then declines to credit a copied WIN — see §7.5 / COPY_PENALTY. Void
@@ -102,8 +135,10 @@ def mark_copies(rows: list[GradedRow]) -> list[GradedRow]:
     for r in live:
         key = (r.trade_pair, r.direction)
         end = r.t0_unix + (r.horizon_h or config.MAX_HORIZON_H) * 3600
-        r.is_copy = any(start <= r.t0_unix < e and hk != r.hotkey
-                        for (start, e, hk) in open_intervals[key])
+        r.is_copy = any(
+            start <= r.t0_unix < e and hk != r.hotkey
+            and (eligible_leaders is None or hk in eligible_leaders)
+            for (start, e, hk) in open_intervals[key])
         open_intervals[key].append((r.t0_unix, end, r.hotkey))
     return live
 
@@ -132,12 +167,16 @@ class CopyReport:
     low_diversity: bool      # soft ≥ threshold ⇒ report-only nudge
 
 
-def detect_copiers(rows: list[GradedRow], now_unix: float) -> dict[str, list[CopyReport]]:
+def detect_copiers(rows: list[GradedRow], now_unix: float,
+                   eligible_leaders: set[str] | None = None) -> dict[str, list[CopyReport]]:
     """Pairwise copy detection over the trailing COPY_WINDOW_S (deterministic).
 
     For each (pair, direction), walk commits in time order; the later of two
     commits from *different* hotkeys is the follower, attributed to the nearest
-    preceding leader on that (pair, direction). A follower within
+    preceding ELIGIBLE-LEADER on that (pair, direction). `eligible_leaders` (see
+    mark_copies) bars a throwaway griefer from being treated as the leader that
+    others "shadow"; when None, any preceding hotkey can be the leader (legacy
+    behaviour, retained for unit tests). A follower within
     COPY_SHARP_LAG_S of its leader is a *sharp* event (≤15 min — a coordinated /
     shadowing fingerprint, since the 24h timelock makes live copying impossible,
     so tight coincidences mean shared intent); within COPY_SOFT_LAG_S it is a
@@ -164,7 +203,9 @@ def detect_copiers(rows: list[GradedRow], now_unix: float) -> dict[str, list[Cop
     for evs in groups.values():
         for i, f in enumerate(evs):
             leader = next((evs[j] for j in range(i - 1, -1, -1)
-                           if evs[j].hotkey != f.hotkey), None)
+                           if evs[j].hotkey != f.hotkey
+                           and (eligible_leaders is None
+                                or evs[j].hotkey in eligible_leaders)), None)
             if leader is None:
                 continue
             dt = f.t0_unix - leader.t0_unix
@@ -199,8 +240,8 @@ class MinerState:
     hotkey: str
     uid: int
     first_seen_unix: float   # first commit observed (immunity clock)
-    lifetime_wins: int       # all-time WONs — drives LIFETIME hit-rate + tier
-    lifetime_decisive: int   # all-time decisive (won+lost) — gate + hit-rate denom
+    rep_wins: int            # WONs inside the reputation window — hit-rate + tier
+    rep_decisive: int        # decisive (won+lost) in the window — gate + hit-rate denom
     trailing_wins: int       # WONs inside SCORE_WINDOW_S (30d) — sizes the emission
 
 
@@ -208,24 +249,36 @@ def score_inputs(decisive: list[tuple[float, bool, bool]], first_seen_unix: floa
                  now_unix: float) -> tuple[int, int, int, int, int, int]:
     """From a hotkey's decisive history [(t0_unix, won, is_copy)] compute the
     scoring inputs:
-      (lifetime_wins, lifetime_decisive,
+      (rep_wins, rep_decisive,
        trailing_wins_all, trailing_wins_orig, trailing_copies, trailing_decisive)
 
-    * lifetime_* span ALL of history INCLUDING warmup — they drive the ≥20
-      decisive gate and the lifetime hit-rate tier (the warmup record counts).
+    * rep_* are the REPUTATION window: decisive trades in the trailing
+      HIT_RATE_WINDOW_S, capped at the most recent HIT_RATE_WINDOW_TRADES
+      (whichever is tighter). They drive the qualify gate and the hit-rate tier.
+      Reputation DECAYS — old outcomes age out, so a once-great miner that goes
+      cold loses its tier/qualification, and stale wins can't mask bad recent
+      trading. Warmup outcomes still count toward the record (only emission
+      excludes warmup wins, below).
     * trailing_* span the last SCORE_WINDOW_S, and a win only counts toward
       EMISSIONS if it was committed AFTER this hotkey's warmup (immunity) ended
       (t0 ≥ first_seen + IMMUNITY_S). Warmup wins build the record but never pay;
       a miner must post NEW wins after warmup to earn above the dust floor.
     """
-    cutoff = now_unix - config.SCORE_WINDOW_S
+    score_cutoff = now_unix - config.SCORE_WINDOW_S
+    rep_cutoff = now_unix - config.HIT_RATE_WINDOW_S
     warmup_end = first_seen_unix + config.IMMUNITY_S
-    lw = ld = tw_all = tw_orig = tcopies = tdec = 0
+
+    # reputation window: in the last HIT_RATE_WINDOW_S, then the most recent
+    # HIT_RATE_WINDOW_TRADES of those (sort by t0 so "most recent" is well-defined
+    # regardless of the caller's row order).
+    recent = sorted((d for d in decisive if d[0] >= rep_cutoff), key=lambda d: d[0])
+    recent = recent[-config.HIT_RATE_WINDOW_TRADES:]
+    rep_wins = sum(1 for _, won, _ in recent if won)
+    rep_decisive = len(recent)
+
+    tw_all = tw_orig = tcopies = tdec = 0
     for t0, won, is_copy in decisive:
-        ld += 1
-        if won:
-            lw += 1
-        if t0 >= cutoff:
+        if t0 >= score_cutoff:
             tdec += 1
             if is_copy:
                 tcopies += 1
@@ -233,7 +286,7 @@ def score_inputs(decisive: list[tuple[float, bool, bool]], first_seen_unix: floa
                 tw_all += 1
                 if not is_copy:
                     tw_orig += 1
-    return lw, ld, tw_all, tw_orig, tcopies, tdec
+    return rep_wins, rep_decisive, tw_all, tw_orig, tcopies, tdec
 
 
 def compute_weights(states: list[MinerState], now_unix: float,
@@ -241,11 +294,13 @@ def compute_weights(states: list[MinerState], now_unix: float,
                     excluded_uids: set[int] | None = None) -> dict[int, float]:
     """{uid: normalized_weight}. Immune miners get the dust floor; qualified
     miners split the rest by their LAST-30-DAY wins, each scaled by the miner's
-    LIFETIME hit-rate tier (§7.3); leftovers burn.
+    reputation-window hit-rate tier (§7.3); leftovers burn.
 
-    Hit-rate (gate + tier) is career-long and never resets — a large, stable
-    sample. Emission size is the trailing-30d win count, so a miner must keep
-    trading to earn: a qualified WOLF with zero recent wins gets nothing.
+    Hit-rate (gate + tier) is computed over the rolling reputation window
+    (HIT_RATE_WINDOW_S / _TRADES) and DECAYS — a once-great miner that goes cold
+    loses its tier and falls below the gate as the good history ages out.
+    Emission size is the trailing-30d win count, so a miner must keep trading to
+    earn: a qualified WOLF with zero recent wins gets nothing.
 
     excluded_uids (flagged copiers, §7.5) earn nothing — neither the immunity
     dust floor nor a pro-rata share — for as long as they stay flagged. Their
@@ -266,15 +321,15 @@ def compute_weights(states: list[MinerState], now_unix: float,
     qualified = [
         s for s in states
         if s.uid not in excluded_uids
-        and s.lifetime_decisive >= config.QUALIFY_MIN_DECISIVE
-        and (s.lifetime_wins / s.lifetime_decisive) >= config.QUALIFY_MIN_HIT
+        and s.rep_decisive >= config.QUALIFY_MIN_DECISIVE
+        and (s.rep_wins / s.rep_decisive) >= config.QUALIFY_MIN_HIT
     ]
 
-    # emission = last-30d wins × LIFETIME hit-rate tier (§7.3). A qualified miner
-    # with no recent wins contributes 0 and earns 0 (lifetime_decisive ≥ 20
-    # guarantees the hit-rate denominator is non-zero).
+    # emission = last-30d wins × reputation-window hit-rate tier (§7.3). A
+    # qualified miner with no recent wins contributes 0 and earns 0
+    # (rep_decisive ≥ QUALIFY_MIN_DECISIVE guarantees a non-zero denominator).
     def effective_wins(s: MinerState) -> float:
-        return s.trailing_wins * win_multiplier(s.lifetime_wins / s.lifetime_decisive)
+        return s.trailing_wins * win_multiplier(s.rep_wins / s.rep_decisive)
 
     budget = 1.0 - sum(weights.values())
     total_eff = sum(effective_wins(s) for s in qualified)

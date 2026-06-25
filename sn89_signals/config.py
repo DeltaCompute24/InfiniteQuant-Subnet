@@ -113,16 +113,25 @@ LIMIT_FILL_MIN_SAMPLES = 10         # use the recent window when it holds >this 
 # ── Scoring (CONSENSUS — §7 of SPEC) ─────────────────────────────────────────
 SCORE_WINDOW_S = 30 * 24 * 3600     # EMISSION window: a miner's share is sized by
                                     # its WON count in the trailing 30 days, so you
-                                    # must keep trading to earn. (Hit-rate/tier do
-                                    # NOT use this window — they're lifetime.)
-QUALIFY_MIN_DECISIVE = 10           # lifetime decisive (won+lost) to qualify
-QUALIFY_MIN_HIT = 0.55              # LIFETIME hit-rate gate (QUALIFIED tier floor) —
-                                    # career win-rate, never resets
+                                    # must keep trading to earn. (Distinct from the
+                                    # hit-rate window below.)
 
-# Per-win multiplier by LIFETIME hit-rate tier — each recent win is worth more the
-# higher your career hit-rate, so quality is rewarded above the gate, not just
-# volume. Lifetime is a large, stable sample, so tier assignment doesn't flip on a
-# hot/cold streak. Checked high → low; the first threshold met wins. Below
+# Hit-rate REPUTATION window. The qualify gate and the per-win tier are computed
+# over a ROLLING window — the trailing HIT_RATE_WINDOW_S, capped at the most
+# recent HIT_RATE_WINDOW_TRADES decisive outcomes (whichever is tighter) — NOT
+# over lifetime. Reputation decays: a once-great miner who starts trading badly
+# loses its tier and falls below the gate as the good history ages out, and old
+# wins can't prop up poor recent trading. A large, stable sample (≈2 months /
+# ≈100 trades) so the tier doesn't flip on a short hot/cold streak.
+HIT_RATE_WINDOW_S = 60 * 24 * 3600          # ≈2 months of history
+HIT_RATE_WINDOW_TRADES = 100                # …capped at the most recent ~100 decisive
+
+QUALIFY_MIN_DECISIVE = 10           # decisive (won+lost) IN THE WINDOW to qualify
+QUALIFY_MIN_HIT = 0.55              # reputation-window hit-rate gate (QUALIFIED floor)
+
+# Per-win multiplier by reputation-window hit-rate tier — each recent win is worth
+# more the higher your windowed hit-rate, so quality is rewarded above the gate,
+# not just volume. Checked high → low; the first threshold met wins. Below
 # QUALIFY_MIN_HIT a miner isn't qualified (multiplier 0). Mirrors the IQ Signals
 # program tiers: QUALIFIED 55 % (1×) · SHARP 60 % (1.2×) · WOLF 70 % (2×).
 WIN_RATE_TIERS = (
@@ -185,6 +194,23 @@ COPY_ZERO_WEIGHT = bool(int(os.getenv("SN89_COPY_ZERO_WEIGHT", "0")))
                                     # set 1 to ALSO zero forensic-flagged copiers' weight
                                     # (off by default — COPY_PENALTY is the real lever)
 
+# ── Copy-leader eligibility (anti-grief) ──────────────────────────────────────
+# A commit can only make a LATER entrant a "copier" if its own hotkey is an
+# ELIGIBLE LEADER: a real signal source, not a throwaway griefer. Without this,
+# anyone could register a hotkey (no qualification or collateral needed), occupy
+# a (pair, direction) early — or BOTH directions of a pair — and manufacture
+# copy-flags against honest miners who merely traded the same pair. The 24h
+# timelock makes live copying impossible, so overlap alone is never proof that
+# anyone copied the griefer. A leader must (a) have a real track record and
+# (b) not be a both-direction spammer.
+COPY_LEADER_MIN_DECISIVE = int(os.getenv(
+    "SN89_COPY_LEADER_MIN_DECISIVE", str(QUALIFY_MIN_DECISIVE)))
+                                    # a leader needs ≥ this many decisive outcomes
+                                    # before its position can copy-flag others
+COPY_EXCLUDE_BOTH_DIR = bool(int(os.getenv("SN89_COPY_EXCLUDE_BOTH_DIR", "1")))
+                                    # a hotkey holding LONG+SHORT on one pair at
+                                    # once is never an eligible leader (griefer tell)
+
 # ── Asset universe / bands (CONSENSUS — vendored from the live IQ Signals board)
 _BANDS_PATH = Path(os.getenv(
     "SN89_BANDS_PATH",
@@ -246,4 +272,34 @@ RELAY_TOKEN = os.getenv("SN89_RELAY_TOKEN", "") or os.getenv("SN89_FEED_TOKEN", 
 
 # ── Validator runtime ────────────────────────────────────────────────────────
 POLL_INTERVAL_S = 30
+
+# After a FAILED set_weights, wait at least this many blocks before retrying
+# instead of re-attempting every poll. Weight commits are rate-limited
+# (commit-reveal / weights_rate_limit); retrying faster than that just piles up
+# unrevealed commits (TooManyUnrevealedCommits) without landing any sooner. Set
+# to the subnet's weights_rate_limit. (A successful commit is still throttled to
+# once per TEMPO by the normal cadence.)
+WEIGHTS_RETRY_BLOCKS = int(os.getenv("SN89_WEIGHTS_RETRY_BLOCKS", "100"))
+
+# Blob fetching is bounded so a slow or malicious host can't stall the
+# synchronous validator loop (audit #7). Each fetch has a hard wall-clock
+# deadline (bucket.fetch); per loop iteration the outstanding fetches run in a
+# small thread pool under a total budget, and whatever doesn't finish is simply
+# retried next loop (the on-chain commitment is durable, and a captured blob is
+# pinned). Validators fetch ONLY from R2_PUBLIC_BASE (the owner relay by
+# default, or an operator-set bucket) — that base is the trust boundary; the
+# blob is encrypted and integrity-checked against the on-chain hash regardless.
+BLOB_FETCH_DEADLINE_S = float(os.getenv("SN89_BLOB_FETCH_DEADLINE_S", "8"))
+BLOB_FETCH_WORKERS = int(os.getenv("SN89_BLOB_FETCH_WORKERS", "8"))
+BLOB_FETCH_BUDGET_S = float(os.getenv("SN89_BLOB_FETCH_BUDGET_S", "20"))
+
+# Commitment-history scan (audit #5). When on, ingest also scans the blocks
+# since the last poll so a commitment a miner OVERWROTE before any validator
+# observed it isn't lost (the cross-validator split-brain). OFF by default: the
+# exact on-chain event/extrinsic shape for set_commitment varies by runtime and
+# MUST be validated on testnet before enabling on mainnet. SCAN_MAX_BLOCKS bounds
+# the per-poll scan so a long downtime doesn't trigger an unbounded backfill.
+SCAN_COMMITMENT_HISTORY = bool(int(os.getenv("SN89_SCAN_COMMITMENT_HISTORY", "0")))
+SCAN_MAX_BLOCKS_PER_POLL = int(os.getenv("SN89_SCAN_MAX_BLOCKS_PER_POLL", "120"))
+
 DB_PATH = os.getenv("SN89_DB_PATH", os.path.expanduser("~/.sn89/validator.db"))

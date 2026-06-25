@@ -18,6 +18,7 @@ same conclusions (grading is deterministic given the same chain + Polygon).
 """
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import os
 import sqlite3
@@ -85,7 +86,9 @@ class Validator:
         self.db.executescript(SCHEMA)
         self._migrate()
         self.tlock = Timelock(config.DRAND_PUBLIC_KEY)
-        self._last_weights_block = 0
+        self._last_weights_block = 0          # last SUCCESSFUL commit (TEMPO cadence)
+        self._last_weights_attempt_block = 0  # last attempt (failed-retry backoff)
+        self._last_scanned_block = 0   # commitment-history scan cursor (audit #5)
 
     def _migrate(self):
         """Additive column migration for DBs created before commit_block/t0_ms."""
@@ -101,42 +104,91 @@ class Validator:
         self.db.commit()
 
     # ── 1. ingest ────────────────────────────────────────────────────────────
+    def _journal_commit(self, c: dict, block: int, now: float):
+        """Journal one observed commitment (idempotent on commit_hex)."""
+        if self.db.execute(
+                "SELECT 1 FROM signals WHERE commit_hex=?", (c["commit"],)).fetchone():
+            return
+        hk = c["hotkey"]
+        # T0 = the commitment's true inclusion block (docs/entry-timing.md §2.1)
+        # — consensus-exact, identical on every validator regardless of poll
+        # phase. first_seen_block stays as an observation log.
+        commit_block = c.get("commit_block") or block
+        t0_ms = self.ch.block_time_ms(commit_block)
+        t0_unix = t0_ms / 1000.0
+        # Judge the miner-supplied drand round against the commitment's own
+        # inclusion-block time (NOT round_time(rnd)): a round outside the
+        # commit+REVEAL_DELAY ±tolerance window is journaled VOID right here,
+        # never left sealed. A far-future round would otherwise never mature —
+        # sitting sealed forever and re-pulling its blob every loop — and the
+        # reveal-time window check never reaches it. commit_block is consensus-
+        # exact, so every validator voids the identical rows.
+        status, void_reason = "sealed", None
+        if not crypto.expected_round_ok(c["round"], t0_unix):
+            status, void_reason = "void", "round_out_of_window"
+        self.db.execute(
+            "INSERT OR IGNORE INTO signals (commit_hex,hotkey,round,url_tag,"
+            "first_seen_block,commit_block,t0_unix,t0_ms,status,void_reason) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (c["commit"], hk, c["round"], c["url_tag"], block, commit_block,
+             t0_unix, t0_ms, status, void_reason))
+        self.db.execute(
+            "INSERT OR IGNORE INTO hotkey_meta (hotkey, first_seen_unix) VALUES (?,?)",
+            (hk, now))
+        print(f"  + {status} {c['commit'][:12]}… {hk[:8]}… round={c['round']}"
+              + (f" ({void_reason})" if void_reason else ""))
+
     def ingest(self):
         block = self.ch.current_block()
-        commits = self.ch.read_all_commitments_with_block()
+        # Latest on-chain snapshot (one commitment per hotkey — latest wins).
+        sources = list(self.ch.read_all_commitments_with_block().values())
+        # OPTIONAL (audit #5): also scan the blocks since the last poll so a
+        # commitment a miner OVERWROTE before we observed it isn't lost — the
+        # root of the cross-validator split-brain. Off by default; the on-chain
+        # event/extrinsic shape must be soaked on testnet before mainnet (see
+        # chain.read_commitments_in_block_range). Dedup is by commit_hex, so the
+        # union with the snapshot is safe.
+        if config.SCAN_COMMITMENT_HISTORY:
+            frm = self._last_scanned_block or (block - 1)
+            try:
+                sources += self.ch.read_commitments_in_block_range(frm, block)
+            except Exception as e:  # noqa: BLE001
+                print(f"  ⚠ commitment-history scan skipped: {e}")
+            self._last_scanned_block = block
         now = time.time()
-        for hk, c in commits.items():
-            row = self.db.execute(
-                "SELECT 1 FROM signals WHERE commit_hex=?", (c["commit"],)).fetchone()
-            if row:
-                continue
-            # T0 = the commitment's true inclusion block (docs/entry-timing.md
-            # §2.1) — consensus-exact, identical on every validator regardless
-            # of poll phase. first_seen_block stays as an observation log.
-            commit_block = c["commit_block"] or block
-            t0_ms = self.ch.block_time_ms(commit_block)
-            self.db.execute(
-                "INSERT OR IGNORE INTO signals (commit_hex,hotkey,round,url_tag,"
-                "first_seen_block,commit_block,t0_unix,t0_ms) VALUES (?,?,?,?,?,?,?,?)",
-                (c["commit"], hk, c["round"], c["url_tag"], block, commit_block,
-                 t0_ms / 1000.0, t0_ms))
-            self.db.execute(
-                "INSERT OR IGNORE INTO hotkey_meta (hotkey, first_seen_unix) VALUES (?,?)",
-                (hk, now))
-            print(f"  + sealed {c['commit'][:12]}… {hk[:8]}… round={c['round']}")
+        for c in sources:
+            self._journal_commit(c, block, now)
         self.db.commit()
 
-        # fetch missing ciphertext blobs (urls reconstructed from the bucket
-        # convention; miners using custom hosting are matched purely by tag —
-        # they must serve {base}/{hotkey}/<nonce>.json and we discover nonce
-        # at reveal; until then try the bucket listing endpoint if configured)
-        for commit_hex, hk, tag in self.db.execute(
-                "SELECT commit_hex, hotkey, url_tag FROM signals "
-                "WHERE blob_json IS NULL AND status='sealed'").fetchall():
-            blob = self._find_blob(hk, tag)
-            if blob is not None:
-                self.db.execute("UPDATE signals SET blob_json=? WHERE commit_hex=?",
-                                (json.dumps(blob, separators=(",", ":")), commit_hex))
+        # Fetch missing ciphertext blobs from R2_PUBLIC_BASE (the trust
+        # boundary; the blob is encrypted and hash-checked regardless). Bounded
+        # so a slow/malicious host can't stall the loop (audit #7): each fetch
+        # has a hard deadline (bucket.fetch) and the batch runs in a small thread
+        # pool under BLOB_FETCH_BUDGET_S. Whatever doesn't land this pass is
+        # retried next loop — the on-chain commitment is durable. Only the main
+        # thread touches the DB; workers just do network I/O.
+        pending = self.db.execute(
+            "SELECT commit_hex, hotkey, url_tag FROM signals "
+            "WHERE blob_json IS NULL AND status='sealed'").fetchall()
+        if pending:
+            ex = concurrent.futures.ThreadPoolExecutor(
+                max_workers=config.BLOB_FETCH_WORKERS)
+            futs = {ex.submit(self._find_blob, hk, tag): commit_hex
+                    for commit_hex, hk, tag in pending}
+            done, _ = concurrent.futures.wait(
+                futs, timeout=config.BLOB_FETCH_BUDGET_S)
+            for fut in done:
+                try:
+                    blob = fut.result()
+                except Exception:  # noqa: BLE001
+                    blob = None
+                if blob is not None:
+                    self.db.execute(
+                        "UPDATE signals SET blob_json=? WHERE commit_hex=?",
+                        (json.dumps(blob, separators=(",", ":")), futs[fut]))
+            # Don't block on stragglers — abandon them (bucket.fetch's own
+            # deadline bounds each worker, so they retire on their own).
+            ex.shutdown(wait=False, cancel_futures=True)
         self.db.commit()
 
     def _find_blob(self, hotkey: str, tag: str) -> dict | None:
@@ -157,10 +209,15 @@ class Validator:
             "SELECT commit_hex, hotkey, round, t0_unix, blob_json FROM signals "
             "WHERE status='sealed' AND blob_json IS NOT NULL").fetchall()
         for commit_hex, hk, rnd, t0, blob_json in rows:
-            if crypto.round_time(rnd) > now:
-                continue
+            # Window check BEFORE the maturity gate. A round outside commit+24h
+            # is void regardless of whether it has "matured", so a far-future
+            # round can't slip past the `round_time(rnd) > now` continue and sit
+            # sealed forever. (Ingest already voids these; this also catches any
+            # row journaled before that guard shipped.)
             if not crypto.expected_round_ok(rnd, t0):
                 self._void(commit_hex, "round_out_of_window", strike=False)
+                continue
+            if crypto.round_time(rnd) > now:
                 continue
             # §: W_owner must be wrapped to the canonical owner key so the owner
             # retains real-time visibility. A blob wrapped to any other key is
@@ -227,9 +284,15 @@ class Validator:
         validator reaches the identical verdict.
         """
         now = time.time()
-        for commit_hex, hk, rnd in self.db.execute(
-                "SELECT commit_hex, hotkey, round FROM signals "
+        for commit_hex, hk, rnd, t0 in self.db.execute(
+                "SELECT commit_hex, hotkey, round, t0_unix FROM signals "
                 "WHERE status='sealed' AND blob_json IS NULL").fetchall():
+            # A round outside the commit+24h window never matures into a real
+            # forfeit deadline — void it instead of re-pulling its blob forever
+            # (covers legacy rows journaled before the ingest-time guard).
+            if not crypto.expected_round_ok(rnd, t0):
+                self._void(commit_hex, "round_out_of_window", strike=False)
+                continue
             if now < crypto.round_time(rnd) + config.REVEAL_GRACE_S:
                 continue
             self.db.execute(
@@ -306,10 +369,25 @@ class Validator:
                 print(f"  ☠ eliminated {hk[:8]}… floor crossed at t0={t0:.0f}")
         self.db.commit()
 
+    def _weights_due(self, block: int) -> bool:
+        """Whether to (re)attempt set_weights now. A fresh weight cycle runs
+        every TEMPO after the last SUCCESS; but after a FAILED attempt we wait
+        WEIGHTS_RETRY_BLOCKS before retrying rather than hammering every poll —
+        commit-reveal weights are rate-limited, so a faster retry only piles up
+        unrevealed commits (TooManyUnrevealedCommits) without landing sooner.
+        (The faster fixed-cadence poll loop makes the every-poll retry especially
+        wasteful.)"""
+        if block - self._last_weights_block < config.TEMPO:
+            return False
+        if block - self._last_weights_attempt_block < config.WEIGHTS_RETRY_BLOCKS:
+            return False
+        return True
+
     def maybe_set_weights(self):
         block = self.ch.current_block()
-        if block - self._last_weights_block < config.TEMPO:
+        if not self._weights_due(block):
             return
+        self._last_weights_attempt_block = block
         self.refresh_eliminations()
         mg = self.ch.metagraph()
         uid_by_hotkey = {hk: i for i, hk in enumerate(mg.hotkeys)}
@@ -341,15 +419,36 @@ class Validator:
             copy_rows.append(gr)
             by_commit.append((commit_hex, gr))
 
+        # Eligible copy-leaders (anti-grief, §7.5): only a hotkey with a real
+        # track record (≥ COPY_LEADER_MIN_DECISIVE decisive outcomes), not
+        # eliminated, and not holding both directions of a pair at once, can make
+        # a LATER entrant a copier. This stops a zero-history griefer from
+        # manufacturing copy-flags against honest miners by occupying (both sides
+        # of) a pair — the 24h timelock makes live copying impossible, so mere
+        # overlap is not evidence that anyone copied the griefer.
+        decisive_counts = dict(self.db.execute(
+            "SELECT hotkey, COUNT(*) FROM signals WHERE status IN ('won','lost') "
+            "GROUP BY hotkey").fetchall())
+        eliminated_hk = {h for (h,) in self.db.execute(
+            "SELECT hotkey FROM hotkey_meta WHERE eliminated_t0 IS NOT NULL").fetchall()}
+        both_dir = (scoring.both_direction_spammers(copy_rows)
+                    if config.COPY_EXCLUDE_BOTH_DIR else set())
+        eligible_leaders = {
+            hk for hk, n in decisive_counts.items()
+            if n >= config.COPY_LEADER_MIN_DECISIVE
+            and hk not in eliminated_hk and hk not in both_dir}
+        for hk in sorted(both_dir):
+            print(f"  ⚠ both-direction spammer {hk[:8]}… barred as copy-leader")
+
         # PRIMARY: mark the later entrant on each live identical trade, persist
         # is_copy. The scoring SQL below then declines to credit a copied win.
-        scoring.mark_copies(copy_rows)
+        scoring.mark_copies(copy_rows, eligible_leaders=eligible_leaders)
         for commit_hex, gr in by_commit:
             self.db.execute("UPDATE signals SET is_copy=? WHERE commit_hex=?",
                             (int(gr.is_copy), commit_hex))
 
         # SECONDARY: 30-day shadowing report (report-only unless COPY_ZERO_WEIGHT).
-        reports = scoring.detect_copiers(copy_rows, now)
+        reports = scoring.detect_copiers(copy_rows, now, eligible_leaders=eligible_leaders)
         self.db.execute("DELETE FROM copier_flags")
         for follower, rs in reports.items():
             for r in rs:
@@ -381,13 +480,14 @@ class Validator:
             if elim_t0 is not None:
                 continue  # eliminated — zero weight permanently
             # one fetch of the decisive history; scoring inputs derive in a pure,
-            # tested function. Lifetime (incl. warmup) drives the gate + tier;
-            # trailing-30d wins size the emission but EXCLUDE the warmup window
-            # (warmup wins build the record, never pay — §7.2).
+            # tested function. The rolling reputation window (incl. warmup)
+            # drives the gate + tier; trailing-30d wins size the emission but
+            # EXCLUDE the warmup window (warmup wins build the record, never pay
+            # — §7.2).
             decisive = [(t0, bool(won), bool(cp)) for t0, won, cp in self.db.execute(
                 "SELECT t0_unix, status='won', COALESCE(is_copy,0) FROM signals "
                 "WHERE hotkey=? AND status IN ('won','lost')", (hk,)).fetchall()]
-            lt_won, lt_decisive, won_all, won_orig, copies, td = scoring.score_inputs(
+            rep_won, rep_decisive, won_all, won_orig, copies, td = scoring.score_inputs(
                 decisive, first_seen, now)
             habitual = scoring.is_habitual_copier(copies, td)
             tw = won_orig if habitual else won_all
@@ -396,7 +496,7 @@ class Validator:
                       f"copied → {won_all - tw} recent wins stripped")
             states.append(scoring.MinerState(
                 hotkey=hk, uid=uid, first_seen_unix=first_seen,
-                lifetime_wins=lt_won, lifetime_decisive=lt_decisive, trailing_wins=tw))
+                rep_wins=rep_won, rep_decisive=rep_decisive, trailing_wins=tw))
 
         w = scoring.compute_weights(states, now, excluded_uids=excluded_uids)
         uids, vals = list(w.keys()), list(w.values())
@@ -427,6 +527,7 @@ class Validator:
             print(f"  ⚠️  hotkey {hk} holds NO validator permit — weight commits "
                   f"will never reveal until it is staked into the validator set.")
         while True:
+            cycle_start = time.monotonic()
             try:
                 self.ingest()
                 self.reveal()
@@ -437,7 +538,15 @@ class Validator:
                 raise
             except Exception as e:  # noqa: BLE001
                 print(f"  loop error: {e}")
-            time.sleep(config.POLL_INTERVAL_S)
+            # FIXED cadence: sleep only the REMAINDER of POLL_INTERVAL_S so the
+            # poll period tracks wall-clock instead of ballooning with the loop's
+            # own work time. A longer period widens the window in which a miner
+            # can overwrite a commitment before any validator observes the prior
+            # one (audit #5); pinning the cadence keeps that window tight and
+            # uniform across validators. If work overran the interval, poll again
+            # immediately (no negative sleep).
+            elapsed = time.monotonic() - cycle_start
+            time.sleep(max(0.0, config.POLL_INTERVAL_S - elapsed))
 
 
 def main():
