@@ -52,13 +52,20 @@ class ValidationError(ValueError):
     pass
 
 
-def validate(sig: Signal, bands: dict | None = None) -> Signal:
+def validate(sig: Signal, bands: dict | None = None,
+             t0_unix: float | None = None) -> Signal:
     """Structural + board validation. Raises ValidationError with a
     miner-actionable message. Does NOT check cooldowns/spacing — those are
     stateful and live in the validator/grader (and the same logic voids at
     reveal, so passing here is necessary but not sufficient).
+
+    `t0_unix` (the commitment's consensus-exact inclusion time) resolves the
+    board version in force AT COMMIT, so a board update between commit and reveal
+    never retroactively fails an in-flight signal that was valid when committed.
     """
-    bands = bands if bands is not None else config.allowed_assets()
+    if bands is None:
+        bands = (config.allowed_assets_as_of(t0_unix) if t0_unix is not None
+                 else config.allowed_assets())
 
     if sig.v != SCHEMA_VERSION:
         raise ValidationError(f"unsupported schema version {sig.v}")

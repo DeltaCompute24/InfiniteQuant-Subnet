@@ -62,7 +62,7 @@ The mechanism is leader-agnostic among eligible leaders: it counts how often you
 | Metals | XAUUSD · XAGUSD |
 | Forex | AUDUSD · EURUSD · GBPUSD · NZDUSD · USDCAD · USDCHF · USDJPY |
 
-Bands are per-asset volatility-scaled and symmetric 1:1. Crypto bands carry a ×1.75 unit multiplier and a longer 30 h grade window (vs 12 h for forex/metals). Versioned in `data/signals-bands.json`; a band update never retroactively changes an in-flight signal.
+Bands are per-asset volatility-scaled and symmetric 1:1. The grade (wash) window is fixed by asset class — 8 h for crypto, 12 h for forex/metals, 48 h for equities — and is derived by the validator from the pair's class on the board, not from anything the miner puts in the payload. The live board is `data/signals-bands.json`; each version is recorded with an effective date in `data/signals-bands-history.json`, and a signal is graded against the band that was in force **at its commit block** — so a band update never retroactively changes an in-flight signal. To change a band, append a new entry to the history file with `effective_from_unix` set to when it goes live (keep the prior entries).
 
 ---
 
