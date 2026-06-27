@@ -63,7 +63,6 @@ def main():
     usr_cols = cols(con, "signals_users")
     time_col = next((c for c in TIME_COLS if c in sub_cols), None)
     name_col = next((c for c in NAME_COLS if c in usr_cols), None)
-    order = time_col or "ss.rowid"
     if not time_col:
         print("WARNING: no timestamp column found in signals_submissions; using "
               "rowid order. The new (lifetime) elimination is order-only so it is "
@@ -77,7 +76,7 @@ def main():
         f"FROM signals_submissions ss JOIN signals_users su "
         f"ON su.id = ss.signals_user_id "
         f"WHERE ss.status IN ('won','lost') "
-        f"ORDER BY su.id, {order}"
+        f"ORDER BY su.id, {time_expr}"   # qualified — both tables can carry created_at
     ).fetchall()
 
     by_user: dict = {}
