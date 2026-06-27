@@ -5,10 +5,38 @@ weights from identical inputs.
 """
 from __future__ import annotations
 
+import math
 from collections import defaultdict
 from dataclasses import dataclass
 
 from . import config
+
+
+# ── statistics helpers (deterministic: only +,-,*,/ and math.sqrt — all IEEE-754
+# correctly-rounded, so every validator computes the identical bound; no
+# NormalDist / erf / numpy in the scoring path) ──────────────────────────────
+def _wilson(wins: int, n: int, z: float) -> tuple[float, float]:
+    """Two-sided Wilson score interval (lower, upper) for a binomial rate.
+    Stable at small n and never leaves [0, 1]."""
+    if n <= 0:
+        return (0.0, 1.0)
+    p = wins / n
+    z2 = z * z
+    denom = 1.0 + z2 / n
+    centre = p + z2 / (2.0 * n)
+    margin = z * math.sqrt(p * (1.0 - p) / n + z2 / (4.0 * n * n))
+    return ((centre - margin) / denom, (centre + margin) / denom)
+
+
+def confident_edge(wins: int, n: int, z: float = config.QUALIFY_Z) -> float:
+    """Lower confidence bound on a hotkey's true hit-rate — the qualify metric."""
+    return _wilson(wins, n, z)[0]
+
+
+def shrunk_hit_rate(wins: int, n: int, k: float = config.TIER_PRIOR_K) -> float:
+    """Beta-posterior mean, prior Beta(k/2, k/2) centred at 0.50 — the tier metric.
+    Pulls small samples toward a coin flip; leaves large samples nearly untouched."""
+    return (wins + k / 2.0) / (n + k)
 
 
 @dataclass
@@ -62,14 +90,38 @@ def apply_validity_filters(rows: list[GradedRow]) -> list[GradedRow]:
 
 # ── elimination floor (terminal — hotkey zeroed permanently) ─────────────────
 def elimination_t0(decisive: list[tuple[float, bool]]) -> float | None:
-    """First decisive t0 at which a hotkey crossed the elimination floor, or
+    """First decisive t0 at which a hotkey is confidently below the floor, else
     None. `decisive` is the hotkey's full decisive history as (t0_unix, won).
+    Same signature/return contract regardless of path, so the validator caller
+    (`refresh_eliminations`) is unchanged.
 
-    Evaluated at each decisive event using that event's t0 as "now" for the
-    trailing window, so the verdict is a pure function of the graded journal —
-    every validator reaches the identical answer regardless of when it runs.
-    Elimination is terminal: the first crossing decides; later recovery in the
-    window is irrelevant by construction.
+    CONFIDENCE path: terminal when the LIFETIME Wilson upper bound on the true
+    hit-rate falls below ELIM_UB_CEIL. The lifetime bound tightens monotonically
+    toward the truth, so a true-≥50 % trader's upper bound stays well above the
+    ceiling forever (never noise-killed on a cold streak) while a true-≤40 %
+    trader's upper bound falls through it and stays there (reliably removed).
+    Evaluated at each decisive event using that event's t0, so the verdict is a
+    pure function of the graded journal — identical across validators.
+    """
+    if not config.CONFIDENCE_SCORING:
+        return _elimination_t0_legacy(decisive)
+    decisive = sorted(decisive)
+    wins = 0
+    for i, (t0, won) in enumerate(decisive):
+        wins += 1 if won else 0
+        n = i + 1
+        if n < config.ELIM_MIN_DECISIVE:
+            continue
+        if _wilson(wins, n, config.ELIM_Z)[1] < config.ELIM_UB_CEIL:
+            return t0
+    return None
+
+
+def _elimination_t0_legacy(decisive: list[tuple[float, bool]]) -> float | None:
+    """LEGACY rolling-window point floor (CONFIDENCE_SCORING=0 / §8 diff script).
+    Terminal when the trailing-SCORE_WINDOW_S hit-rate drops below ELIM_FLOOR_HIT.
+    Retained only so the illustration can diff old vs new — the rolling running
+    minimum over ~100 evaluation points is exactly what noise-kills good traders.
     """
     decisive = sorted(decisive)
     window: list[tuple[float, bool]] = []
@@ -77,7 +129,7 @@ def elimination_t0(decisive: list[tuple[float, bool]]) -> float | None:
         window.append((t0, won))
         while window and window[0][0] < t0 - config.SCORE_WINDOW_S:
             window.pop(0)
-        if i + 1 < config.ELIM_MIN_DECISIVE or len(window) < config.ELIM_MIN_TRAILING:
+        if i + 1 < config.ELIM_MIN_DECISIVE_LEGACY or len(window) < config.ELIM_MIN_TRAILING:
             continue
         wins = sum(1 for _, w in window if w)
         if wins / len(window) < config.ELIM_FLOOR_HIT:
@@ -321,14 +373,18 @@ def compute_weights(states: list[MinerState], now_unix: float,
     qualified = [
         s for s in states
         if s.uid not in excluded_uids
-        and s.rep_decisive >= config.QUALIFY_MIN_DECISIVE
-        and (s.rep_wins / s.rep_decisive) >= config.QUALIFY_MIN_HIT
+        and _qualifies(s.rep_wins, s.rep_decisive)
     ]
 
-    # emission = last-30d wins × reputation-window hit-rate tier (§7.3). A
-    # qualified miner with no recent wins contributes 0 and earns 0
+    # emission = last-30d wins (capped) × reputation-window hit-rate tier (§7.3).
+    # A qualified miner with no recent wins contributes 0 and earns 0
     # (rep_decisive ≥ QUALIFY_MIN_DECISIVE guarantees a non-zero denominator).
+    # Under the confidence path the win count is capped at WIN_CAP before the
+    # tier, so conviction/edge (not raw volume) differentiates above the cap.
     def effective_wins(s: MinerState) -> float:
+        if config.CONFIDENCE_SCORING:
+            return min(s.trailing_wins, config.WIN_CAP) * tier_multiplier(
+                s.rep_wins, s.rep_decisive)
         return s.trailing_wins * win_multiplier(s.rep_wins / s.rep_decisive)
 
     budget = 1.0 - sum(weights.values())
@@ -344,9 +400,45 @@ def compute_weights(states: list[MinerState], now_unix: float,
 
 
 def win_multiplier(hit_rate: float) -> float:
-    """Per-win tier multiplier from config.WIN_RATE_TIERS (high → low). Returns
-    0.0 below the lowest tier (a non-qualifying hit-rate)."""
+    """Per-win tier multiplier from config.WIN_RATE_TIERS (high → low) applied to a
+    raw hit-rate. Returns 0.0 below the lowest tier. LEGACY tier function — the
+    confidence path uses tier_multiplier() (shrunk rate) instead."""
     for threshold, mult in config.WIN_RATE_TIERS:
         if hit_rate >= threshold:
             return mult
     return 0.0
+
+
+# Legacy alias so the §8 diff script can name the old tier explicitly.
+win_multiplier_legacy = win_multiplier
+
+
+def is_qualified(rep_wins: int, rep_decisive: int) -> bool:
+    """Confidence qualify gate: enough sample, and the Wilson lower bound on the
+    true hit-rate is at least QUALIFY_LB_FLOOR (≈90 % sure you beat a coin flip)."""
+    return (rep_decisive >= config.QUALIFY_MIN_DECISIVE
+            and confident_edge(rep_wins, rep_decisive) >= config.QUALIFY_LB_FLOOR)
+
+
+def is_qualified_legacy(rep_wins: int, rep_decisive: int) -> bool:
+    """LEGACY raw-hit qualify gate (rep_decisive ≥ floor and raw hit ≥ MIN_HIT)."""
+    return (rep_decisive >= config.QUALIFY_MIN_DECISIVE
+            and rep_decisive > 0
+            and (rep_wins / rep_decisive) >= config.QUALIFY_MIN_HIT)
+
+
+def tier_multiplier(rep_wins: int, rep_decisive: int) -> float:
+    """Per-win tier from config.WIN_RATE_TIERS applied to the SHRUNK hit-rate, so a
+    thin-sample hot streak can't grab a high tier. Returns 0.0 below the lowest tier."""
+    r = shrunk_hit_rate(rep_wins, rep_decisive)
+    for threshold, mult in config.WIN_RATE_TIERS:
+        if r >= threshold:
+            return mult
+    return 0.0
+
+
+def _qualifies(rep_wins: int, rep_decisive: int) -> bool:
+    """Dispatch the qualify gate on the CONFIDENCE_SCORING flag."""
+    if config.CONFIDENCE_SCORING:
+        return is_qualified(rep_wins, rep_decisive)
+    return is_qualified_legacy(rep_wins, rep_decisive)
