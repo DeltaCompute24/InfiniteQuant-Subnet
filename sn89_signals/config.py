@@ -126,14 +126,39 @@ SCORE_WINDOW_S = 30 * 24 * 3600     # EMISSION window: a miner's share is sized 
 HIT_RATE_WINDOW_S = 60 * 24 * 3600          # ≈2 months of history
 HIT_RATE_WINDOW_TRADES = 100                # …capped at the most recent ~100 decisive
 
-QUALIFY_MIN_DECISIVE = 10           # decisive (won+lost) IN THE WINDOW to qualify
-QUALIFY_MIN_HIT = 0.55              # reputation-window hit-rate gate (QUALIFIED floor)
+# ── Confidence-based scoring (CONSENSUS) ─────────────────────────────────────
+# Master switch between the legacy point-estimate rules (raw hit-rate gate / tier
+# / rolling-window elimination floor) and the confidence-based rules (Wilson
+# lower-bound gate, beta-shrunk tier, lifetime upper-bound elimination, win cap).
+# Default ON. Flip to "0" to A/B the legacy path on testnet. The legacy functions
+# stay importable (suffixed *_legacy) so the §8 diff script can compare them.
+CONFIDENCE_SCORING = bool(int(os.getenv("SN89_CONFIDENCE_SCORING", "1")))
+
+QUALIFY_MIN_DECISIVE = 8            # decisive (won+lost) IN THE WINDOW: a small sanity
+                                    # floor only — the Wilson bound below handles small-n
+                                    # itself (was 10 under the legacy raw-hit gate).
+QUALIFY_MIN_HIT = 0.55             # LEGACY raw-hit gate (CONFIDENCE_SCORING=0 path only).
+QUALIFY_Z = 1.2816                 # one-sided ~90 % confidence for the qualify gate
+QUALIFY_LB_FLOOR = 0.50            # qualify when the Wilson lower bound on the true
+                                    # hit-rate ≥ this (i.e. 90 % sure you beat a coin flip)
+
+# Tier multiplier prior. The per-win tier (WIN_RATE_TIERS) is applied to a
+# beta-shrunk posterior mean (prior Beta(K/2, K/2) centred on 0.50), NOT the raw
+# rate, so a thin-sample hot streak (e.g. 9/4) is pulled toward a coin flip and
+# can't grab WOLF off 13 trades; a large sample (60/100) barely moves.
+TIER_PRIOR_K = 12                  # beta prior strength; higher = more small-n shrinkage
+
+# Emission win cap (conviction over grind). A miner's trailing-30d wins are capped
+# at WIN_CAP before the tier multiplier, so above the cap only edge/tier (not raw
+# volume) differentiates. Set to the monthly win output of the intended ~1 call/day
+# cadence (~30 decisive/mo at a WOLF hit rate). Below the cap extra wins still help.
+WIN_CAP = 20
 
 # Per-win multiplier by reputation-window hit-rate tier — each recent win is worth
 # more the higher your windowed hit-rate, so quality is rewarded above the gate,
-# not just volume. Checked high → low; the first threshold met wins. Below
-# QUALIFY_MIN_HIT a miner isn't qualified (multiplier 0). Mirrors the IQ Signals
-# program tiers: QUALIFIED 55 % (1×) · SHARP 60 % (1.2×) · WOLF 70 % (2×).
+# not just volume. Checked high → low; the first threshold met wins. Under the
+# confidence path these thresholds apply to the SHRUNK rate (see TIER_PRIOR_K).
+# Mirrors the IQ Signals tiers: QUALIFIED 55 % (1×) · SHARP 60 % (1.2×) · WOLF 70 % (2×).
 WIN_RATE_TIERS = (
     (0.70, 2.0),   # WOLF
     (0.60, 1.2),   # SHARP
@@ -146,10 +171,21 @@ STRIKE_LIMIT = 3                    # consistency failures in 30d ⇒ zeroed 30d
 STRIKE_WINDOW_S = 30 * 24 * 3600
 
 # ── Elimination floor (CONSENSUS) ────────────────────────────────────────────
-# A sustained sub-floor hit rate zeroes the hotkey permanently (coming back =
-# new hotkey, fresh track record). Track-record only — there is no collateral.
-ELIM_MIN_DECISIVE = 20         # lifetime decisive before the floor can trigger
-ELIM_MIN_TRAILING = 10         # trailing decisive sample before it can trigger
+# Permanently zeroes a hotkey whose record is confidently below the floor (coming
+# back = new hotkey, fresh track record). Track-record only — no collateral.
+# CONFIDENCE path: terminal when the LIFETIME Wilson upper bound on the true
+# hit-rate < ELIM_UB_CEIL (i.e. 90 % sure the true rate is below the ceiling). The
+# lifetime bound tightens monotonically toward the truth, so a genuinely-good
+# trader is never noise-killed on a cold streak; only a never-real trader trips it.
+# Elimination is decoupled from "stop paying" (that is the recency-windowed,
+# reversible qualify gate) so it can afford to be slow and statistically conservative.
+ELIM_MIN_DECISIVE = 40         # lifetime decisive required before terminal removal
+ELIM_Z = 1.2816                # one-sided ~90 % for the lifetime elimination bound
+ELIM_UB_CEIL = 0.45            # eliminate when the lifetime UPPER bound on hit-rate < this
+
+# LEGACY rolling-window floor (CONFIDENCE_SCORING=0 path / §8 diff script only).
+ELIM_MIN_DECISIVE_LEGACY = 20  # lifetime decisive before the legacy floor can trigger
+ELIM_MIN_TRAILING = 10         # trailing decisive sample before the legacy floor triggers
 ELIM_FLOOR_HIT = 0.40          # trailing hit-rate elimination floor (absolute)
 
 # ── Copy / collusion detection (§7.5 — replaces the retired 15-min cooldown) ──
@@ -204,7 +240,9 @@ COPY_ZERO_WEIGHT = bool(int(os.getenv("SN89_COPY_ZERO_WEIGHT", "0")))
 # anyone copied the griefer. A leader must (a) have a real track record and
 # (b) not be a both-direction spammer.
 COPY_LEADER_MIN_DECISIVE = int(os.getenv(
-    "SN89_COPY_LEADER_MIN_DECISIVE", str(QUALIFY_MIN_DECISIVE)))
+    "SN89_COPY_LEADER_MIN_DECISIVE", "10"))   # pinned at the legacy QUALIFY_MIN_DECISIVE
+                                              # so the confidence-gate retune (10→8) does
+                                              # NOT shift copy-leader eligibility (out of scope)
                                     # a leader needs ≥ this many decisive outcomes
                                     # before its position can copy-flag others
 COPY_EXCLUDE_BOTH_DIR = bool(int(os.getenv("SN89_COPY_EXCLUDE_BOTH_DIR", "1")))
@@ -226,6 +264,73 @@ def load_bands() -> dict:
 
 def allowed_assets() -> dict:
     return load_bands().get("bands", {})
+
+
+# ── Band versioning (CONSENSUS) ───────────────────────────────────────────────
+# A signal is graded against the band that was in force at its COMMIT block, not
+# whatever the board says at reveal — so a later board update never retroactively
+# voids or re-grades an in-flight signal (the README promise). The live board is
+# signals-bands.json (single version, hot-read, what the miner reads). An OPTIONAL
+# history file lets a validator resolve the board as-of any past commit time; when
+# it is absent the current board is treated as effective for all time, i.e. exactly
+# today's single-version behaviour.
+_BANDS_HISTORY_PATH = Path(os.getenv(
+    "SN89_BANDS_HISTORY_PATH",
+    str(Path(__file__).resolve().parent.parent / "data" / "signals-bands-history.json"),
+))
+_bands_history_cache: "tuple[float, list] | None" = None
+
+
+def load_bands_history() -> list:
+    """[{version, effective_from_unix, bands}, …] ascending by effective_from_unix.
+    Falls back to a single entry (the current board, effective from epoch) when no
+    history file exists, so an operator who never records history keeps exactly
+    today's behaviour. Cached on the file mtime (this is read per graded signal)."""
+    global _bands_history_cache
+    if _BANDS_HISTORY_PATH.exists():
+        mtime = _BANDS_HISTORY_PATH.stat().st_mtime
+        if _bands_history_cache is None or _bands_history_cache[0] != mtime:
+            with open(_BANDS_HISTORY_PATH, "r", encoding="utf-8") as fh:
+                hist = json.load(fh)
+            hist = sorted(hist, key=lambda e: int(e.get("effective_from_unix", 0)))
+            _bands_history_cache = (mtime, hist)
+        return _bands_history_cache[1]
+    cur = load_bands()
+    return [{"version": cur.get("version", "current"),
+             "effective_from_unix": 0, "bands": cur.get("bands", {})}]
+
+
+def bands_as_of(t0_unix: float) -> dict:
+    """The board {ASSET: {tp_bps, sl_bps, asset_class}} in force at commit time."""
+    hist = load_bands_history()
+    chosen = hist[0]
+    for entry in hist:
+        if int(entry.get("effective_from_unix", 0)) <= t0_unix:
+            chosen = entry
+        else:
+            break
+    return chosen.get("bands", {})
+
+
+def allowed_assets_as_of(t0_unix: float) -> dict:
+    return bands_as_of(t0_unix)
+
+
+def asset_class_for(trade_pair: str, t0_unix: "float | None" = None,
+                    bands: "dict | None" = None) -> str:
+    """Canonical asset class for a pair, taken from the BOARD — never from the
+    miner's committed `asset_class`, which the miner can forge to bend feed
+    routing, the wash window, and the wick-sanitisation tolerance. Grading derives
+    the class from the pair; when t0_unix is given it resolves the commit-time band
+    so a later board update can't re-class an in-flight signal."""
+    b = bands if bands is not None else (
+        allowed_assets_as_of(t0_unix) if t0_unix is not None else allowed_assets())
+    return (b.get(trade_pair) or {}).get("asset_class", "")
+
+
+def horizon_h_for(trade_pair: str, t0_unix: "float | None" = None) -> int:
+    """Grade/wash window for a pair, derived from the board class (not the miner)."""
+    return class_horizon_h(asset_class_for(trade_pair, t0_unix))
 
 
 # ── Massive / Polygon (validators + owner only; miners don't need a key) ─────

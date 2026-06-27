@@ -22,6 +22,22 @@ if "bittensor" not in sys.modules:
         import bittensor  # noqa: F401
     except ImportError:
         sys.modules["bittensor"] = types.ModuleType("bittensor")
+# crypto.py does `from timelock import Timelock` (Linux-only wheel). Stub just
+# enough to import on a dev box; Linux CI uses the real package.
+_TIMELOCK_STUBBED = False
+if "timelock" not in sys.modules:
+    try:
+        import timelock  # noqa: F401
+    except ImportError:
+        _tl = types.ModuleType("timelock")
+        _tl.Timelock = type("Timelock", (), {})
+        sys.modules["timelock"] = _tl
+        _TIMELOCK_STUBBED = True
+
+# Tests that exercise the REAL drand timelock round-trip can't run against the
+# stub; skip them on a dev box, run them on Linux CI with the real wheel.
+_needs_timelock = pytest.mark.skipif(
+    _TIMELOCK_STUBBED, reason="real timelock wheel unavailable (Linux-only)")
 
 from sn89_signals import bucket, config, crypto, polygon, scoring
 from sn89_signals.grader import LOST, PENDING, WASHED, WON, grade
@@ -95,16 +111,19 @@ class TestCrypto:
             pytest.skip("drand API unreachable")
         return crypto.encrypt(pt, HK, rnd, self._owner_pk()), sig
 
+    @_needs_timelock
     def test_timelock_roundtrip_past_round(self):
         pt = _sig().canonical_bytes()
         blob, sig = self._matured_blob(pt)
         assert crypto.decrypt_timelock(blob, sig) == pt
 
+    @_needs_timelock
     def test_binding_blocks_hotkey_swap(self):
         blob, sig = self._matured_blob(_sig().canonical_bytes())
         blob["hk"] = "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty"
         assert crypto.decrypt_timelock(blob, sig) is None
 
+    @_needs_timelock
     def test_commit_mismatch_rejected(self):
         blob, sig = self._matured_blob(_sig().canonical_bytes())
         blob["commit"] = "00" * 32
@@ -762,8 +781,8 @@ class TestCopyDetection:
 
     def test_flagged_copier_zeroed_in_weights(self):
         states = [
-            _state(1, self.NOW - config.IMMUNITY_S - 1, 18, 30, 6),  # leader (60%)
-            _state(2, self.NOW - config.IMMUNITY_S - 1, 18, 30, 6),  # copier (identical)
+            _state(1, self.NOW - config.IMMUNITY_S - 1, 30, 40, 6),  # leader (75% — clears gate)
+            _state(2, self.NOW - config.IMMUNITY_S - 1, 30, 40, 6),  # copier (identical)
         ]
         w_clean = scoring.compute_weights(states, self.NOW)
         assert w_clean[1] == pytest.approx(w_clean[2])      # equal pro-rata when clean
@@ -782,8 +801,14 @@ def _state(uid, first_seen, rw, rd, tw):
 
 
 class TestWeights:
+    """Pins the LEGACY raw-hit gate/tier contract (CONFIDENCE_SCORING=0). The
+    confidence-path equivalents live in tests/test_scoring_confidence.py."""
     NOW = 10_000_000.0
     OLD = NOW - config.IMMUNITY_S - 1
+
+    @pytest.fixture(autouse=True)
+    def _legacy(self, monkeypatch):
+        monkeypatch.setattr(config, "CONFIDENCE_SCORING", False)
 
     def test_pro_rata_among_qualified(self):
         w = scoring.compute_weights([
@@ -800,9 +825,9 @@ class TestWeights:
         assert 1 not in w
         assert w[2] > 0.99
 
-    def test_under_min_lifetime_not_qualified(self):
+    def test_under_min_decisive_not_qualified(self):
         w = scoring.compute_weights([
-            _state(1, self.OLD, 8, 9, 8),      # 89% but only 9 lifetime decisive (< QUALIFY_MIN_DECISIVE)
+            _state(1, self.OLD, 6, 7, 6),      # 86% but only 7 decisive (< QUALIFY_MIN_DECISIVE=8)
         ], self.NOW)
         assert 1 not in w
         assert w[config.BURN_UID] > 0.99
@@ -839,8 +864,14 @@ class TestWeights:
 
 
 class TestWinRateTiers:
+    """LEGACY raw-hit tier (win_multiplier). The shrunk-rate tier is covered in
+    tests/test_scoring_confidence.py."""
     NOW = 10_000_000.0
     OLD = NOW - config.IMMUNITY_S - 1
+
+    @pytest.fixture(autouse=True)
+    def _legacy(self, monkeypatch):
+        monkeypatch.setattr(config, "CONFIDENCE_SCORING", False)
 
     def test_multiplier_thresholds(self):
         assert scoring.win_multiplier(0.52) == 0.0     # below gate
@@ -973,12 +1004,12 @@ class TestWeightModel:
 
     def test_qualified_split_by_trailing_wins(self):
         w = scoring.compute_weights(
-            [self._s(1, 18, 30, 6), self._s(2, 18, 30, 3)], self.NOW)
-        assert abs(w[1] / w[2] - 2.0) < 1e-9       # pure 6:3 emission split
+            [self._s(1, 30, 40, 6), self._s(2, 30, 40, 3)], self.NOW)
+        assert abs(w[1] / w[2] - 2.0) < 1e-9       # pure 6:3 emission split (same tier)
 
     def test_excluded_copier_gets_nothing(self):
         w = scoring.compute_weights(
-            [self._s(1, 18, 30, 6), self._s(2, 18, 30, 6)],
+            [self._s(1, 30, 40, 6), self._s(2, 30, 40, 6)],
             self.NOW, excluded_uids={2})
         assert 2 not in w
         assert w[1] > 0.99
