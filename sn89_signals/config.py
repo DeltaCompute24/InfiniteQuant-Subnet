@@ -266,6 +266,73 @@ def allowed_assets() -> dict:
     return load_bands().get("bands", {})
 
 
+# ── Band versioning (CONSENSUS) ───────────────────────────────────────────────
+# A signal is graded against the band that was in force at its COMMIT block, not
+# whatever the board says at reveal — so a later board update never retroactively
+# voids or re-grades an in-flight signal (the README promise). The live board is
+# signals-bands.json (single version, hot-read, what the miner reads). An OPTIONAL
+# history file lets a validator resolve the board as-of any past commit time; when
+# it is absent the current board is treated as effective for all time, i.e. exactly
+# today's single-version behaviour.
+_BANDS_HISTORY_PATH = Path(os.getenv(
+    "SN89_BANDS_HISTORY_PATH",
+    str(Path(__file__).resolve().parent.parent / "data" / "signals-bands-history.json"),
+))
+_bands_history_cache: "tuple[float, list] | None" = None
+
+
+def load_bands_history() -> list:
+    """[{version, effective_from_unix, bands}, …] ascending by effective_from_unix.
+    Falls back to a single entry (the current board, effective from epoch) when no
+    history file exists, so an operator who never records history keeps exactly
+    today's behaviour. Cached on the file mtime (this is read per graded signal)."""
+    global _bands_history_cache
+    if _BANDS_HISTORY_PATH.exists():
+        mtime = _BANDS_HISTORY_PATH.stat().st_mtime
+        if _bands_history_cache is None or _bands_history_cache[0] != mtime:
+            with open(_BANDS_HISTORY_PATH, "r", encoding="utf-8") as fh:
+                hist = json.load(fh)
+            hist = sorted(hist, key=lambda e: int(e.get("effective_from_unix", 0)))
+            _bands_history_cache = (mtime, hist)
+        return _bands_history_cache[1]
+    cur = load_bands()
+    return [{"version": cur.get("version", "current"),
+             "effective_from_unix": 0, "bands": cur.get("bands", {})}]
+
+
+def bands_as_of(t0_unix: float) -> dict:
+    """The board {ASSET: {tp_bps, sl_bps, asset_class}} in force at commit time."""
+    hist = load_bands_history()
+    chosen = hist[0]
+    for entry in hist:
+        if int(entry.get("effective_from_unix", 0)) <= t0_unix:
+            chosen = entry
+        else:
+            break
+    return chosen.get("bands", {})
+
+
+def allowed_assets_as_of(t0_unix: float) -> dict:
+    return bands_as_of(t0_unix)
+
+
+def asset_class_for(trade_pair: str, t0_unix: "float | None" = None,
+                    bands: "dict | None" = None) -> str:
+    """Canonical asset class for a pair, taken from the BOARD — never from the
+    miner's committed `asset_class`, which the miner can forge to bend feed
+    routing, the wash window, and the wick-sanitisation tolerance. Grading derives
+    the class from the pair; when t0_unix is given it resolves the commit-time band
+    so a later board update can't re-class an in-flight signal."""
+    b = bands if bands is not None else (
+        allowed_assets_as_of(t0_unix) if t0_unix is not None else allowed_assets())
+    return (b.get(trade_pair) or {}).get("asset_class", "")
+
+
+def horizon_h_for(trade_pair: str, t0_unix: "float | None" = None) -> int:
+    """Grade/wash window for a pair, derived from the board class (not the miner)."""
+    return class_horizon_h(asset_class_for(trade_pair, t0_unix))
+
+
 # ── Massive / Polygon (validators + owner only; miners don't need a key) ─────
 # Requires a PAID Massive (formerly Polygon.io) subscription with intraday
 # (1-second + 1-minute) aggregates on the Currencies (forex + metals) and

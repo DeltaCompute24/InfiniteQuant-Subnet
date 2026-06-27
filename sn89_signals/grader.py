@@ -97,8 +97,15 @@ def grade(sig: Signal, t0_ms: int, now_ms: int,
     bars; injectable for tests. On the live path 1s bars are fetched per
     candidate minute. When neither is available the candle touch decides.
     """
+    # Asset class is CANONICAL from the board, keyed by pair + commit time — NOT
+    # the miner-committed sig.asset_class. The payload field is forgeable, and it
+    # drives three outcome-affecting things below (price-feed routing, the wash
+    # window, and the wick-sanitisation tolerance), so trusting it would let a
+    # miner mis-class a pair to bend its own grade. Resolving from the pair closes
+    # that; resolving as-of t0 keeps it stable across a board update.
+    asset_class = config.asset_class_for(sig.trade_pair, t0_ms / 1000.0)
     if entry_price is None:
-        entry_price = polygon.entry_price_at(sig.trade_pair, sig.asset_class, t0_ms)
+        entry_price = polygon.entry_price_at(sig.trade_pair, asset_class, t0_ms)
     if entry_price is None:
         return Grade(PENDING, None, None, None, None)   # no data yet — retry later
 
@@ -106,14 +113,14 @@ def grade(sig: Signal, t0_ms: int, now_ms: int,
     tp_price = entry_price * (1 + sign * sig.tp_bps / 10_000)
     sl_price = entry_price * (1 - sign * sig.sl_bps / 10_000)
     # wash window is class-fixed (crypto develops longer than fx/metals), §6.4
-    horizon_h = config.class_horizon_h(sig.asset_class)
+    horizon_h = config.class_horizon_h(asset_class)
     horizon_ms = t0_ms + horizon_h * 3_600_000
     scan_to = min(now_ms, horizon_ms)
 
     fetched = bars is None
     if bars is None:
-        bars = polygon.minute_aggs(sig.trade_pair, sig.asset_class, t0_ms, scan_to)
-        bars = polygon.sanitize_minute_bars(sig.trade_pair, sig.asset_class, bars)
+        bars = polygon.minute_aggs(sig.trade_pair, asset_class, t0_ms, scan_to)
+        bars = polygon.sanitize_minute_bars(sig.trade_pair, asset_class, bars)
 
     for bar in bars:
         if bar["t"] < t0_ms or bar["t"] > horizon_ms:
@@ -132,7 +139,7 @@ def grade(sig: Signal, t0_ms: int, now_ms: int,
                 sec = second_bars_by_minute.get(bar["t"])
             elif fetched:
                 sec = polygon.second_aggs(
-                    sig.trade_pair, sig.asset_class,
+                    sig.trade_pair, asset_class,
                     bar["t"] - config.LIMIT_FILL_WINDOW_S * 1000, bar["t"] + 60_000)
         if sec:
             outcome, ms = _confirm_touch_on_minute(

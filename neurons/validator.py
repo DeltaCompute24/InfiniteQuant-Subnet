@@ -241,7 +241,10 @@ class Validator:
                 self._void(commit_hex, "decrypt_or_hash_mismatch", strike=True)
                 continue
             try:
-                parsed = validate(Signal.from_bytes(pt))
+                # Validate against the board AS OF the commit block (t0), so a
+                # band update between commit and reveal can't void a signal that
+                # was valid when it was committed (the README's in-flight promise).
+                parsed = validate(Signal.from_bytes(pt), t0_unix=t0)
                 if parsed.hotkey != hk:
                     raise ValidationError("payload hotkey != committing hotkey")
             except (ValidationError, Exception) as e:  # noqa: BLE001
@@ -324,7 +327,7 @@ class Validator:
             rows.append((commit_hex, s, scoring.GradedRow(
                 hotkey=hk, trade_pair=s.trade_pair, direction=s.direction,
                 t0_unix=t0, status="ok" if status in ("revealed", "pending") else status,
-                horizon_h=config.class_horizon_h(s.asset_class))))
+                horizon_h=config.horizon_h_for(s.trade_pair, t0))))
         filtered = scoring.apply_validity_filters([r for _, _, r in rows])
         for (commit_hex, s, _), fr in zip(rows, filtered):
             if fr.status == "void":
@@ -415,7 +418,7 @@ class Validator:
             s = Signal.from_bytes(pt.encode())
             gr = scoring.GradedRow(
                 hotkey=hk, trade_pair=s.trade_pair, direction=s.direction,
-                t0_unix=t0, status=status, horizon_h=config.class_horizon_h(s.asset_class))
+                t0_unix=t0, status=status, horizon_h=config.horizon_h_for(s.trade_pair, t0))
             copy_rows.append(gr)
             by_commit.append((commit_hex, gr))
 
