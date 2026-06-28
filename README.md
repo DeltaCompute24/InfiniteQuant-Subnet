@@ -211,6 +211,26 @@ python neurons/validator.py --wallet.name myvali --wallet.hotkey vali
 
 State lives in `~/.sn89/validator.db` (SQLite). Grading is deterministic — same chain + same market data ⇒ same weights — so validators converge without coordination. Crypto bad-tick corroboration queries Hyperliquid's public candle API (no key needed). Entry timing design rationale: `docs/entry-timing.md`.
 
+### Delegate via child-key (recommended)
+
+Rather than run your own validator (and a market-data plan), delegate to the authoritative SN89 validator with a child-hotkey — one journal, one weight vector:
+
+```bash
+btcli stake child set --netuid 89 \
+    --wallet.name <your-wallet> --wallet.hotkey <your-validator-hotkey> \
+    --children <AUTHORITATIVE_HOTKEY_SS58> --proportion 1.0
+```
+
+### Checkpoint
+
+The authoritative validator publishes its journal as a checkpoint. Replay it and check it against chain:
+
+```bash
+python3 scripts/audit_journal.py <CHECKPOINT_URL> --chain --anchors
+```
+
+This re-derives the weight vector from the journal and confirms it matches the on-chain weights, and that each signal is anchored to an on-chain commitment. See `docs/single-validator-model.md`.
+
 ### Testnet
 
 ```bash
