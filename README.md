@@ -19,13 +19,25 @@ Bittensor subnet 89 — trading-signals. Miners commit encrypted directional tra
 ```
 decisive    = WON + LOST   (washes and voids never count)
 reputation  = your decisive trades in the last ~60 days, capped at the most recent ~100
-hit rate    = wins / decisive  over that reputation window   (DECAYS — old trades age out)
-QUALIFIED   = window decisive ≥ 10  AND  window hit rate ≥ 55%
-tier        = QUALIFIED ≥ 55% → 1.0×  |  SHARP ≥ 60% → 1.2×  |  WOLF ≥ 70% → 2.0×
-your weight ∝ (your wins in last 30 days × tier) / Σ same over all qualified miners
+QUALIFIED   = window decisive ≥ 8  AND  we are ~90% confident your TRUE hit rate
+              beats a coin flip  (Wilson lower bound ≥ 50%) — a lucky short streak
+              does NOT qualify; a clear edge qualifies in a handful of trades
+tier        = applied to a SHRUNK hit-rate estimate (pulls thin samples toward 50%,
+              so a 9/4 hot streak can't grab WOLF off 13 trades):
+              QUALIFIED ≥ 55% → 1.0×  |  SHARP ≥ 60% → 1.2×  |  WOLF ≥ 70% → 2.0×
+your weight ∝ (min(your wins in last 30 days, 20) × tier) / Σ same over all qualified
+              — recent wins are capped, so conviction/edge outweighs raw volume
 ```
 
-Reputation decays: hit-rate (the gate and the tier) is measured over a rolling ~60-day / ~100-trade window, so a once-great miner that starts trading badly loses its tier and falls below the gate as the good history ages out — and a bad early stretch can't sink a miner that has since turned it around. Wins decay after 30 days for emission sizing. If no qualified miner has recent wins, emissions burn.
+The gate and tier reward **statistical confidence, not luck**: qualification is a lower
+confidence bound on your true hit-rate (we must be ~90% sure you beat a coin flip), and the
+tier uses a shrunk estimate, so a thin lucky streak neither qualifies nor grabs a high tier —
+while a clear edge clears in a few trades. Reputation decays over a rolling ~60-day / ~100-trade
+window, so a once-great miner that starts trading badly loses its tier and falls below the gate
+as the good history ages out, and a bad early stretch can't sink a miner that has since turned
+it around. Wins decay after 30 days for emission sizing, and are capped (≈one month of ~1/day
+at a strong hit-rate) so quality, not volume, separates the top. If no qualified miner has
+recent wins, emissions burn.
 
 **Warmup:** new hotkeys get 8 days of immunity with dust emissions. Warmup trades build your hit-rate record (within the reputation window) but warmup wins never pay emissions — you must post fresh wins after warmup ends to rise above dust.
 
@@ -159,9 +171,15 @@ Weight is earned purely on your track record — no collateral, no deposit:
 | State | Result |
 |---|---|
 | In immunity (first 8 days) | Dust weight (building a record) |
-| 40–55% window hit rate | No emissions |
-| ≥55% hit rate over ≥10 decisive in the reputation window | Emissions, sized by trailing-30d wins × hit-rate tier |
-| Trailing hit rate below 40% over ≥10 decisive (after ≥20 lifetime decisive) | **ELIMINATED** — hotkey zeroed permanently |
+| Not yet ~90% confidently above a coin flip | No emissions |
+| ~90% confident your true hit rate ≥ 50% (≥ 8 decisive in the window) | Emissions, sized by capped trailing-30d wins × hit-rate tier |
+| ~90% confident your **lifetime** hit rate is below 45% (≥ 40 decisive) | **ELIMINATED** — hotkey zeroed permanently |
+
+Elimination is a slow, conservative **lifetime** confidence test, decoupled from "stop paying":
+a cold fortnight just drops you below the (recency-weighted, reversible) qualify gate and you
+earn nothing until you recover — it does not eliminate you. Only a record that is confidently,
+durably below the floor over a large sample is zeroed, so a genuinely-good trader is never
+noise-killed while a never-real one is reliably removed.
 
 ### Testnet (netuid 514)
 
@@ -227,7 +245,7 @@ disables updates, `SN89_UPDATE_INTERVAL_S` sets the check cadence (default 30 m)
 
 **What if my blob is unreachable when validators poll?** They retry every 30 s through reveal + a 6 h grace. A blob fetched in that window grades normally and stays pinned even if you later remove it. A blob never served is a forfeit LOSS — use the owner relay to eliminate this risk entirely.
 
-**When do emissions arrive?** Weights update every tempo (~72 min). Your first non-dust weight lands after your 10th decisive trade, assuming ≥ 55% hit rate.
+**When do emissions arrive?** Weights update every tempo (~72 min). Your first non-dust weight lands once you have enough decisive trades that we're ~90% confident your true hit rate beats a coin flip — a handful of trades for a clear edge, more for a marginal one (and never, for a true coin-flipper). That's by design: the gate credits demonstrated edge, not a lucky start.
 
 ---
 
