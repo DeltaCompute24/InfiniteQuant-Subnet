@@ -74,6 +74,7 @@ CREATE TABLE IF NOT EXISTS copier_flags (
   updated_unix  REAL NOT NULL,
   PRIMARY KEY (follower, leader)
 );
+CREATE TABLE IF NOT EXISTS vali_state (key TEXT PRIMARY KEY, value INTEGER);
 """
 
 
@@ -88,7 +89,26 @@ class Validator:
         self.tlock = Timelock(config.DRAND_PUBLIC_KEY)
         self._last_weights_block = 0          # last SUCCESSFUL commit (TEMPO cadence)
         self._last_weights_attempt_block = 0  # last attempt (failed-retry backoff)
-        self._last_scanned_block = 0   # commitment-history scan cursor (audit #5)
+        self._last_scanned_block = 0   # recent-overwrite scan cursor (audit #5)
+        # Genesis backfill cursor: how far up from SCAN_GENESIS_BLOCK we've scanned.
+        # Persisted so a restart resumes instead of re-scanning, and so a fresh DB
+        # starts from genesis rather than block-1 (late-validator catch-up).
+        row = self.db.execute(
+            "SELECT value FROM vali_state WHERE key='backfill_block'").fetchone()
+        self._backfill_block = row[0] if row else config.SCAN_GENESIS_BLOCK
+
+    def _save_backfill(self, block: int):
+        self.db.execute(
+            "INSERT INTO vali_state(key, value) VALUES('backfill_block', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (block,))
+
+    @staticmethod
+    def _backfill_window(cursor: int, head: int, chunk: int) -> "tuple[int, int] | None":
+        """Next (from_block, to_block] forward window for the genesis backfill, or
+        None once the cursor has reached head (backfill complete). Pure."""
+        if cursor >= head:
+            return None
+        return (cursor, min(cursor + chunk, head))
 
     def _migrate(self):
         """Additive column migration for DBs created before commit_block/t0_ms."""
@@ -155,6 +175,24 @@ class Validator:
             except Exception as e:  # noqa: BLE001
                 print(f"  ⚠ commitment-history scan skipped: {e}")
             self._last_scanned_block = block
+            # Genesis backfill: march a persisted cursor up from SCAN_GENESIS_BLOCK
+            # one bounded forward window per poll until it reaches head, so a late
+            # validator rebuilds the full pre-join commitment index (then stops).
+            # The snapshot above keeps it live on current commitments meanwhile;
+            # dedup is by commit_hex, so re-seeing a block is harmless.
+            if config.SCAN_BACKFILL_FROM_GENESIS:
+                win = self._backfill_window(
+                    self._backfill_block, block, config.SCAN_BACKFILL_BLOCKS_PER_POLL)
+                if win:
+                    frm_bf, to = win
+                    try:
+                        sources += self.ch.read_commitments_in_block_range(frm_bf, to)
+                        self._backfill_block = to
+                        self._save_backfill(to)
+                        if to >= block:
+                            print(f"  ✓ commitment backfill caught up to head (block {to})")
+                    except Exception as e:  # noqa: BLE001
+                        print(f"  ⚠ backfill scan skipped at {frm_bf}: {e}")
         now = time.time()
         for c in sources:
             self._journal_commit(c, block, now)

@@ -24,7 +24,6 @@ if "bittensor" not in sys.modules:
         sys.modules["bittensor"] = types.ModuleType("bittensor")
 # crypto.py does `from timelock import Timelock` (Linux-only wheel). Stub just
 # enough to import on a dev box; Linux CI uses the real package.
-_TIMELOCK_STUBBED = False
 if "timelock" not in sys.modules:
     try:
         import timelock  # noqa: F401
@@ -32,7 +31,9 @@ if "timelock" not in sys.modules:
         _tl = types.ModuleType("timelock")
         _tl.Timelock = type("Timelock", (), {})
         sys.modules["timelock"] = _tl
-        _TIMELOCK_STUBBED = True
+# Source-agnostic: stubbed iff the loaded module isn't a real wheel (no __file__).
+# Robust to another test module (e.g. test_backfill) having stubbed it first.
+_TIMELOCK_STUBBED = not hasattr(sys.modules.get("timelock"), "__file__")
 
 # Tests that exercise the REAL drand timelock round-trip can't run against the
 # stub; skip them on a dev box, run them on Linux CI with the real wheel.
