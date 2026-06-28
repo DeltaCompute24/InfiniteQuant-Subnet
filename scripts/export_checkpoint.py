@@ -55,11 +55,19 @@ def main():
     if "--chain" in args:
         try:
             from sn89_signals import chain
-            mg = chain.Chain().metagraph()
+            ch = chain.Chain()
+            mg = ch.metagraph()
             cp_out["uid_by_hotkey"] = {hk: i for i, hk in enumerate(mg.hotkeys)}
-            cp_out["weights_onchain"] = {
-                str(i): float(w) for i, w in enumerate(getattr(mg, "weights_normalized", []))
-            } or None
+            # snapshot THIS validator's actual on-chain weight vector (read from the
+            # Weights storage — the metagraph doesn't carry weights by default).
+            vhk = (args[args.index("--validator-hotkey") + 1]
+                   if "--validator-hotkey" in args else os.getenv("SN89_VALIDATOR_HOTKEY"))
+            if vhk:
+                vuid = ch.uid_of(vhk, mg=mg)
+                cp_out["validator_uid"] = vuid
+                w = ch.weights_for_uid(vuid) if vuid is not None else None
+                if w:
+                    cp_out["weights_onchain"] = {str(u): wt for u, wt in w.items()}
         except Exception as e:  # noqa: BLE001
             print(f"  ⚠ chain snapshot skipped: {e}", file=sys.stderr)
 

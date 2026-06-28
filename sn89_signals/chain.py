@@ -308,6 +308,33 @@ class Chain:
     def metagraph(self):
         return self.st.metagraph(netuid=self.netuid)
 
+    def weights_for_uid(self, uid: int, block: int | None = None) -> "dict[int, float] | None":
+        """The on-chain weight vector a validator `uid` set on this subnet, as
+        {miner_uid: normalized_weight} summing to 1, read from SubtensorModule.Weights
+        (the actual chain state — NOT the metagraph, which doesn't load weights by
+        default). Returns None if unset/unreadable. Read-only; used by the audit
+        (docs/single-validator-model.md) to compare a validator's on-chain weights to
+        a replay of its published journal."""
+        try:
+            bh = self.st.get_block_hash(block) if block else None
+            raw = self.st.substrate.query("SubtensorModule", "Weights",
+                                          [self.netuid, uid], block_hash=bh)
+            pairs = getattr(raw, "value", None)
+            if not pairs:
+                return None
+            total = sum(int(w) for _, w in pairs) or 1
+            return {int(u): int(w) / total for u, w in pairs}
+        except Exception:  # noqa: BLE001 — audit helper, never raise
+            return None
+
+    def uid_of(self, hotkey_ss58: str, mg=None) -> "int | None":
+        """Metagraph uid for a hotkey on this subnet, or None if unregistered."""
+        mg = mg or self.metagraph()
+        for i, hk in enumerate(mg.hotkeys):
+            if hk == hotkey_ss58:
+                return i
+        return None
+
     def has_validator_permit(self, hotkey_ss58: str, mg=None) -> bool | None:
         """Whether `hotkey_ss58` holds a validator permit on this subnet.
 
