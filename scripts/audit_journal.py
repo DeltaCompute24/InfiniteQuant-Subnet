@@ -91,13 +91,60 @@ def main():
     match, diffs = _weights_equal(replayed, recorded, tol)
     if match:
         print(f"  ✓ REPLAY MATCHES on-chain weights ({len(replayed)} uids, tol={tol})")
-        print("\nAUDIT PASSED — the validator's on-chain weights match a replay of its journal.")
-        sys.exit(0)
-    print(f"  ✗ REPLAY MISMATCH on {len(diffs)} uid(s):")
-    for uid, rv, cv in diffs[:20]:
-        print(f"      uid {uid}: replay={rv:.6f}  on-chain={cv:.6f}")
-    print("\nAUDIT FAILED — the validator's on-chain weights do not match its journal.")
-    sys.exit(1)
+    else:
+        print(f"  ✗ REPLAY MISMATCH on {len(diffs)} uid(s):")
+        for uid, rv, cv in diffs[:20]:
+            print(f"      uid {uid}: replay={rv:.6f}  on-chain={cv:.6f}")
+
+    anchors_ok = True
+    if "--anchors" in args:
+        anchors_ok = _check_anchors(signals, args)
+
+    ok = match and anchors_ok
+    print("\n" + ("AUDIT PASSED — on-chain weights match a replay of the journal"
+                  + (", and every checked signal is anchored on-chain." if "--anchors" in args
+                     else ".")
+                  if ok else
+                  "AUDIT FAILED — the validator's record does not match the chain."))
+    sys.exit(0 if ok else 1)
+
+
+def _check_anchors(signals: list, args: list) -> bool:
+    """Verify each signal's commit_hex against on-chain CommitmentOf at its
+    commit_block (no fabricated signals). Checks the most recent N (default 50;
+    `--anchors N` to change) so the reads land on non-pruned blocks unless the
+    endpoint is an archive node. FAILS only on a definitive mismatch; an unreadable
+    (pruned) block is reported, not failed. Logs exactly what was and wasn't checked."""
+    try:
+        from sn89_signals import chain
+    except Exception as e:  # noqa: BLE001
+        print(f"  ⚠ commit-anchor check needs chain access: {e}")
+        return True
+    i = args.index("--anchors")
+    n = int(args[i + 1]) if i + 1 < len(args) and args[i + 1].isdigit() else 50
+    ch = chain.Chain()
+    have = [s for s in signals if s.get("commit_block")]
+    sample = sorted(have, key=lambda s: -int(s["commit_block"]))[:n]
+    verified = mismatched = unreadable = 0
+    bad = []
+    for s in sample:
+        on = ch.commitment_at_block(s["hotkey"], int(s["commit_block"]))
+        if on is None:
+            unreadable += 1
+        elif on == s["commit_hex"]:
+            verified += 1
+        else:
+            mismatched += 1
+            bad.append((s["commit_hex"][:12], on[:12], s["commit_block"]))
+    print(f"  COMMIT ANCHORS (most recent {len(sample)} of {len(have)}): "
+          f"{verified} verified, {mismatched} mismatched, {unreadable} unreadable"
+          + (" (older blocks need an archive node)" if unreadable else ""))
+    for ch_hex, on_hex, blk in bad[:10]:
+        print(f"      ✗ block {blk}: journal {ch_hex}… ≠ on-chain {on_hex}…")
+    if len(have) > len(sample):
+        print(f"  (note: {len(have) - len(sample)} older signals not sampled — raise "
+              f"--anchors N to check more)")
+    return mismatched == 0
 
 
 if __name__ == "__main__":

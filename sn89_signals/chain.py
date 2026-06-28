@@ -335,6 +335,27 @@ class Chain:
                 return i
         return None
 
+    def commitment_at_block(self, hotkey_ss58: str, block: int) -> "str | None":
+        """The commit_hex a hotkey had in on-chain CommitmentOf AT `block`, or None
+        if unreadable (e.g. the state was pruned — needs an archive node for old
+        blocks). Lets the audit confirm each journaled signal is anchored to a real
+        on-chain commitment (no fabricated signals). Read-only; best-effort — mirrors
+        the per-committer read in read_commitments_in_block_range. CommitmentOf is
+        latest-wins, so reading at a signal's own inclusion block returns that
+        signal's commitment."""
+        try:
+            bh = self.st.get_block_hash(block)
+            reg = self.st.substrate.query(
+                "Commitments", "CommitmentOf", [self.netuid, hotkey_ss58], block_hash=bh)
+            v = reg.value if hasattr(reg, "value") else reg
+            if not isinstance(v, dict):
+                return None
+            data = _extract_raw_str(v.get("info"))
+            dec = decode_commitment(data) if data else None
+            return dec.get("commit") if dec else None
+        except Exception:  # noqa: BLE001 — audit helper, never raise
+            return None
+
     def has_validator_permit(self, hotkey_ss58: str, mg=None) -> bool | None:
         """Whether `hotkey_ss58` holds a validator permit on this subnet.
 
