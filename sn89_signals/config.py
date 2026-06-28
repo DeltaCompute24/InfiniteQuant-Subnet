@@ -421,6 +421,11 @@ SCAN_BACKFILL_FROM_GENESIS = bool(int(os.getenv("SN89_SCAN_BACKFILL_FROM_GENESIS
 SCAN_GENESIS_BLOCK = int(os.getenv("SN89_SCAN_GENESIS_BLOCK", "0"))
 SCAN_BACKFILL_BLOCKS_PER_POLL = min(
     int(os.getenv("SN89_SCAN_BACKFILL_BLOCKS_PER_POLL", str(SCAN_MAX_BLOCKS_PER_POLL))),
-    SCAN_MAX_BLOCKS_PER_POLL)  # one forward window per poll; the scan clamps at MAX anyway
+    SCAN_MAX_BLOCKS_PER_POLL)  # one forward window per scan; the scan clamps at MAX anyway
+# The backfill scan is ~1 RPC/block, far too slow to run in the validator's hot
+# loop, so it runs in a BACKGROUND thread (own chain connection) that pushes scanned
+# commitments onto a queue; the main loop drains + journals them. These bound it.
+BACKFILL_IDLE_S = int(os.getenv("SN89_BACKFILL_IDLE_S", "30"))   # re-check head when caught up
+BACKFILL_QUEUE_MAX = int(os.getenv("SN89_BACKFILL_QUEUE_MAX", "40"))  # windows buffered ahead of the main loop
 
 DB_PATH = os.getenv("SN89_DB_PATH", os.path.expanduser("~/.sn89/validator.db"))

@@ -105,3 +105,30 @@ class TestBackfillPersistence:
         rows = validator.db.execute(
             "SELECT value FROM vali_state WHERE key='backfill_block'").fetchall()
         assert rows == [(8_000_240,)]   # single row, latest value
+
+
+# ── async drain: worker → queue → main-loop journaling ───────────────────────
+class TestDrainBackfill:
+    def test_drain_moves_all_windows_into_sources_in_order(self, validator):
+        validator._bf_queue.append((8_000_120, [{"commit": "a"}, {"commit": "b"}]))
+        validator._bf_queue.append((8_000_240, [{"commit": "c"}]))
+        sources = [{"commit": "snapshot"}]
+        drained_to = validator._drain_backfill(sources)
+        assert drained_to == 8_000_240                 # highest block drained → cursor
+        assert [s["commit"] for s in sources] == ["snapshot", "a", "b", "c"]
+        assert len(validator._bf_queue) == 0           # queue emptied
+
+    def test_drain_empty_returns_none(self, validator):
+        assert validator._drain_backfill([]) is None
+
+    def test_cursor_persists_only_what_was_drained(self, validator):
+        # mirrors ingest(): drain → (journal) → persist drained cursor
+        validator._bf_queue.append((8_000_360, [{"commit": "x"}]))
+        sources = []
+        validator._bf_pending_cursor = validator._drain_backfill(sources)
+        validator._backfill_block = validator._bf_pending_cursor
+        validator._save_backfill(validator._backfill_block)
+        validator.db.commit()
+        row = validator.db.execute(
+            "SELECT value FROM vali_state WHERE key='backfill_block'").fetchone()
+        assert row == (8_000_360,)

@@ -18,11 +18,13 @@ same conclusions (grading is deterministic given the same chain + Polygon).
 """
 from __future__ import annotations
 
+import collections
 import concurrent.futures
 import json
 import os
 import sqlite3
 import sys
+import threading
 import time
 
 import bittensor as bt
@@ -96,6 +98,15 @@ class Validator:
         row = self.db.execute(
             "SELECT value FROM vali_state WHERE key='backfill_block'").fetchone()
         self._backfill_block = row[0] if row else config.SCAN_GENESIS_BLOCK
+        # Background backfill plumbing: the worker thread (own chain conn) pushes
+        # scanned commitments here; the main loop drains + journals them on its own
+        # DB connection (no cross-thread sqlite). deque append/popleft are atomic
+        # in CPython, so no lock is needed for the queue.
+        self._bf_queue: "collections.deque" = collections.deque()
+        self._bf_pending_cursor: "int | None" = None
+        self._bf_stop = threading.Event()
+        self._bf_thread: "threading.Thread | None" = None
+        self._bf_done_logged = False
 
     def _save_backfill(self, block: int):
         self.db.execute(
@@ -109,6 +120,64 @@ class Validator:
         if cursor >= head:
             return None
         return (cursor, min(cursor + chunk, head))
+
+    def _drain_backfill(self, sources: list) -> "int | None":
+        """Move queued background-backfill commits into this poll's `sources` so
+        they get journaled with everything else. Returns the highest block drained
+        (to persist as the cursor AFTER journaling — crash-safe: the persisted
+        cursor only advances over blocks the main loop has actually written), or
+        None if nothing was queued."""
+        drained_to = None
+        while self._bf_queue:
+            to, commits = self._bf_queue.popleft()
+            sources.extend(commits)
+            drained_to = to
+        return drained_to
+
+    def _start_backfill_thread(self):
+        """Spawn the genesis-backfill worker (once) when both flags are on."""
+        if not (config.SCAN_COMMITMENT_HISTORY and config.SCAN_BACKFILL_FROM_GENESIS):
+            return
+        if self._bf_thread is not None:
+            return
+        self._bf_thread = threading.Thread(
+            target=self._backfill_worker, name="sn89-backfill", daemon=True)
+        self._bf_thread.start()
+        print(f"  ⏳ genesis backfill thread started at block {self._backfill_block}")
+
+    def _backfill_worker(self):
+        """Scan commitments genesis→head in the background (own chain connection),
+        pushing each window's commitments onto _bf_queue for the main loop to
+        journal. Exits once it catches head — the main loop's recent-overwrite scan
+        then covers the live edge. Never touches self.db (cross-thread sqlite)."""
+        ch = chain.Chain()
+        cursor = self._backfill_block
+        while not self._bf_stop.is_set():
+            try:
+                head = ch.current_block()
+            except Exception as e:  # noqa: BLE001
+                print(f"  ⚠ backfill head read failed: {e}")
+                self._bf_stop.wait(config.BACKFILL_IDLE_S)
+                continue
+            win = self._backfill_window(cursor, head, config.SCAN_BACKFILL_BLOCKS_PER_POLL)
+            if win is None:
+                if not self._bf_done_logged:
+                    print(f"  ✓ commitment backfill caught up to head (block {cursor})")
+                    self._bf_done_logged = True
+                return  # done; recent-overwrite scan + snapshot cover from here
+            frm, to = win
+            try:
+                commits = ch.read_commitments_in_block_range(frm, to)
+            except Exception as e:  # noqa: BLE001
+                print(f"  ⚠ backfill scan skipped at {frm}: {e}")
+                self._bf_stop.wait(2)
+                continue
+            self._bf_queue.append((to, commits))
+            cursor = to
+            # don't outrun the main loop's draining (bound memory)
+            while (len(self._bf_queue) > config.BACKFILL_QUEUE_MAX
+                   and not self._bf_stop.is_set()):
+                self._bf_stop.wait(0.5)
 
     def _migrate(self):
         """Additive column migration for DBs created before commit_block/t0_ms."""
@@ -175,28 +244,22 @@ class Validator:
             except Exception as e:  # noqa: BLE001
                 print(f"  ⚠ commitment-history scan skipped: {e}")
             self._last_scanned_block = block
-            # Genesis backfill: march a persisted cursor up from SCAN_GENESIS_BLOCK
-            # one bounded forward window per poll until it reaches head, so a late
-            # validator rebuilds the full pre-join commitment index (then stops).
-            # The snapshot above keeps it live on current commitments meanwhile;
-            # dedup is by commit_hex, so re-seeing a block is harmless.
+            # Genesis backfill: a background thread scans genesis→head off-loop
+            # (the scan is ~1 RPC/block — far too slow to run here). Drain whatever
+            # it has produced into this poll's journaling; the cursor is persisted
+            # AFTER the commit below, so it only advances over blocks we've written.
             if config.SCAN_BACKFILL_FROM_GENESIS:
-                win = self._backfill_window(
-                    self._backfill_block, block, config.SCAN_BACKFILL_BLOCKS_PER_POLL)
-                if win:
-                    frm_bf, to = win
-                    try:
-                        sources += self.ch.read_commitments_in_block_range(frm_bf, to)
-                        self._backfill_block = to
-                        self._save_backfill(to)
-                        if to >= block:
-                            print(f"  ✓ commitment backfill caught up to head (block {to})")
-                    except Exception as e:  # noqa: BLE001
-                        print(f"  ⚠ backfill scan skipped at {frm_bf}: {e}")
+                self._bf_pending_cursor = self._drain_backfill(sources)
         now = time.time()
         for c in sources:
             self._journal_commit(c, block, now)
         self.db.commit()
+        # Persist the backfill cursor only now that the drained commits are written.
+        if config.SCAN_BACKFILL_FROM_GENESIS and self._bf_pending_cursor is not None:
+            self._backfill_block = self._bf_pending_cursor
+            self._save_backfill(self._backfill_block)
+            self._bf_pending_cursor = None
+            self.db.commit()
 
         # Fetch missing ciphertext blobs from R2_PUBLIC_BASE (the trust
         # boundary; the blob is encrypted and hash-checked regardless). Bounded
@@ -567,6 +630,7 @@ class Validator:
         elif not permit:
             print(f"  ⚠️  hotkey {hk} holds NO validator permit — weight commits "
                   f"will never reveal until it is staked into the validator set.")
+        self._start_backfill_thread()
         while True:
             cycle_start = time.monotonic()
             try:
