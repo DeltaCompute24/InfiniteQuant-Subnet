@@ -32,7 +32,7 @@ if "timelock" not in sys.modules:
         _tl.Timelock = type("Timelock", (), {})
         sys.modules["timelock"] = _tl
 # Source-agnostic: stubbed iff the loaded module isn't a real wheel (no __file__).
-# Robust to another test module (e.g. test_backfill) having stubbed it first.
+# Robust to another test module having stubbed it first (import order varies).
 _TIMELOCK_STUBBED = not hasattr(sys.modules.get("timelock"), "__file__")
 
 # Tests that exercise the REAL drand timelock round-trip can't run against the

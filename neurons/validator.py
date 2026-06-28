@@ -18,20 +18,18 @@ same conclusions (grading is deterministic given the same chain + Polygon).
 """
 from __future__ import annotations
 
-import collections
 import concurrent.futures
 import json
 import os
 import sqlite3
 import sys
-import threading
 import time
 
 import bittensor as bt
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from sn89_signals import bucket, chain, config, crypto, scoring
+from sn89_signals import bucket, chain, config, crypto, replay, scoring
 from sn89_signals.grader import PENDING, grade
 from sn89_signals.schema import Signal, ValidationError, validate
 from timelock import Timelock
@@ -76,7 +74,6 @@ CREATE TABLE IF NOT EXISTS copier_flags (
   updated_unix  REAL NOT NULL,
   PRIMARY KEY (follower, leader)
 );
-CREATE TABLE IF NOT EXISTS vali_state (key TEXT PRIMARY KEY, value INTEGER);
 """
 
 
@@ -92,92 +89,6 @@ class Validator:
         self._last_weights_block = 0          # last SUCCESSFUL commit (TEMPO cadence)
         self._last_weights_attempt_block = 0  # last attempt (failed-retry backoff)
         self._last_scanned_block = 0   # recent-overwrite scan cursor (audit #5)
-        # Genesis backfill cursor: how far up from SCAN_GENESIS_BLOCK we've scanned.
-        # Persisted so a restart resumes instead of re-scanning, and so a fresh DB
-        # starts from genesis rather than block-1 (late-validator catch-up).
-        row = self.db.execute(
-            "SELECT value FROM vali_state WHERE key='backfill_block'").fetchone()
-        self._backfill_block = row[0] if row else config.SCAN_GENESIS_BLOCK
-        # Background backfill plumbing: the worker thread (own chain conn) pushes
-        # scanned commitments here; the main loop drains + journals them on its own
-        # DB connection (no cross-thread sqlite). deque append/popleft are atomic
-        # in CPython, so no lock is needed for the queue.
-        self._bf_queue: "collections.deque" = collections.deque()
-        self._bf_pending_cursor: "int | None" = None
-        self._bf_stop = threading.Event()
-        self._bf_thread: "threading.Thread | None" = None
-        self._bf_done_logged = False
-
-    def _save_backfill(self, block: int):
-        self.db.execute(
-            "INSERT INTO vali_state(key, value) VALUES('backfill_block', ?) "
-            "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (block,))
-
-    @staticmethod
-    def _backfill_window(cursor: int, head: int, chunk: int) -> "tuple[int, int] | None":
-        """Next (from_block, to_block] forward window for the genesis backfill, or
-        None once the cursor has reached head (backfill complete). Pure."""
-        if cursor >= head:
-            return None
-        return (cursor, min(cursor + chunk, head))
-
-    def _drain_backfill(self, sources: list) -> "int | None":
-        """Move queued background-backfill commits into this poll's `sources` so
-        they get journaled with everything else. Returns the highest block drained
-        (to persist as the cursor AFTER journaling — crash-safe: the persisted
-        cursor only advances over blocks the main loop has actually written), or
-        None if nothing was queued."""
-        drained_to = None
-        while self._bf_queue:
-            to, commits = self._bf_queue.popleft()
-            sources.extend(commits)
-            drained_to = to
-        return drained_to
-
-    def _start_backfill_thread(self):
-        """Spawn the genesis-backfill worker (once) when both flags are on."""
-        if not (config.SCAN_COMMITMENT_HISTORY and config.SCAN_BACKFILL_FROM_GENESIS):
-            return
-        if self._bf_thread is not None:
-            return
-        self._bf_thread = threading.Thread(
-            target=self._backfill_worker, name="sn89-backfill", daemon=True)
-        self._bf_thread.start()
-        print(f"  ⏳ genesis backfill thread started at block {self._backfill_block}")
-
-    def _backfill_worker(self):
-        """Scan commitments genesis→head in the background (own chain connection),
-        pushing each window's commitments onto _bf_queue for the main loop to
-        journal. Exits once it catches head — the main loop's recent-overwrite scan
-        then covers the live edge. Never touches self.db (cross-thread sqlite)."""
-        ch = chain.Chain()
-        cursor = self._backfill_block
-        while not self._bf_stop.is_set():
-            try:
-                head = ch.current_block()
-            except Exception as e:  # noqa: BLE001
-                print(f"  ⚠ backfill head read failed: {e}")
-                self._bf_stop.wait(config.BACKFILL_IDLE_S)
-                continue
-            win = self._backfill_window(cursor, head, config.SCAN_BACKFILL_BLOCKS_PER_POLL)
-            if win is None:
-                if not self._bf_done_logged:
-                    print(f"  ✓ commitment backfill caught up to head (block {cursor})")
-                    self._bf_done_logged = True
-                return  # done; recent-overwrite scan + snapshot cover from here
-            frm, to = win
-            try:
-                commits = ch.read_commitments_in_block_range(frm, to)
-            except Exception as e:  # noqa: BLE001
-                print(f"  ⚠ backfill scan skipped at {frm}: {e}")
-                self._bf_stop.wait(2)
-                continue
-            self._bf_queue.append((to, commits))
-            cursor = to
-            # don't outrun the main loop's draining (bound memory)
-            while (len(self._bf_queue) > config.BACKFILL_QUEUE_MAX
-                   and not self._bf_stop.is_set()):
-                self._bf_stop.wait(0.5)
 
     def _migrate(self):
         """Additive column migration for DBs created before commit_block/t0_ms."""
@@ -244,22 +155,10 @@ class Validator:
             except Exception as e:  # noqa: BLE001
                 print(f"  ⚠ commitment-history scan skipped: {e}")
             self._last_scanned_block = block
-            # Genesis backfill: a background thread scans genesis→head off-loop
-            # (the scan is ~1 RPC/block — far too slow to run here). Drain whatever
-            # it has produced into this poll's journaling; the cursor is persisted
-            # AFTER the commit below, so it only advances over blocks we've written.
-            if config.SCAN_BACKFILL_FROM_GENESIS:
-                self._bf_pending_cursor = self._drain_backfill(sources)
         now = time.time()
         for c in sources:
             self._journal_commit(c, block, now)
         self.db.commit()
-        # Persist the backfill cursor only now that the drained commits are written.
-        if config.SCAN_BACKFILL_FROM_GENESIS and self._bf_pending_cursor is not None:
-            self._backfill_block = self._bf_pending_cursor
-            self._save_backfill(self._backfill_block)
-            self._bf_pending_cursor = None
-            self.db.commit()
 
         # Fetch missing ciphertext blobs from R2_PUBLIC_BASE (the trust
         # boundary; the blob is encrypted and hash-checked regardless). Bounded
@@ -572,37 +471,22 @@ class Validator:
                 print(f"  {tag}: {follower[:8]}… shadows {r.leader[:8]}… "
                       f"(sharp={r.sharp_events} soft={r.soft_events})")
 
-        states = []
-        for hk, first_seen, strikes, elim_t0 in self.db.execute(
-                "SELECT hotkey, first_seen_unix, strikes, eliminated_t0 "
-                "FROM hotkey_meta").fetchall():
-            uid = uid_by_hotkey.get(hk)
-            if uid is None:
-                continue
-            if strikes >= config.STRIKE_LIMIT:
-                continue  # zeroed (§7.4)
-            if elim_t0 is not None:
-                continue  # eliminated — zero weight permanently
-            # one fetch of the decisive history; scoring inputs derive in a pure,
-            # tested function. The rolling reputation window (incl. warmup)
-            # drives the gate + tier; trailing-30d wins size the emission but
-            # EXCLUDE the warmup window (warmup wins build the record, never pay
-            # — §7.2).
-            decisive = [(t0, bool(won), bool(cp)) for t0, won, cp in self.db.execute(
-                "SELECT t0_unix, status='won', COALESCE(is_copy,0) FROM signals "
-                "WHERE hotkey=? AND status IN ('won','lost')", (hk,)).fetchall()]
-            rep_won, rep_decisive, won_all, won_orig, copies, td = scoring.score_inputs(
-                decisive, first_seen, now)
-            habitual = scoring.is_habitual_copier(copies, td)
-            tw = won_orig if habitual else won_all
-            if habitual:
-                print(f"  ⛔ habitual copier {hk[:8]}…: {copies}/{td} recent trades "
-                      f"copied → {won_all - tw} recent wins stripped")
-            states.append(scoring.MinerState(
-                hotkey=hk, uid=uid, first_seen_unix=first_seen,
-                rep_wins=rep_won, rep_decisive=rep_decisive, trailing_wins=tw))
-
-        w = scoring.compute_weights(states, now, excluded_uids=excluded_uids)
+        # The weight vector is the SAME pure replay any auditor runs over the
+        # published journal (sn89_signals/replay.py) — so the validator's on-chain
+        # weights are verifiable by anyone (the single-validator trust model,
+        # docs/single-validator-model.md). Hand it the journal and let it re-derive
+        # eliminations, copy penalty, gate, tier and emission identically; the copy
+        # forensics above persist `is_copy`/`copier_flags` only for the dashboard.
+        sig_rows = [
+            {"commit_hex": ch, "hotkey": hk, "t0_unix": t0, "status": st,
+             "is_copy": int(cp or 0), "plaintext": pt}
+            for ch, hk, t0, st, cp, pt in self.db.execute(
+                "SELECT commit_hex, hotkey, t0_unix, status, is_copy, plaintext "
+                "FROM signals")]
+        meta = {hk: {"first_seen_unix": fs, "strikes": int(sk or 0)}
+                for hk, fs, sk in self.db.execute(
+                    "SELECT hotkey, first_seen_unix, strikes FROM hotkey_meta")}
+        w = replay.weights_from_journal(sig_rows, meta, uid_by_hotkey, now)
         uids, vals = list(w.keys()), list(w.values())
         ok, msg = self.ch.set_weights(self.wallet, uids, vals)
         # Only advance the per-tempo throttle when the commit actually landed.
@@ -630,7 +514,6 @@ class Validator:
         elif not permit:
             print(f"  ⚠️  hotkey {hk} holds NO validator permit — weight commits "
                   f"will never reveal until it is staked into the validator set.")
-        self._start_backfill_thread()
         while True:
             cycle_start = time.monotonic()
             try:

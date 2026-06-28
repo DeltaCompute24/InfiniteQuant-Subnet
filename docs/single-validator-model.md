@@ -86,21 +86,57 @@ a sync; it needs market data, so it's for validators/auditors who have a feed.
 
 ## Operating it
 
-- **One validator** runs `neurons/validator.py` (the owner's, with a permit). It sets
-  weights and publishes the checkpoint.
-- **Other validators delegate** via Bittensor **child-hotkeys** (`btcli stake child …`)
-  to the authoritative hotkey, rather than running divergent scoring. One environment,
-  one journal, one weight vector — auditable by all.
-- **No vault self-mining.** Weights go only to graded miners (pro-rata wins × tier),
-  immune dust, and burn — there is no owner weight injection or API dial. The owner's
-  own miners (the IQ traders) earn solely by track record, exactly like everyone else.
+**The authoritative validator** runs `neurons/validator.py` (the owner's hotkey, with a
+permit) — it sets weights and publishes the checkpoint. `maybe_set_weights` computes the
+weight vector by calling `replay.weights_from_journal` — the *same* function the auditor
+runs — so the on-chain weights are parity-guaranteed-by-construction, not by discipline.
+
+**Other validators delegate** to the authoritative hotkey via Bittensor **child-hotkeys**,
+instead of running divergent scoring. The parent (delegating validator) sets the
+authoritative hotkey as its child on this subnet, assigning it the full take:
+
+```bash
+# run on the DELEGATING validator (parent = its own validator hotkey)
+btcli stake child set \
+    --netuid 89 \
+    --wallet.name <parent-wallet> --wallet.hotkey <parent-validator-hotkey> \
+    --children <AUTHORITATIVE_HOTKEY_SS58> \
+    --proportion 1.0
+# verify
+btcli stake child get --netuid 89 --wallet.name <parent-wallet> --wallet.hotkey <parent-validator-hotkey>
+```
+
+The parent's validator stake then backs the authoritative validator's weights — one
+environment, one journal, one weight vector, auditable by all. (A delegating validator
+need not run `validator.py` at all; if it does, it just mirrors the authoritative output.)
+
+**Publishing the checkpoint.** Run `export_checkpoint.py` on a timer and serve the file
+read-only at a public URL (the same shape as the dashboard-standing service):
+
+```ini
+# /etc/systemd/system/sn89-checkpoint.service   (oneshot, fired by a .timer every ~5 min)
+[Service]
+Type=oneshot
+EnvironmentFile=/opt/sn89-signals/.env.test
+WorkingDirectory=/opt/sn89-signals
+ExecStart=/opt/sn89-signals/.venv/bin/python scripts/export_checkpoint.py \
+    /var/www/sn89/checkpoint.json --chain
+```
+Point a static HTTP server (or the partner-webhook) at `/var/www/sn89/` and announce the
+URL so miners can `audit_journal.py <url> --chain`.
+
+**No vault self-mining.** Weights go only to graded miners (pro-rata capped-wins × tier),
+immune dust, and burn — there is no owner weight injection or API dial. The owner's own
+miners (the IQ traders) earn solely by track record, exactly like everyone else. This is a
+direct, checkable rebuttal to "are you mining your own subnet?": run the audit.
 
 ## Status / supersession
 
-This **supersedes the multi-validator genesis-backfill** (PRs #32/#33), which is inert
-(off by default) and deadlocks if enabled — recommend reverting it now that catch-up is
-solved by single-validator + audit. The confidence scoring, band-versioning, and the
-audit tooling here are the keepers.
+This **supersedes the multi-validator genesis-backfill** (PRs #32/#33), now **removed** —
+catch-up is solved by single-validator + audit, so the backfill (slow per-block scan;
+deadlocked when threaded) is gone. The confidence scoring, band-versioning, and this audit
+tooling are the keepers. `maybe_set_weights` now computes weights *through*
+`replay.weights_from_journal`, so validator and auditor are one codepath.
 
 The one unchanged dependency is the **price feed** (the re-grade tier re-fetches prices);
 all validators/auditors must use the same provider + query semantics on finalized bars.
