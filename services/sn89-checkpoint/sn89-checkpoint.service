@@ -1,0 +1,8 @@
+[Unit]
+Description=SN89 verifiable journal checkpoint (validator journal -> public checkpoint.json)
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/sn89-signals/services/sn89-checkpoint/runner.sh
+# read-only on the validator DB; writes only the public checkpoint file

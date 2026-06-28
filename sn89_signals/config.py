@@ -406,26 +406,8 @@ BLOB_FETCH_BUDGET_S = float(os.getenv("SN89_BLOB_FETCH_BUDGET_S", "20"))
 # the per-poll scan so a long downtime doesn't trigger an unbounded backfill.
 SCAN_COMMITMENT_HISTORY = bool(int(os.getenv("SN89_SCAN_COMMITMENT_HISTORY", "0")))
 SCAN_MAX_BLOCKS_PER_POLL = int(os.getenv("SN89_SCAN_MAX_BLOCKS_PER_POLL", "120"))
-
-# Genesis backfill (late/recovering validators). The recent-overwrite scan above
-# only covers the last SCAN_MAX_BLOCKS_PER_POLL near head; a validator joining days
-# after others would otherwise never see commitments made before it started,
-# producing a smaller, harsher journal and a divergent weight vector (VTRUST loss).
-# When BACKFILL_FROM_GENESIS is on, ingest also marches a PERSISTED cursor forward
-# from SCAN_GENESIS_BLOCK in bounded chunks until it reaches head, then stops —
-# rebuilding the full commitment index from chain. Off by default (incumbents that
-# already hold the history don't need it); a fresh validator sets it once. Set
-# SCAN_GENESIS_BLOCK to the subnet's registration block to bound the work
-# (0 = scan from chain start — correct but slowest). Requires SCAN_COMMITMENT_HISTORY.
-SCAN_BACKFILL_FROM_GENESIS = bool(int(os.getenv("SN89_SCAN_BACKFILL_FROM_GENESIS", "0")))
-SCAN_GENESIS_BLOCK = int(os.getenv("SN89_SCAN_GENESIS_BLOCK", "0"))
-SCAN_BACKFILL_BLOCKS_PER_POLL = min(
-    int(os.getenv("SN89_SCAN_BACKFILL_BLOCKS_PER_POLL", str(SCAN_MAX_BLOCKS_PER_POLL))),
-    SCAN_MAX_BLOCKS_PER_POLL)  # one forward window per scan; the scan clamps at MAX anyway
-# The backfill scan is ~1 RPC/block, far too slow to run in the validator's hot
-# loop, so it runs in a BACKGROUND thread (own chain connection) that pushes scanned
-# commitments onto a queue; the main loop drains + journals them. These bound it.
-BACKFILL_IDLE_S = int(os.getenv("SN89_BACKFILL_IDLE_S", "30"))   # re-check head when caught up
-BACKFILL_QUEUE_MAX = int(os.getenv("SN89_BACKFILL_QUEUE_MAX", "40"))  # windows buffered ahead of the main loop
+# (Genesis backfill for late-joining validators was removed — see the single-
+# validator model: docs/single-validator-model.md. One authoritative validator +
+# child-key delegation makes multi-validator catch-up unnecessary.)
 
 DB_PATH = os.getenv("SN89_DB_PATH", os.path.expanduser("~/.sn89/validator.db"))
