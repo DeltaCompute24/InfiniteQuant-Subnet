@@ -156,6 +156,14 @@ class Chain:
     def __init__(self, network: str | None = None, netuid: int | None = None):
         self.netuid = netuid if netuid is not None else config.NETUID
         self.st = bt.Subtensor(network=network or config.NETWORK)
+        self._archive_st = None
+
+    def _archive(self):
+        """Lazy finney-ARCHIVE subtensor for reads of state the public node has
+        pruned (historic block timestamps). Created on first use; reused."""
+        if self._archive_st is None:
+            self._archive_st = bt.Subtensor(network="archive")
+        return self._archive_st
 
     # ── miner side ───────────────────────────────────────────────────────────
     def commit(self, wallet: "bt.Wallet", commit_hex: str, rnd: int, blob_url: str) -> bool:
@@ -274,9 +282,23 @@ class Chain:
         return self.st.get_current_block()
 
     def block_time_ms(self, block: int) -> int:
-        """Millisecond timestamp of a block via the chain's Timestamp pallet."""
-        bh = self.st.get_block_hash(block)
-        return int(self.st.substrate.query("Timestamp", "Now", block_hash=bh).value)
+        """Millisecond timestamp of a block via the chain's Timestamp pallet.
+
+        The public finney node prunes historical state, so a commitment whose
+        inclusion block predates the pruning window raises "State discarded".
+        Fall back to a finney ARCHIVE node for those reads - it returns the
+        same consensus Timestamp.Now the canonical chain recorded at that
+        block. (Testnet uses a retaining relay node, so the fallback is
+        finney-only.)"""
+        try:
+            bh = self.st.get_block_hash(block)
+            return int(self.st.substrate.query("Timestamp", "Now", block_hash=bh).value)
+        except Exception:
+            if "test" in str(config.NETWORK):
+                raise
+            st = self._archive()
+            bh = st.get_block_hash(block)
+            return int(st.substrate.query("Timestamp", "Now", block_hash=bh).value)
 
     def block_time_unix(self, block: int) -> float:
         """Timestamp of a block via the chain's Timestamp pallet."""

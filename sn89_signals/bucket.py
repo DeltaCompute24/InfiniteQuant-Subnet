@@ -122,8 +122,12 @@ def update_index(hotkey: str, nonce: str, keep: int = 200) -> None:
     """Append nonce to {hotkey}/index.json (validators/owner discover blobs
     through this listing, then verify via the on-chain url_tag — the index is
     untrusted convenience, not integrity)."""
-    if not config.R2_ACCESS_KEY_ID and config.RELAY_TOKEN:
-        return  # relay maintains the index server-side on each blob POST
+    # Precedence MUST mirror upload(): local disk first. A hosted follower
+    # always sets SN89_FEED_TOKEN (=> RELAY_TOKEN truthy) yet also has a
+    # BLOB_DIR, so upload() writes the blob to LOCAL disk while the relay
+    # never receives it. Checking RELAY_TOKEN first here would early-return
+    # and leave that local blob unindexed => validators can never discover
+    # it. Index locally whenever the blob was hosted locally.
     if BLOB_DIR:
         d = os.path.join(BLOB_DIR, hotkey)
         os.makedirs(d, exist_ok=True)
@@ -137,6 +141,8 @@ def update_index(hotkey: str, nonce: str, keep: int = 200) -> None:
         with open(p, "w", encoding="utf-8") as fh:
             json.dump({"nonces": nonces[-keep:]}, fh)
         return
+    if not config.R2_ACCESS_KEY_ID and config.RELAY_TOKEN:
+        return  # relay maintains the index server-side on each blob POST
     s3 = _s3_client()
     key = f"{hotkey}/index.json"
     try:
