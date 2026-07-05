@@ -78,8 +78,12 @@ CREATE TABLE IF NOT EXISTS copier_flags (
 
 
 class Validator:
-    def __init__(self, wallet: "bt.Wallet"):
+    def __init__(self, wallet: "bt.Wallet", cosign_wallet: "bt.Wallet | None" = None):
         self.wallet = wallet
+        # Optional second hotkey that commits the IDENTICAL weight vector each
+        # cycle (e.g. the subnet-owner hotkey UID0). Whichever of the two holds
+        # a validator permit actually lands weights; the other is skipped.
+        self.cosign_wallet = cosign_wallet
         self.ch = chain.Chain()
         os.makedirs(os.path.dirname(config.DB_PATH), exist_ok=True)
         self.db = sqlite3.connect(config.DB_PATH)
@@ -397,11 +401,15 @@ class Validator:
 
         # A hotkey with no validator permit can commit weights, but the chain
         # never reveals them — they pile up until `TooManyUnrevealedCommits` and
-        # the validator earns nothing. Skip (don't commit junk) and say why.
-        if not self.ch.has_validator_permit(self.wallet.hotkey.ss58_address, mg=mg):
-            print(f"  ⚠️  skipping weights: hotkey {self.wallet.hotkey.ss58_address} "
-                  f"has no validator permit on netuid {config.NETUID} — commits "
-                  f"would never reveal. Stake this hotkey to earn a permit.")
+        # the validator earns nothing. Commit only from permitted hotkeys; if
+        # neither the primary nor the cosign hotkey has a permit, skip and say why.
+        signers = [w for w in (self.wallet, self.cosign_wallet) if w is not None
+                   and self.ch.has_validator_permit(w.hotkey.ss58_address, mg=mg)]
+        if not signers:
+            hks = [w.hotkey.ss58_address for w in (self.wallet, self.cosign_wallet) if w]
+            print(f"  ⚠️  skipping weights: no validator permit on netuid "
+                  f"{config.NETUID} for any signer {hks} — commits "
+                  f"would never reveal. Stake a hotkey to earn a permit.")
             self._last_weights_block = block  # throttle this warning to once per tempo
             return
 
@@ -488,32 +496,40 @@ class Validator:
                     "SELECT hotkey, first_seen_unix, strikes FROM hotkey_meta")}
         w = replay.weights_from_journal(sig_rows, meta, uid_by_hotkey, now)
         uids, vals = list(w.keys()), list(w.values())
-        ok, msg = self.ch.set_weights(self.wallet, uids, vals)
-        # Only advance the per-tempo throttle when the commit actually landed.
+        # Every permitted signer commits the SAME vector this cycle. Advance the
+        # per-tempo throttle only when at least one commit actually landed.
         # Treating a failed extrinsic as done would throttle the retry by a full
         # TEMPO (~72 min); instead retry on the next poll and surface the chain's
         # rejection reason so the failure is diagnosable rather than silent.
-        if ok:
+        any_ok = False
+        for sw in signers:
+            ok, msg = self.ch.set_weights(sw, uids, vals)
+            any_ok = any_ok or ok
+            print(f"  → set_weights[{sw.hotkey.ss58_address[:8]}…] ok={ok} "
+                  f"({len(uids)} uids, burn={w.get(config.BURN_UID, 0):.3f}, "
+                  f"copiers_zeroed={len(excluded_uids)})"
+                  + (f" — {msg}" if msg else ""))
+            if not ok:
+                print(f"  ! set_weights rejected for {sw.hotkey.ss58_address[:8]}… "
+                      f"— will retry next poll. reason: "
+                      f"{msg or 'no message returned by SDK'}")
+        if any_ok:
             self._last_weights_block = block
-        print(f"  → set_weights ok={ok} ({len(uids)} uids, "
-              f"burn={w.get(config.BURN_UID, 0):.3f}, "
-              f"copiers_zeroed={len(excluded_uids)})"
-              + (f" — {msg}" if msg else ""))
-        if not ok:
-            print(f"  ! set_weights rejected — will retry next poll. reason: "
-                  f"{msg or 'no message returned by SDK'}")
 
     # ── loop ─────────────────────────────────────────────────────────────────
     def run(self):
         print(f"SN89 validator · netuid={config.NETUID} · network={config.NETWORK} "
               f"· db={config.DB_PATH}")
-        hk = self.wallet.hotkey.ss58_address
-        permit = self.ch.has_validator_permit(hk)
-        if permit is None:
-            print(f"  ⚠️  hotkey {hk} is not registered on netuid {config.NETUID}.")
-        elif not permit:
-            print(f"  ⚠️  hotkey {hk} holds NO validator permit — weight commits "
-                  f"will never reveal until it is staked into the validator set.")
+        for w_ in (self.wallet, self.cosign_wallet):
+            if w_ is None:
+                continue
+            hk = w_.hotkey.ss58_address
+            permit = self.ch.has_validator_permit(hk)
+            if permit is None:
+                print(f"  ⚠️  hotkey {hk} is not registered on netuid {config.NETUID}.")
+            elif not permit:
+                print(f"  ⚠️  hotkey {hk} holds NO validator permit — weight commits "
+                      f"will never reveal until it is staked into the validator set.")
         while True:
             cycle_start = time.monotonic()
             try:
@@ -542,8 +558,14 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--wallet.name", dest="wallet_name", default="default")
     p.add_argument("--wallet.hotkey", dest="wallet_hotkey", default="default")
+    p.add_argument("--cosign.name", dest="cosign_name", default=None,
+                   help="optional second wallet that co-signs the same weights")
+    p.add_argument("--cosign.hotkey", dest="cosign_hotkey", default="default")
     args = p.parse_args()
-    Validator(bt.Wallet(name=args.wallet_name, hotkey=args.wallet_hotkey)).run()
+    cosign = (bt.Wallet(name=args.cosign_name, hotkey=args.cosign_hotkey)
+              if args.cosign_name else None)
+    Validator(bt.Wallet(name=args.wallet_name, hotkey=args.wallet_hotkey),
+              cosign_wallet=cosign).run()
 
 
 if __name__ == "__main__":

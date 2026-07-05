@@ -33,6 +33,36 @@ from timelock import Timelock
 
 from . import config
 
+import os
+import subprocess
+import sys
+
+_TLD_HELPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_tld_helper.py")
+
+
+def _tld_isolated(ct: bytes, drand_sig: bytes, timeout: float = 30.0):
+    """timelock.tld() in a throwaway subprocess -- a hostile/malformed ciphertext
+    can abort the Rust extension; isolation turns that into None (voidable)
+    instead of killing the validator."""
+    try:
+        r = subprocess.run(
+            [sys.executable, _TLD_HELPER, ct.hex(), drand_sig.hex()],
+            capture_output=True, text=True, timeout=timeout,
+            cwd=os.path.dirname(_TLD_HELPER),
+            env={**os.environ, "PYTHONPATH": os.path.dirname(os.path.dirname(_TLD_HELPER))},
+        )
+    except subprocess.TimeoutExpired:
+        print("  ⚠ tld helper timeout -- treating as undecryptable")
+        return None
+    if r.returncode != 0:
+        print(f"  ⚠ tld helper died rc={r.returncode} (panic/abort) -- voidable blob")
+        return None
+    try:
+        return bytes.fromhex(r.stdout.strip())
+    except ValueError:
+        return None
+
+
 _WRAP_INFO = b"sn89-owner-wrap"
 
 
@@ -112,8 +142,10 @@ def decrypt_timelock(blob: dict, drand_sig: bytes, tlock: Timelock | None = None
         binding = _binding(blob["hk"], int(blob["round"]), owner_pk, pke)
         if binding != bytes.fromhex(blob["binding"]):
             return None
-        raw = tlock.tld(bytes.fromhex(blob["W_time"]["ct"]), drand_sig)
-        skek = bytes.fromhex(raw) if isinstance(raw, str) else bytes(raw)
+        raw = _tld_isolated(bytes.fromhex(blob["W_time"]["ct"]), drand_sig)
+        if raw is None:
+            return None
+        skek = bytes(raw)
         if len(skek) == 128:  # hex-encoded bytes round-trip (MANTIS quirk)
             try:
                 skek = bytes.fromhex(skek.decode("ascii"))
