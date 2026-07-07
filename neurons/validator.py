@@ -242,7 +242,15 @@ class Validator:
                 continue
             pt = crypto.decrypt_timelock(blob, sig_bytes, self.tlock)
             if pt is None or __import__("hashlib").sha256(pt).hexdigest() != commit_hex:
-                self._void(commit_hex, "decrypt_or_hash_mismatch", strike=True)
+                # NO STRIKE: decrypt_timelock already tries every supported
+                # timelock version (0.0.2 + legacy 0.0.1 fallback). A blob that
+                # still will not open is AMBIGUOUS -- it may be an honest miner on
+                # a timelock version we do not yet support, not an abuser. Void it
+                # (it cannot count) but do not accrue a 3-strikes/30-day-zeroing
+                # strike on that ambiguity. Withholding losers is already deterred
+                # by the forfeit-LOSS path (forfeit_unrevealed); wrong_owner_pk (a
+                # deliberate visibility opt-out) still strikes.
+                self._void(commit_hex, "decrypt_or_hash_mismatch", strike=False)
                 continue
             try:
                 # Validate against the board AS OF the commit block (t0), so a

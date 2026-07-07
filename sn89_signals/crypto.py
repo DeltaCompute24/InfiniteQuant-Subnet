@@ -40,27 +40,57 @@ import sys
 _TLD_HELPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_tld_helper.py")
 
 
-def _tld_isolated(ct: bytes, drand_sig: bytes, timeout: float = 30.0):
-    """timelock.tld() in a throwaway subprocess -- a hostile/malformed ciphertext
-    can abort the Rust extension; isolation turns that into None (voidable)
-    instead of killing the validator."""
+# Legacy timelock sidecar: the mainnet validator runs timelock 0.0.2.dev0
+# (timelock_wasm_wrapper 0.3.0, 356-byte W_time). Self-hosted miners who install
+# the repo-pinned timelock==0.0.1.dev0 (wasm_wrapper 0.0.2) seal a 372-byte
+# W_time whose format the 0.0.2 tld() cannot open (it Rust-aborts). This points a
+# python from a venv that has ONLY timelock 0.0.1.dev0 installed, so we can open
+# BOTH formats and never wrongly void/strike an honest miner over a version skew.
+_TLD_FALLBACK_PY = os.getenv(
+    "SN89_TLD_FALLBACK_PYTHON", "/opt/sn89-signals/.venv-tl001/bin/python")
+
+
+def _run_tld_helper(python_exe: str, ct: bytes, drand_sig: bytes,
+                    timeout: float, pass_pubkey: bool):
+    argv = [python_exe, _TLD_HELPER, ct.hex(), drand_sig.hex()]
+    if pass_pubkey:
+        argv.append(config.DRAND_PUBLIC_KEY)  # sidecar venv lacks sn89_signals
     try:
         r = subprocess.run(
-            [sys.executable, _TLD_HELPER, ct.hex(), drand_sig.hex()],
-            capture_output=True, text=True, timeout=timeout,
+            argv, capture_output=True, text=True, timeout=timeout,
             cwd=os.path.dirname(_TLD_HELPER),
             env={**os.environ, "PYTHONPATH": os.path.dirname(os.path.dirname(_TLD_HELPER))},
         )
     except subprocess.TimeoutExpired:
-        print("  ⚠ tld helper timeout -- treating as undecryptable")
-        return None
+        return None, "timeout"
     if r.returncode != 0:
-        print(f"  ⚠ tld helper died rc={r.returncode} (panic/abort) -- voidable blob")
-        return None
+        return None, f"rc={r.returncode}"
     try:
-        return bytes.fromhex(r.stdout.strip())
+        return bytes.fromhex(r.stdout.strip()), None
     except ValueError:
-        return None
+        return None, "bad-output"
+
+
+def _tld_isolated(ct: bytes, drand_sig: bytes, timeout: float = 30.0):
+    """timelock.tld() in a throwaway subprocess -- a hostile/malformed (or simply
+    wrong-timelock-version) ciphertext can abort the Rust extension; isolation
+    turns that into None (voidable) instead of killing the validator.
+
+    Two-version opener: try the validator's own timelock (0.0.2) first, then the
+    legacy 0.0.1 sidecar. A blob that opens under EITHER version is honest and is
+    graded normally -- only a blob that fails BOTH is voided."""
+    # primary: validator's own timelock (currently 0.0.2.dev0)
+    res, _ = _run_tld_helper(sys.executable, ct, drand_sig, timeout, pass_pubkey=False)
+    if res is not None:
+        return res
+    # fallback: legacy timelock 0.0.1.dev0 (self-hosters on the repo-pinned pin)
+    if _TLD_FALLBACK_PY and os.path.exists(_TLD_FALLBACK_PY):
+        res, err = _run_tld_helper(_TLD_FALLBACK_PY, ct, drand_sig, timeout, pass_pubkey=True)
+        if res is not None:
+            print("  ↺ opened via legacy timelock 0.0.1 fallback")
+            return res
+    print("  ⚠ tld unopenable under any known timelock version -- voidable blob")
+    return None
 
 
 _WRAP_INFO = b"sn89-owner-wrap"

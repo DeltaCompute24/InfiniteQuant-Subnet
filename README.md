@@ -211,6 +211,17 @@ python neurons/validator.py --wallet.name myvali --wallet.hotkey vali
 
 State lives in `~/.sn89/validator.db` (SQLite). Grading is deterministic — same chain + same market data ⇒ same weights — so validators converge without coordination. Crypto bad-tick corroboration queries Hyperliquid's public candle API (no key needed). Entry timing design rationale: `docs/entry-timing.md`.
 
+### Timelock version compatibility
+
+Miners seal the `W_time` half of each blob with the `timelock` library. The PyPI-pinned `timelock==0.0.1.dev0` (this repo pin, `timelock_wasm_wrapper 0.0.2`) and the newer `0.0.2.dev0` (`wasm_wrapper 0.3.0`) produce **incompatible** drand-tlock ciphertext formats (372 vs 356 bytes) — one cannot open the other (`tld()` Rust-aborts). The validator opens **both**: it tries its own `timelock` first, then a legacy sidecar. Point `SN89_TLD_FALLBACK_PYTHON` at a python from a venv that has ONLY the *other* `timelock` version installed:
+
+```bash
+python3.10 -m venv .venv-tl001 && .venv-tl001/bin/pip install "timelock==0.0.1.dev0"
+export SN89_TLD_FALLBACK_PYTHON=$PWD/.venv-tl001/bin/python
+```
+
+Without the sidecar a validator still will not penalise these miners (their reveals void **without a strike**), but it cannot **grade** their signals — which diverges from any validator that can. Run the sidecar so every validator reaches the same verdict.
+
 ### Delegate via child-key (recommended)
 
 Rather than run your own validator (and a market-data plan), delegate to the authoritative SN89 validator with a child-hotkey — one journal, one weight vector:
