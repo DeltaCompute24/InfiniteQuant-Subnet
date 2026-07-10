@@ -197,9 +197,9 @@
   }
  },
  {
-  "version": "volnorm-ewma7d-fx040-20260711",
+  "version": "volnorm-ewma7d-fx040-gold62-20260711",
   "effective_from_unix": 1783728000,
-  "note": "Forex majors narrowed to match the 12h FX grade window (forex was washing ~72%): EURUSD 35->17, GBPUSD 44->20, USDJPY 18->17, USDCHF 43->20, USDCAD 27->13, AUDUSD 43->23, NZDUSD 57->32. Crypto/metals unchanged. Signals committed before effective_from_unix grade on the prior entry (no retroactive regrade).",
+  "note": "Forex majors narrowed to match the 12h FX grade window (forex was washing ~72%): EURUSD 35->17, GBPUSD 44->20, USDJPY 18->17, USDCHF 43->20, USDCAD 27->13, AUDUSD 43->23, NZDUSD 57->32. Gold (XAUUSD) 88->62 to its own EWMA-vol band (metals calibration, k_fxc); silver 125 unchanged (already vol-correct), so the gold/silver ratio is now pure vol (2.02x). Crypto & other metals unchanged. Signals committed before effective_from_unix grade on the prior entry (no regrade).",
   "bands": {
    "AUDCAD": {
     "asset_class": "forex",
@@ -373,8 +373,8 @@
    },
    "XAUUSD": {
     "asset_class": "forex-commodities",
-    "sl_bps": 88,
-    "tp_bps": 88
+    "sl_bps": 62,
+    "tp_bps": 62
    },
    "XPDUSD": {
     "asset_class": "forex-commodities",
