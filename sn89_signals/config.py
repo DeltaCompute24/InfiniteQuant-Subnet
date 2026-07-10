@@ -75,7 +75,7 @@ def class_horizon_h(asset_class: str) -> int:
     return CLASS_HORIZON_H.get(asset_class, DEFAULT_HORIZON_H)
 
 
-LATENCY_BUFFER_S = 30               # entry anchor = commit-block timestamp + buffer
+LATENCY_BUFFER_S = 0                # entry anchor = commit-block timestamp (buffer removed 2026-07-10 — the ~1-block inclusion delay already defeats sub-second wick sniping; entry can no longer be micro-timed by the miner)
 ENTRY_SECOND_SCAN_S = 120           # scan window for the 1-second entry bar; if no
                                     # 1s bar lands in it (sparse FX/metals off-hours)
                                     # fall back to the first 1-minute bar open
