@@ -168,7 +168,11 @@ class Chain:
     # ── miner side ───────────────────────────────────────────────────────────
     def commit(self, wallet: "bt.Wallet", commit_hex: str, rnd: int, blob_url: str) -> bool:
         data = encode_commitment(commit_hex, rnd, blob_url)
-        return self.st.set_commitment(wallet=wallet, netuid=self.netuid, data=data)
+        # inclusion is sufficient — entry T0 = the inclusion block (docs/entry-timing.md
+        # §2.1). Returning at inclusion (~1 block) instead of finalization (~2 blocks)
+        # unblocks the per-tenant commit loop, cutting cross-tenant serialization latency.
+        return self.st.set_commitment(wallet=wallet, netuid=self.netuid, data=data,
+                                      wait_for_finalization=False)
 
     # ── validator side ───────────────────────────────────────────────────────
     def read_all_commitments(self, block: int | None = None) -> dict[str, dict]:
