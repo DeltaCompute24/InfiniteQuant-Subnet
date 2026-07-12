@@ -395,6 +395,24 @@ def compute_weights(states: list[MinerState], now_unix: float,
     else:
         weights[burn_uid] = weights.get(burn_uid, 0.0) + max(budget, 0.0)
 
+    # ── emission cap (Mantis-sn123-style) ──────────────────────────────────────
+    # Real miners collectively receive at most MINER_EMISSION_CAP of the total;
+    # the rest burns to burn_uid (owner UID0). This is a CEILING: we scale the
+    # combined miner weight DOWN to the cap (min-scale, never up), so when the
+    # field would earn less than the cap — e.g. only immune dust, nobody
+    # qualified — nothing is inflated and leftovers burn exactly as before.
+    cap = config.MINER_EMISSION_CAP
+    if cap < 1.0:
+        miner_total = sum(w for u, w in weights.items() if u != burn_uid)
+        if miner_total > 0:
+            scale = min(1.0, max(0.0, cap) / miner_total)
+            for u in list(weights):
+                if u != burn_uid:
+                    weights[u] *= scale
+        # burn absorbs everything not paid out to the field
+        paid = sum(w for u, w in weights.items() if u != burn_uid)
+        weights[burn_uid] = weights.get(burn_uid, 0.0) + max(0.0, 1.0 - paid)
+
     total = sum(weights.values())
     return {u: w / total for u, w in weights.items()} if total > 0 else {burn_uid: 1.0}
 

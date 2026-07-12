@@ -167,6 +167,13 @@ WIN_RATE_TIERS = (
 IMMUNITY_S = 8 * 24 * 3600          # from first commit observed for the hotkey
 DUST_WEIGHT = 1e-4                  # normalized floor during immunity
 BURN_UID = 0                        # absorbs weight when nobody qualifies
+# Miner emission cap (Mantis-sn123-style). The field of real miners collectively
+# receives at most this fraction of the total incentive weight; the remainder
+# burns to BURN_UID (owner UID0). This is a CEILING, applied by scaling the
+# combined miner weight (immune dust + qualified pro-rata) DOWN to the cap — it
+# never inflates miner weight upward, so when nobody qualifies leftovers still
+# burn exactly as before. 1.0 disables the cap (legacy full pass-through).
+MINER_EMISSION_CAP = float(os.getenv("SN89_MINER_EMISSION_CAP", "0.20"))
 STRIKE_LIMIT = 3                    # consistency failures in 30d ⇒ zeroed 30d
 STRIKE_WINDOW_S = 30 * 24 * 3600
 
