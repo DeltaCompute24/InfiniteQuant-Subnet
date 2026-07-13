@@ -44,6 +44,14 @@ from sn89_signals import bucket, config, crypto, polygon, scoring
 from sn89_signals.grader import LOST, PENDING, WASHED, WON, grade
 from sn89_signals.schema import Signal, ValidationError, validate
 
+
+@pytest.fixture(autouse=True)
+def _no_emission_cap(monkeypatch):
+    # Emission-MODEL tests assume the field gets the full pool and dust stays at
+    # its nominal DUST_WEIGHT. The 20% burn cap is a separate layer tested in
+    # tests/test_emission_cap.py, so disable it for the model tests here.
+    monkeypatch.setattr(config, "MINER_EMISSION_CAP", 1.0)
+
 HK = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"
 BANDS = {
     "BTCUSD": {"asset_class": "crypto", "tp_bps": 150, "sl_bps": 150},
@@ -782,8 +790,8 @@ class TestCopyDetection:
 
     def test_flagged_copier_zeroed_in_weights(self):
         states = [
-            _state(1, self.NOW - config.IMMUNITY_S - 1, 30, 40, 6),  # leader (75% — clears gate)
-            _state(2, self.NOW - config.IMMUNITY_S - 1, 30, 40, 6),  # copier (identical)
+            _state(1, self.NOW - config.IMMUNITY_S - 1, 30, 40, 6, now=self.NOW),  # leader (75% — clears gate)
+            _state(2, self.NOW - config.IMMUNITY_S - 1, 30, 40, 6, now=self.NOW),  # copier (identical)
         ]
         w_clean = scoring.compute_weights(states, self.NOW)
         assert w_clean[1] == pytest.approx(w_clean[2])      # equal pro-rata when clean
@@ -794,11 +802,21 @@ class TestCopyDetection:
 
 # ── weights ──────────────────────────────────────────────────────────────────
 # _state(uid, first_seen, rep_wins, rep_decisive, trailing_wins):
-#   hit-rate/tier come from rep_wins / rep_decisive (rolling reputation window);
-#   the emission share is sized by trailing_wins (last 30 days).
-def _state(uid, first_seen, rw, rd, tw):
+#   hit-rate/tier come from rep_wins / rep_decisive (rolling reputation window).
+#   Emission is now sized by a time-decayed, tier-weighted tally of QUALIFIED
+#   wins (scoring.qwins). For unit tests we synthesize `tw` qualified wins placed
+#   AT `now` (decay factor 1) so the tally == tw × tier — the same magnitude the
+#   old trailing-wins×tier model produced. An UNqualified miner gets no qualified
+#   wins (its wins wouldn't have passed the point-in-time gate), so qwins is empty.
+def _state(uid, first_seen, rw, rd, tw, now=10_000_000.0):
+    if scoring._qualifies(rw, rd):
+        wt = (max(1.0, scoring.tier_multiplier(rw, rd)) if config.CONFIDENCE_SCORING
+              else max(1.0, scoring.win_multiplier(rw / rd)) if rd else 1.0)
+        qwins = [(now, wt)] * tw
+    else:
+        qwins = []
     return scoring.MinerState(hotkey=f"hk{uid}", uid=uid, first_seen_unix=first_seen,
-                              rep_wins=rw, rep_decisive=rd, trailing_wins=tw)
+                              rep_wins=rw, rep_decisive=rd, trailing_wins=tw, qwins=qwins)
 
 
 class TestWeights:
@@ -833,14 +851,16 @@ class TestWeights:
         assert 1 not in w
         assert w[config.BURN_UID] > 0.99
 
-    def test_qualified_but_idle_earns_zero(self):
-        # career WOLF with zero recent wins earns nothing — must keep trading
+    def test_qualified_but_idle_gets_probation_dust(self):
+        # A qualified miner with zero qualified wins in its tally no longer drops
+        # straight to zero: within the probation window (just past warmup here) it
+        # holds the dust floor while the real earner takes the pool. No cliff.
         w = scoring.compute_weights([
-            _state(1, self.OLD, 70, 100, 0),   # 70% lifetime, 0 recent wins
-            _state(2, self.OLD, 18, 30, 6),    # 60% lifetime, 6 recent wins
+            _state(1, self.OLD, 70, 100, 0),   # qualified, 0 wins → probation dust
+            _state(2, self.OLD, 18, 30, 6),    # qualified, 6 wins → earns the pool
         ], self.NOW)
-        assert w.get(1, 0.0) == pytest.approx(0.0)
-        assert w[2] > 0.99
+        assert 0.0 < w.get(1, 0.0) < w[2]      # dust floor, far below the earner
+        assert w[2] > w.get(1, 0.0) * 50
 
     def test_immunity_dust(self):
         w = scoring.compute_weights([
@@ -999,9 +1019,15 @@ class TestWeightModel:
     OLD = NOW - config.IMMUNITY_S - 1
 
     def _s(self, uid, rw, rd, tw):
+        if scoring._qualifies(rw, rd):
+            wt = (max(1.0, scoring.tier_multiplier(rw, rd)) if config.CONFIDENCE_SCORING
+                  else max(1.0, scoring.win_multiplier(rw / rd)) if rd else 1.0)
+            qwins = [(self.NOW, wt)] * tw
+        else:
+            qwins = []
         return scoring.MinerState(
             hotkey=f"hk{uid}", uid=uid, first_seen_unix=self.OLD,
-            rep_wins=rw, rep_decisive=rd, trailing_wins=tw)
+            rep_wins=rw, rep_decisive=rd, trailing_wins=tw, qwins=qwins)
 
     def test_qualified_split_by_trailing_wins(self):
         w = scoring.compute_weights(

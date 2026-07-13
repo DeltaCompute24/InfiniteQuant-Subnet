@@ -96,9 +96,12 @@ def weights_from_journal(
                 decisive.append((s["t0_unix"], s["status"] == "won", bool(cp)))
         rep_won, rep_dec, won_all, won_orig, copies, td = scoring.score_inputs(
             decisive, m["first_seen_unix"], now)
-        tw = won_orig if scoring.is_habitual_copier(copies, td) else won_all
+        habitual = scoring.is_habitual_copier(copies, td)
+        tw = won_orig if habitual else won_all
+        # qualified post-warmup wins (point-in-time gate + tier) — sizes emission.
+        qwins = scoring.qualified_wins(decisive, m["first_seen_unix"], habitual)
         states.append(scoring.MinerState(
             hotkey=hk, uid=uid, first_seen_unix=m["first_seen_unix"],
-            rep_wins=rep_won, rep_decisive=rep_dec, trailing_wins=tw))
+            rep_wins=rep_won, rep_decisive=rep_dec, trailing_wins=tw, qwins=qwins))
 
     return scoring.compute_weights(states, now, excluded_uids=excluded_uids)

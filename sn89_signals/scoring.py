@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from . import config
 
@@ -294,7 +294,13 @@ class MinerState:
     first_seen_unix: float   # first commit observed (immunity clock)
     rep_wins: int            # WONs inside the reputation window — hit-rate + tier
     rep_decisive: int        # decisive (won+lost) in the window — gate + hit-rate denom
-    trailing_wins: int       # WONs inside SCORE_WINDOW_S (30d) — sizes the emission
+    trailing_wins: int       # WONs inside SCORE_WINDOW_S (30d) — legacy/reporting only
+    # QUALIFIED post-warmup wins as [(t0_unix, tier_weight)] — a win the miner
+    # earned WHILE qualified (point-in-time gate), tagged with the tier multiplier
+    # it earned at that moment (≥1.0). This is what now SIZES the emission: a
+    # time-decayed, tier-weighted tally of these (see compute_weights). Losses
+    # never appear here.
+    qwins: list[tuple[float, float]] = field(default_factory=list)
 
 
 def score_inputs(decisive: list[tuple[float, bool, bool]], first_seen_unix: float,
@@ -344,15 +350,19 @@ def score_inputs(decisive: list[tuple[float, bool, bool]], first_seen_unix: floa
 def compute_weights(states: list[MinerState], now_unix: float,
                     burn_uid: int = config.BURN_UID,
                     excluded_uids: set[int] | None = None) -> dict[int, float]:
-    """{uid: normalized_weight}. Immune miners get the dust floor; qualified
-    miners split the rest by their LAST-30-DAY wins, each scaled by the miner's
-    reputation-window hit-rate tier (§7.3); leftovers burn.
+    """{uid: normalized_weight}. Immune miners get the dust floor; the pool is
+    split across miners by a time-decayed, tier-weighted tally of their QUALIFIED
+    wins (a relative competition of recent qualified wins); a probation dust floor
+    catches qualified-caliber miners whose tally is momentarily zero; leftovers
+    burn (then MINER_EMISSION_CAP caps the whole field, remainder to burn_uid).
 
-    Hit-rate (gate + tier) is computed over the rolling reputation window
-    (HIT_RATE_WINDOW_S / _TRADES) and DECAYS — a once-great miner that goes cold
-    loses its tier and falls below the gate as the good history ages out.
-    Emission size is the trailing-30d win count, so a miner must keep trading to
-    earn: a qualified WOLF with zero recent wins gets nothing.
+    Emission is NOT gated on CURRENT qualification and a loss never subtracts from
+    a miner's tally: a miner that was earning and then posts a loss that drops it
+    below the gate keeps earning off its banked qualified wins (which decay), with
+    no cliff. Qualification is enforced only at the win — a win counts toward the
+    tally only if the miner was qualified as of that win (see qualified_wins). The
+    linear 30-day decay means a miner must keep landing qualified wins to hold its
+    share; parking (not trading) lets the tally decay to zero.
 
     excluded_uids (flagged copiers, §7.5) earn nothing — neither the immunity
     dust floor nor a pro-rata share — for as long as they stay flagged. Their
@@ -370,28 +380,49 @@ def compute_weights(states: list[MinerState], now_unix: float,
     for s in immune:
         weights[s.uid] = config.DUST_WEIGHT
 
-    qualified = [
-        s for s in states
-        if s.uid not in excluded_uids
-        and _qualifies(s.rep_wins, s.rep_decisive)
-    ]
+    # ── emission = a time-decayed, tier-weighted tally of QUALIFIED wins ─────────
+    # Each miner's earning size is decayed_qwin_tally(qwins): the sum of its
+    # qualified wins, tier-weighted and linearly decayed over SCORE_WINDOW_S.
+    # There is NO current-qualification gate on EARNING — a miner that has fallen
+    # below the gate but still holds recent qualified wins keeps earning, its
+    # tally simply decaying. Qualification only governs whether NEW wins enter the
+    # tally (a win is "qualified" only if the miner was qualified as of that win;
+    # see qualified_wins). A loss never subtracts here — it can only un-qualify the
+    # miner and thus freeze accrual — so there is no cliff, and parking (stopping
+    # trading) to protect emissions doesn't work: the tally decays to zero.
+    def qtally(s: MinerState) -> float:
+        return decayed_qwin_tally(s.qwins, now_unix)
 
-    # emission = last-30d wins (capped) × reputation-window hit-rate tier (§7.3).
-    # A qualified miner with no recent wins contributes 0 and earns 0
-    # (rep_decisive ≥ QUALIFY_MIN_DECISIVE guarantees a non-zero denominator).
-    # Under the confidence path the win count is capped at WIN_CAP before the
-    # tier, so conviction/edge (not raw volume) differentiates above the cap.
-    def effective_wins(s: MinerState) -> float:
-        if config.CONFIDENCE_SCORING:
-            return min(s.trailing_wins, config.WIN_CAP) * tier_multiplier(
-                s.rep_wins, s.rep_decisive)
-        return s.trailing_wins * win_multiplier(s.rep_wins / s.rep_decisive)
+    # ── probation floor ─────────────────────────────────────────────────────────
+    # A qualified-caliber miner whose tally is currently zero keeps the dust floor
+    # for PROBATION_S rather than dropping straight to nothing — covering (a) a
+    # miner qualified in/after warmup with no qualified win YET (clock from warmup
+    # end) and (b) one whose qualified wins have all decayed out of the window
+    # (clock from the close of its earning window = last qualified win +
+    # SCORE_WINDOW_S). Placed before the budget so this dust comes out of the pool
+    # like immune dust (and, being tiny, survives the emission-cap min-scale).
+    if config.PROBATION_S > 0:
+        for s in states:
+            if s.uid in excluded_uids or s.uid in weights:   # excluded, or immune-dusted
+                continue
+            if qtally(s) > 0:                                # actively earning
+                continue
+            last_qwin = max((t0 for t0, _ in s.qwins), default=0.0)
+            if not (last_qwin or _qualifies(s.rep_wins, s.rep_decisive)):
+                continue                                     # never qualified → no floor
+            warmup_end = s.first_seen_unix + config.IMMUNITY_S
+            earn_close = (last_qwin + config.SCORE_WINDOW_S) if last_qwin else warmup_end
+            anchor = max(warmup_end, earn_close)
+            if 0.0 <= now_unix - anchor < config.PROBATION_S:
+                weights[s.uid] = config.DUST_WEIGHT
 
+    # ── distribute the pool by decayed qualified-win tally (relative share) ──────
+    earners = [s for s in states if s.uid not in excluded_uids and qtally(s) > 0]
     budget = 1.0 - sum(weights.values())
-    total_eff = sum(effective_wins(s) for s in qualified)
-    if total_eff > 0 and budget > 0:
-        for s in qualified:
-            weights[s.uid] = weights.get(s.uid, 0.0) + budget * (effective_wins(s) / total_eff)
+    total_q = sum(qtally(s) for s in earners)
+    if total_q > 0 and budget > 0:
+        for s in earners:
+            weights[s.uid] = weights.get(s.uid, 0.0) + budget * (qtally(s) / total_q)
     else:
         weights[burn_uid] = weights.get(burn_uid, 0.0) + max(budget, 0.0)
 
@@ -460,3 +491,50 @@ def _qualifies(rep_wins: int, rep_decisive: int) -> bool:
     if config.CONFIDENCE_SCORING:
         return is_qualified(rep_wins, rep_decisive)
     return is_qualified_legacy(rep_wins, rep_decisive)
+
+
+def qualified_wins(decisive: list[tuple[float, bool, bool]], first_seen_unix: float,
+                   habitual: bool = False) -> list[tuple[float, float]]:
+    """Post-warmup WINs the miner earned WHILE QUALIFIED, each tagged with the
+    point-in-time tier weight (≥ 1.0). PURE / deterministic.
+
+    A win at t0 counts iff the miner's reputation-window hit-rate AS OF t0 (the
+    trailing HIT_RATE_WINDOW_S ending at t0, capped at HIT_RATE_WINDOW_TRADES most
+    recent decisive outcomes, the win itself included) passes the qualify gate —
+    "a qualified win." A win earned while unqualified is skipped and never earns.
+    The weight is the tier the miner held at that moment (WOLF 2× / SHARP 1.2× /
+    base 1×), floored at 1.0 so a gate-passing win always counts at least base.
+
+    LOSSES never appear in the output; they influence a win's qualification only
+    through the hit-rate they contribute to the window up to that point. This is
+    what decouples "a loss" from "loses emission": a loss can only un-qualify the
+    miner (freezing accrual of FUTURE qualified wins), never erase banked ones.
+
+    For a habitual copier, copied wins are excluded (mirrors trailing_wins).
+    """
+    warmup_end = first_seen_unix + config.IMMUNITY_S
+    dec = sorted(decisive, key=lambda d: d[0])
+    out: list[tuple[float, float]] = []
+    for i, (t0, won, cp) in enumerate(dec):
+        if not won or t0 < warmup_end or (habitual and cp):
+            continue
+        rep_cut = t0 - config.HIT_RATE_WINDOW_S
+        window = [d for d in dec[:i + 1] if d[0] >= rep_cut][-config.HIT_RATE_WINDOW_TRADES:]
+        rw = sum(1 for _, w2, _ in window if w2)
+        rd = len(window)
+        if _qualifies(rw, rd):
+            out.append((t0, max(1.0, tier_multiplier(rw, rd))))
+    return out
+
+
+def decayed_qwin_tally(qwins: list[tuple[float, float]], now_unix: float) -> float:
+    """Time-decayed, tier-weighted tally of a miner's qualified wins — the emission
+    size. Each win decays LINEARLY to zero over SCORE_WINDOW_S: a win posted now is
+    worth its full tier weight, one SCORE_WINDOW_S old is worth 0. Only the most
+    recent WIN_CAP live wins count (conviction over grind — beyond the cap, edge/
+    tier differentiates, not raw volume). Relative quantity — compute_weights
+    normalizes it across the field."""
+    W = config.SCORE_WINDOW_S
+    live = [(t0, tw) for t0, tw in qwins if 0.0 <= now_unix - t0 < W]
+    live.sort(key=lambda x: x[0], reverse=True)          # most recent first
+    return sum(tw * (1.0 - (now_unix - t0) / W) for t0, tw in live[:config.WIN_CAP])

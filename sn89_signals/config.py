@@ -27,7 +27,18 @@ DRAND_PUBLIC_KEY = (
 ALG_LABEL = "x25519-hkdf-sha256+chacha20poly1305+drand-tlock"
 
 # ── Envelope / reveal (CONSENSUS) ────────────────────────────────────────────
-REVEAL_DELAY_S = 24 * 3600          # tlock round = commit time + 24h
+# Reveal delay cut 24h→2h (2026-07-12). A competitor reading the plaintext 2h in
+# enters a stale, mostly-played-out move (crypto grade window is 8h) — a losing
+# entry — so the longer timelock guarded no real edge, while the 24h gap between a
+# trade resolving in-bot and revealing on-chain confused traders ("won but the
+# validator shows 0"). MIGRATION: the validator accepts BOTH the new 2h round and
+# the legacy 24h round (ACCEPTED_REVEAL_DELAYS_S), so in-flight 24h commits and
+# hosted miners that haven't bumped config yet keep validating instead of voiding.
+# Drop REVEAL_DELAY_LEGACY_S from the tuple once nothing committed before the flip
+# remains sealed (≥24h after cutover).
+REVEAL_DELAY_S = 2 * 3600           # tlock round = commit time + 2h
+REVEAL_DELAY_LEGACY_S = 24 * 3600   # pre-2026-07-12 delay; ACCEPTED during migration
+ACCEPTED_REVEAL_DELAYS_S = (REVEAL_DELAY_S, REVEAL_DELAY_LEGACY_S)
 ROUND_TOLERANCE_S = 600             # blob round must be within ±10min of expected
                                     # (MANTIS UID-46 lesson: wrong round ⇒ void, never hang)
 REVEAL_GRACE_S = int(os.getenv("SN89_REVEAL_GRACE_S", str(6 * 3600)))
@@ -166,6 +177,13 @@ WIN_RATE_TIERS = (
 )
 IMMUNITY_S = 8 * 24 * 3600          # from first commit observed for the hotkey
 DUST_WEIGHT = 1e-4                  # normalized floor during immunity
+# Probation grace: a QUALIFIED miner that currently earns zero emission keeps the
+# dust floor for this long instead of dropping straight to nothing. Covers (a) a
+# miner whose earning wins have aged out of the SCORE_WINDOW (was earning, now 0)
+# and (b) a warmup-qualified miner that hasn't landed a post-warmup win yet. The
+# clock runs from the close of the miner's earning window (last post-warmup win +
+# SCORE_WINDOW_S), or from warmup end if it has no post-warmup win. 0 disables.
+PROBATION_S = int(os.getenv("SN89_PROBATION_S", str(30 * 24 * 3600)))
 BURN_UID = 0                        # absorbs weight when nobody qualifies
 # Miner emission cap (Mantis-sn123-style). The field of real miners collectively
 # receives at most this fraction of the total incentive weight; the remainder

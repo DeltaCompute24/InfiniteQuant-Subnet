@@ -22,14 +22,32 @@ from sn89_signals import config, scoring   # noqa: E402
 DAY = 86_400.0
 
 
-def _state(uid, first_seen, rw, rd, tw):
+def _state(uid, first_seen, rw, rd, tw, now=10_000_000.0):
+    # Emission is sized by a decayed, tier-weighted tally of QUALIFIED wins. For
+    # unit tests we place `tw` qualified wins AT `now` (decay 1) so the tally ==
+    # tw × tier, matching the old trailing-wins×tier magnitude. Unqualified miners
+    # get no qualified wins (empty qwins).
+    if scoring._qualifies(rw, rd):
+        wt = (max(1.0, scoring.tier_multiplier(rw, rd)) if config.CONFIDENCE_SCORING
+              else max(1.0, scoring.win_multiplier(rw / rd)) if rd else 1.0)
+        qwins = [(now, wt)] * tw
+    else:
+        qwins = []
     return scoring.MinerState(hotkey=f"hk{uid}", uid=uid, first_seen_unix=first_seen,
-                              rep_wins=rw, rep_decisive=rd, trailing_wins=tw)
+                              rep_wins=rw, rep_decisive=rd, trailing_wins=tw, qwins=qwins)
 
 
 @pytest.fixture(autouse=True)
 def _confidence_on(monkeypatch):
     monkeypatch.setattr(config, "CONFIDENCE_SCORING", True)
+
+
+@pytest.fixture(autouse=True)
+def _no_emission_cap(monkeypatch):
+    # These pin the pure emission MODEL; the 20% burn cap is a separate layer with
+    # its own tests (TestEmissionCap). Disable it here so the field gets the full
+    # pool and dust stays at its nominal DUST_WEIGHT.
+    monkeypatch.setattr(config, "MINER_EMISSION_CAP", 1.0)
 
 
 # ── unit: statistics helpers ─────────────────────────────────────────────────

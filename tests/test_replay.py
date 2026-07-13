@@ -18,6 +18,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from sn89_signals import config, replay, scoring  # noqa: E402
 from sn89_signals.schema import Signal  # noqa: E402
 
+
+@pytest.fixture(autouse=True)
+def _no_emission_cap(monkeypatch):
+    # Replay-vs-scoring parity is independent of the 20% burn cap (tested in
+    # tests/test_emission_cap.py); disable it so a lone earner takes the full pool.
+    monkeypatch.setattr(config, "MINER_EMISSION_CAP", 1.0)
+
 NOW = 10_000_000.0
 HOUR = 3600.0
 OLD = NOW - 40 * 24 * HOUR   # first_seen 40d ago → warmup ended ~32d ago, so recent
@@ -44,13 +51,17 @@ def _meta(*hks, first_seen=OLD):
 
 
 class TestReplayMatchesScoring:
-    def test_qualified_miner_earns_unqualified_does_not(self):
-        # A: 30/10 (75%) clears the Wilson gate; B: 20/20 (50%) does not.
-        sigs = _signals("A", "BTCUSD", 30, 10) + _signals("B", "ETHUSD", 20, 20)
+    def test_qualified_miner_earns_never_qualified_does_not(self):
+        # A: 30/10 (75%) clears the Wilson gate. B: 4 wins then 8 losses — never
+        # reaches 8 decisive at a passing rate, so NO win of B's was ever a
+        # qualified win → B banks nothing and earns nothing. (A miner that DID
+        # qualify then went cold keeps earning off banked wins — see
+        # test_emission_cap.py::TestNoCliff; that is the point of the new model.)
+        sigs = _signals("A", "BTCUSD", 30, 10) + _signals("B", "ETHUSD", 4, 8)
         uids = {"A": 1, "B": 2}
         w = replay.weights_from_journal(sigs, _meta("A", "B"), uids, NOW)
         assert w.get(1, 0) > 0.99      # A earns essentially all of it
-        assert 2 not in w              # B never qualifies
+        assert 2 not in w              # B never point-in-time qualifies → nothing
 
     def test_reproduces_compute_weights_directly(self):
         # replay must equal calling scoring.compute_weights on the same derived state
@@ -59,7 +70,10 @@ class TestReplayMatchesScoring:
         w_replay = replay.weights_from_journal(sigs, _meta("A"), uids, NOW)
         dec = [(s["t0_unix"], s["status"] == "won", False) for s in sigs]
         rw, rd, wa, wo, cp, td = scoring.score_inputs(dec, OLD, NOW)
-        st = scoring.MinerState("A", 1, OLD, rep_wins=rw, rep_decisive=rd, trailing_wins=wa)
+        habitual = scoring.is_habitual_copier(cp, td)
+        qw = scoring.qualified_wins(dec, OLD, habitual)
+        st = scoring.MinerState("A", 1, OLD, rep_wins=rw, rep_decisive=rd,
+                                trailing_wins=wa, qwins=qw)
         w_direct = scoring.compute_weights([st], NOW)
         assert w_replay == w_direct
 
