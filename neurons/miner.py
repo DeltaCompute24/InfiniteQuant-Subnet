@@ -45,12 +45,36 @@ from sn89_signals import bucket, chain, config, crypto
 from sn89_signals.schema import Signal, ValidationError, validate
 
 
+def _fx_market_closed(now_utc: float | None = None) -> bool:
+    """True when FX/metals spot markets are shut for the week. The retail FX week
+    runs Sun 17:00 -> Fri 17:00 America/New_York; anchoring on NY local time makes
+    the boundary DST-correct (= 22:00 UTC winter / 21:00 UTC summer)."""
+    from datetime import datetime, timezone
+    from zoneinfo import ZoneInfo
+    dt = datetime.fromtimestamp(
+        now_utc if now_utc is not None else time.time(), tz=timezone.utc
+    ).astimezone(ZoneInfo("America/New_York"))
+    wd, hour = dt.weekday(), dt.hour   # Mon=0 .. Sun=6
+    if wd == 5:                         # Saturday
+        return True
+    if wd == 4 and hour >= 17:          # Friday 17:00+ NY
+        return True
+    if wd == 6 and hour < 17:           # Sunday before 17:00 NY
+        return True
+    return False
+
+
 def build_signal(hotkey: str, pair: str, direction: str,
                  horizon_h: int | None = None, comment: str = "") -> Signal:
     bands = config.allowed_assets()
     band = bands.get(pair)
     if band is None:
         raise ValidationError(f"{pair} not on board; allowed: {sorted(bands.keys())}")
+    _cls = band.get("asset_class", "")
+    if _cls in ("forex", "forex-commodities") and _fx_market_closed():
+        raise ValidationError(
+            f"{pair} rejected: FX & metals markets are closed for the weekend "
+            f"(reopen Sun ~22:00 UTC / 17:00 New York). Crypto trades 24/7.")
     sig = Signal(
         trade_pair=pair,
         direction=direction.upper(),
