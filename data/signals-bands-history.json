@@ -2,7 +2,7 @@
  {
   "version": "volnorm-ewma7d",
   "effective_from_unix": 0,
-  "note": "Seed entry: the current board is treated as effective for all prior commits. On a band change, APPEND a new entry with effective_from_unix = the UTC epoch-seconds the new board goes live, and keep this one \u2014 in-flight signals are graded against the entry in force at their commit block (config.bands_as_of).",
+  "note": "Seed entry: the current board is treated as effective for all prior commits. On a band change, APPEND a new entry with effective_from_unix = the UTC epoch-seconds the new board goes live, and keep this one — in-flight signals are graded against the entry in force at their commit block (config.bands_as_of).",
   "bands": {
    "AUDCAD": {
     "asset_class": "forex",
@@ -385,6 +385,78 @@
     "asset_class": "forex-commodities",
     "sl_bps": 120,
     "tp_bps": 120
+   },
+   "XRPUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 142,
+    "tp_bps": 142
+   }
+  }
+ },
+ {
+  "version": "volnorm-ewma7d-board13-20260715",
+  "effective_from_unix": 1784073600,
+  "note": "Miner board aligned to the 13-pair product board (signals_runtime.board_assets()), effective 2026-07-15T00:00Z. Drops 25 pairs: 22 illiquid fx crosses (AUDCAD AUDCHF AUDJPY AUDNZD CADCHF CADJPY CHFJPY EURAUD EURCAD EURCHF EURGBP EURJPY EURNZD GBPAUD GBPCAD GBPCHF GBPJPY GBPNZD NZDCAD NZDCHF NZDJPY USDMXN) + HYPEUSD, XPTUSD, XPDUSD. Rationale: the miner universe (38) and the submittable product board (13) had drifted apart, so miners could commit pairs the website board never advertised and no product trader could mirror. Band VALUES for the surviving 13 are unchanged from volnorm-ewma7d-fx040-gold62-20260711. Signals committed before effective_from_unix grade on the prior entry (no regrade).",
+  "bands": {
+   "AUDUSD": {
+    "asset_class": "forex",
+    "sl_bps": 23,
+    "tp_bps": 23
+   },
+   "BTCUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 103,
+    "tp_bps": 103
+   },
+   "ETHUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 150,
+    "tp_bps": 150
+   },
+   "EURUSD": {
+    "asset_class": "forex",
+    "sl_bps": 17,
+    "tp_bps": 17
+   },
+   "GBPUSD": {
+    "asset_class": "forex",
+    "sl_bps": 20,
+    "tp_bps": 20
+   },
+   "NZDUSD": {
+    "asset_class": "forex",
+    "sl_bps": 32,
+    "tp_bps": 32
+   },
+   "SOLUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 175,
+    "tp_bps": 175
+   },
+   "USDCAD": {
+    "asset_class": "forex",
+    "sl_bps": 13,
+    "tp_bps": 13
+   },
+   "USDCHF": {
+    "asset_class": "forex",
+    "sl_bps": 20,
+    "tp_bps": 20
+   },
+   "USDJPY": {
+    "asset_class": "forex",
+    "sl_bps": 17,
+    "tp_bps": 17
+   },
+   "XAGUSD": {
+    "asset_class": "forex-commodities",
+    "sl_bps": 125,
+    "tp_bps": 125
+   },
+   "XAUUSD": {
+    "asset_class": "forex-commodities",
+    "sl_bps": 62,
+    "tp_bps": 62
    },
    "XRPUSD": {
     "asset_class": "crypto",
