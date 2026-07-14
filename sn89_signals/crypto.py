@@ -196,8 +196,13 @@ def decrypt_timelock(blob: dict, drand_sig: bytes, tlock: Timelock | None = None
 
 
 def expected_round_ok(blob_round: int, commit_unix: float) -> bool:
-    """§5: blob round must sit within ±ROUND_TOLERANCE_S of commit+REVEAL_DELAY."""
-    want = commit_unix + config.REVEAL_DELAY_S
-    return abs(round_time(int(blob_round)) - want) <= config.ROUND_TOLERANCE_S
+    """§5: blob round must sit within ±ROUND_TOLERANCE_S of commit + one of the
+    ACCEPTED reveal delays. During the 24h→2h migration BOTH the new 2h target and
+    the legacy 24h target are accepted, so in-flight 24h commits (and hosted miners
+    that haven't bumped config yet) keep validating instead of voiding. Reverts to
+    a single-delay check once ACCEPTED_REVEAL_DELAYS_S is narrowed post-migration."""
+    rt = round_time(int(blob_round))
+    delays = getattr(config, "ACCEPTED_REVEAL_DELAYS_S", (config.REVEAL_DELAY_S,))
+    return any(abs(rt - (commit_unix + d)) <= config.ROUND_TOLERANCE_S for d in delays)
 
 
