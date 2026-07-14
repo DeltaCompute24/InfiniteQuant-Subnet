@@ -28,9 +28,11 @@ def _minute(t_ms, hi):
 
 # ── #1: forged asset_class is ignored by grading ──────────────────────────────
 def test_asset_class_for_uses_board_not_payload():
-    # AUDCAD is forex on the vendored board, whatever a payload might claim.
-    assert config.asset_class_for("AUDCAD") == "forex"
-    assert config.horizon_h_for("AUDCAD") == config.CLASS_HORIZON_H["forex"]
+    # EURUSD is forex on the vendored board, whatever a payload might claim.
+    # (Deliberately a pair on the CURRENT board: this call passes no t0, so it
+    # resolves against the live board rather than the as-of history.)
+    assert config.asset_class_for("EURUSD") == "forex"
+    assert config.horizon_h_for("EURUSD") == config.CLASS_HORIZON_H["forex"]
 
 
 def test_grade_ignores_forged_asset_class():
