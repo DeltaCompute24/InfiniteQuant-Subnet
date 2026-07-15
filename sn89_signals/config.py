@@ -251,6 +251,18 @@ COPY_SHARP_LAG_S = 15 * 60          # same (pair,dir) within 15 min = sharp coin
 COPY_SOFT_LAG_S = 24 * 3600         # same (pair,dir) within 24 h = soft overlap
 COPY_SHARP_MIN_EVENTS = 3           # sharp coincidences vs one leader ⇒ report as copier
 COPY_SOFT_MIN_EVENTS = 8            # soft coincidences vs one leader ⇒ report low-diversity
+COPY_REQUIRE_SHADOW = bool(int(os.getenv("SN89_COPY_REQUIRE_SHADOW", "1")))
+                                    # Strip a habitual copier's wins ONLY if it ALSO
+                                    # carries the pairwise forensic signature below
+                                    # (>= COPY_SHARP_MIN_EVENTS sharp follows of ONE
+                                    # leader). Landing second inside a leader's 8-12h
+                                    # horizon is NOT evidence: on a 13-pair board 41%
+                                    # of all decisive calls land second, and 69% of
+                                    # marks sit on trades >=4 hotkeys held at once —
+                                    # that is a crowded consensus move (news), not a
+                                    # copy. Repeatedly shadowing ONE miner inside 15
+                                    # min is evidence. Set 0 for the legacy rate-only
+                                    # behaviour.
 COPY_ZERO_WEIGHT = bool(int(os.getenv("SN89_COPY_ZERO_WEIGHT", "0")))
                                     # set 1 to ALSO zero forensic-flagged copiers' weight
                                     # (off by default — COPY_PENALTY is the real lever)

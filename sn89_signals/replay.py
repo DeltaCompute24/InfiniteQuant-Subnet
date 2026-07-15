@@ -74,7 +74,9 @@ def weights_from_journal(
     is_copy_by_commit = {c: gr.is_copy for c, gr in rows_by_commit.items()}
 
     reports = scoring.detect_copiers(copy_rows, now, eligible_leaders=eligible_leaders)
-    flagged_hk = scoring.flagged_copier_hotkeys(reports) if config.COPY_ZERO_WEIGHT else set()
+    # sharp 1:1 shadowing signature — now also gates the copied-win strip (§7.5)
+    shadow_hk = scoring.flagged_copier_hotkeys(reports)
+    flagged_hk = shadow_hk if config.COPY_ZERO_WEIGHT else set()
     excluded_uids = {uid_by_hotkey[h] for h in flagged_hk if h in uid_by_hotkey}
 
     # ── build MinerStates (skip struck + eliminated) and score ───────────────────
@@ -96,7 +98,7 @@ def weights_from_journal(
                 decisive.append((s["t0_unix"], s["status"] == "won", bool(cp)))
         rep_won, rep_dec, won_all, won_orig, copies, td = scoring.score_inputs(
             decisive, m["first_seen_unix"], now)
-        habitual = scoring.is_habitual_copier(copies, td)
+        habitual = scoring.is_penalised_copier(copies, td, hk in shadow_hk)
         tw = won_orig if habitual else won_all
         # qualified post-warmup wins (point-in-time gate + tier) — sizes emission.
         qwins = scoring.qualified_wins(decisive, m["first_seen_unix"], habitual)

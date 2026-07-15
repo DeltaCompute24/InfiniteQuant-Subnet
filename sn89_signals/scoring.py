@@ -208,6 +208,28 @@ def is_habitual_copier(copies: int, decisive: int) -> bool:
     return copies >= config.COPY_MIN_COPIES and (copies / decisive) >= config.COPY_HABITUAL_RATE
 
 
+def is_penalised_copier(copies: int, decisive: int, has_shadow_signature: bool) -> bool:
+    """Whether to strip this hotkey's copied wins (§7.5).
+
+    Two independent signals must agree:
+      * the RATE gate (is_habitual_copier) — it lands second on a high share of
+        its decisive trades; and
+      * the SHADOW gate — detect_copiers found >= COPY_SHARP_MIN_EVENTS *sharp*
+        (<= COPY_SHARP_LAG_S) follows of a SINGLE leader, i.e. a real 1:1
+        fingerprint rather than "we both traded gold today".
+
+    The rate gate alone cannot separate a copier from an honest miner on a
+    crowded board: landing second inside a leader's 8-12h horizon is the norm,
+    not the exception. The shadow gate supplies the intent evidence the rate
+    gate lacks. Set COPY_REQUIRE_SHADOW=0 to restore the rate-only behaviour.
+    """
+    if not is_habitual_copier(copies, decisive):
+        return False
+    if config.COPY_REQUIRE_SHADOW and not has_shadow_signature:
+        return False
+    return True
+
+
 # ── copy / collusion forensics: 30-day shadowing report (§7.5) ────────────────
 @dataclass
 class CopyReport:
