@@ -235,10 +235,31 @@ def is_penalised_copier(copies: int, decisive: int, has_shadow_signature: bool) 
 class CopyReport:
     follower: str            # the copier (later commit)
     leader: str              # the hotkey being shadowed (earlier commit)
-    sharp_events: int        # same (pair,dir) within COPY_SHARP_LAG_S
+    sharp_events: int        # same (pair,dir) within COPY_SHARP_LAG_S (RAW count)
     soft_events: int         # same (pair,dir) within COPY_SOFT_LAG_S (⊇ sharp)
-    flagged: bool            # sharp ≥ threshold ⇒ reversible zero weight
+    flagged: bool            # sharp EPISODES ≥ threshold ⇒ reversible zero weight
     low_diversity: bool      # soft ≥ threshold ⇒ report-only nudge
+    sharp_episodes: int = 0  # sharp follows collapsed by COPY_EPISODE_S — what `flagged` uses
+
+
+def _episodes(ts, gap: float) -> int:
+    """Collapse follow timestamps into distinct DECISIONS.
+
+    Follows of the same leader inside `gap` are one reaction, not several: a
+    trader firing its 6-signal daily allowance across BTC/ETH/XAU/EUR within a
+    couple of minutes of a print is making ONE call, and scoring it as 5-6
+    independent coincidences is pseudo-replication. Anchored (not chained), so
+    an episode can never span more than `gap`. Pure/deterministic.
+    """
+    ts = sorted(ts)
+    if not ts:
+        return 0
+    n, anchor = 1, ts[0]
+    for t in ts[1:]:
+        if t - anchor > gap:
+            n += 1
+            anchor = t
+    return n
 
 
 def detect_copiers(rows: list[GradedRow], now_unix: float,
@@ -273,6 +294,7 @@ def detect_copiers(rows: list[GradedRow], now_unix: float,
         groups[(r.trade_pair, r.direction)].append(r)
 
     sharp: dict[tuple[str, str], int] = defaultdict(int)
+    sharp_ts: dict[tuple[str, str], list[float]] = defaultdict(list)
     soft: dict[tuple[str, str], int] = defaultdict(int)
     for evs in groups.values():
         for i, f in enumerate(evs):
@@ -288,6 +310,7 @@ def detect_copiers(rows: list[GradedRow], now_unix: float,
             pair = (leader.hotkey, f.hotkey)
             if dt <= config.COPY_SHARP_LAG_S:
                 sharp[pair] += 1
+                sharp_ts[pair].append(f.t0_unix)
                 soft[pair] += 1
             elif dt <= config.COPY_SOFT_LAG_S:
                 soft[pair] += 1
@@ -295,11 +318,12 @@ def detect_copiers(rows: list[GradedRow], now_unix: float,
     reports: dict[str, list[CopyReport]] = defaultdict(list)
     for (leader, follower) in sorted(set(sharp) | set(soft)):
         s, so = sharp.get((leader, follower), 0), soft.get((leader, follower), 0)
-        flagged = s >= config.COPY_SHARP_MIN_EVENTS
+        eps = _episodes(sharp_ts.get((leader, follower), ()), config.COPY_EPISODE_S)
+        flagged = eps >= config.COPY_SHARP_MIN_EVENTS
         low_div = so >= config.COPY_SOFT_MIN_EVENTS
         if flagged or low_div:
             reports[follower].append(
-                CopyReport(follower, leader, s, so, flagged, low_div))
+                CopyReport(follower, leader, s, so, flagged, low_div, eps))
     return dict(reports)
 
 

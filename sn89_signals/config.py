@@ -249,7 +249,18 @@ COPY_MIN_COPIES = int(os.getenv("SN89_COPY_MIN_COPIES", "5"))
 COPY_WINDOW_S = 30 * 24 * 3600      # rolling lookback for the shadowing report
 COPY_SHARP_LAG_S = 15 * 60          # same (pair,dir) within 15 min = sharp coincidence
 COPY_SOFT_LAG_S = 24 * 3600         # same (pair,dir) within 24 h = soft overlap
-COPY_SHARP_MIN_EVENTS = 3           # sharp coincidences vs one leader ⇒ report as copier
+COPY_SHARP_MIN_EVENTS = 3           # sharp EPISODES vs one leader ⇒ report as copier
+COPY_EPISODE_S = int(os.getenv("SN89_COPY_EPISODE_S", str(30 * 60)))
+                                    # Sharp follows of the SAME leader landing inside this
+                                    # window are ONE episode, not N. MAX_SIGNALS_PER_UTC_DAY
+                                    # is 6, so a high-impact print (CPI/PPI/NFP) makes every
+                                    # trader fire its whole daily allowance within minutes:
+                                    # on 2026-07-15 12:19-12:25, 8 hotkeys fired 34 signals
+                                    # and every pair skewed one way. Counting each pair
+                                    # separately turns ONE reaction into 5-6 "independent"
+                                    # coincidences — pseudo-replication, and the reason
+                                    # honest news traders trip a 3-event gate. Copying the
+                                    # same leader on DIFFERENT occasions is the real signal.
 COPY_SOFT_MIN_EVENTS = 8            # soft coincidences vs one leader ⇒ report low-diversity
 COPY_REQUIRE_SHADOW = bool(int(os.getenv("SN89_COPY_REQUIRE_SHADOW", "1")))
                                     # Strip a habitual copier's wins ONLY if it ALSO

@@ -70,3 +70,73 @@ class TestSybilSprayStillMarked:
         marked = [r.hotkey for r in rows if r.is_copy]
         assert "k0" not in marked
         assert len(marked) == 9
+
+
+class TestEpisodes:
+    """Sharp follows inside COPY_EPISODE_S are ONE decision, not N.
+
+    MAX_SIGNALS_PER_UTC_DAY is 6, so a CPI/PPI print makes a trader fire its whole
+    allowance across many pairs within minutes. Counting each pair as separate
+    evidence is pseudo-replication — it is what put an honest news trader over a
+    3-event gate (haroldyeah902 / 5H8Vq6jZ: 3 raw follows, 2 real occasions).
+    """
+
+    def test_empty(self):
+        assert scoring._episodes([], 1800) == 0
+
+    def test_single(self):
+        assert scoring._episodes([100.0], 1800) == 1
+
+    def test_one_news_burst_collapses(self):
+        # 5 pairs fired 12s apart off one print -> ONE decision
+        assert scoring._episodes([0, 12, 24, 36, 48], 1800) == 1
+
+    def test_distinct_occasions_still_count(self):
+        # three separate days -> three occasions
+        assert scoring._episodes([0, 86_400, 172_800], 1800) == 3
+
+    def test_harold_shape_is_two_not_three(self):
+        # 07-14 14:09:00, then 07-15 12:24:12 + 12:24:24 (12s apart)
+        assert scoring._episodes([0.0, 86_400.0, 86_412.0], 1800) == 2
+
+    def test_anchored_not_chained(self):
+        # a chain 20 min apart must NOT collapse into one 60-min episode
+        assert scoring._episodes([0, 1200, 2400], 1800) == 2
+
+    def test_unsorted_input(self):
+        assert scoring._episodes([86_412.0, 0.0, 86_400.0], 1800) == 2
+
+    def test_deterministic(self):
+        for _ in range(5):
+            assert scoring._episodes([0, 12, 86_400], 1800) == 2
+
+
+class TestDetectCopiersUsesEpisodes:
+    def _row(self, hk, pair, direction, t0):
+        return scoring.GradedRow(hotkey=hk, trade_pair=pair, direction=direction,
+                                 t0_unix=t0, status="ok")
+
+    def test_news_burst_does_not_flag(self):
+        # leader L and follower F both fire 4 pairs within a minute of one print.
+        # 4 raw sharp follows, but ONE occasion -> not a copier. detect_copiers
+        # only emits a row when flagged/low_diversity, so F drops out entirely.
+        rows = []
+        for i, pair in enumerate(["BTCUSD", "ETHUSD", "XAUUSD", "XRPUSD"]):
+            rows.append(self._row("L", pair, "LONG", 1000 + i))
+            rows.append(self._row("F", pair, "LONG", 1010 + i))
+        reps = scoring.detect_copiers(rows, now_unix=100_000, eligible_leaders={"L"})
+        assert "F" not in scoring.flagged_copier_hotkeys(reps)
+        # ...and under the OLD raw-count rule it WOULD have flagged (4 >= 3):
+        assert sum(1 for _ in range(4)) >= config.COPY_SHARP_MIN_EVENTS
+
+    def test_repeat_shadowing_across_days_still_flags(self):
+        # same follow, but on three separate days -> a real fingerprint
+        rows = []
+        for d in range(3):
+            t = d * 86_400
+            rows.append(self._row("L", "BTCUSD", "LONG", t))
+            rows.append(self._row("F", "BTCUSD", "LONG", t + 60))
+        reps = scoring.detect_copiers(rows, now_unix=500_000, eligible_leaders={"L"})
+        r = reps["F"][0]
+        assert r.sharp_episodes == 3
+        assert r.flagged is True
