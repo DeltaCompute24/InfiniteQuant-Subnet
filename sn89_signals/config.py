@@ -239,6 +239,14 @@ COPY_PENALTY = os.getenv("SN89_COPY_PENALTY", "loss")
 # crowded trade is NOT penalized.
 COPY_HABITUAL_RATE = float(os.getenv("SN89_COPY_HABITUAL_RATE", "0.5"))
 COPY_MIN_COPIES = int(os.getenv("SN89_COPY_MIN_COPIES", "5"))
+COPY_PENALTY_TTL_S = int(os.getenv("SN89_COPY_PENALTY_TTL_S", str(2 * 24 * 3600)))
+                                    # The flag is a LOUD, SHORT-LIVED WARNING, not a 30-day
+                                    # scarlet letter. Detection still weighs COPY_WINDOW_S of
+                                    # history (you need history to see a pattern), but the
+                                    # PENALTY only bites while the LAST copy event is within
+                                    # this TTL. Stop landing second and it clears in 2 days;
+                                    # keep doing it and it re-trips every cycle. This bounds the
+                                    # blast radius of a false positive to 2 days instead of 30.
                                     # need at least this many copied trades in the
                                     # window before the rate gate can fire (a new
                                     # miner with 2 unlucky second-landings is safe)
@@ -249,7 +257,19 @@ COPY_MIN_COPIES = int(os.getenv("SN89_COPY_MIN_COPIES", "5"))
 COPY_WINDOW_S = 30 * 24 * 3600      # rolling lookback for the shadowing report
 COPY_SHARP_LAG_S = 15 * 60          # same (pair,dir) within 15 min = sharp coincidence
 COPY_SOFT_LAG_S = 24 * 3600         # same (pair,dir) within 24 h = soft overlap
-COPY_SHARP_MIN_EVENTS = 3           # sharp EPISODES vs one leader ⇒ report as copier
+COPY_SHARP_MIN_EVENTS = int(os.getenv("SN89_COPY_SHARP_MIN_EVENTS", "6"))
+                                    # sharp EPISODES vs one leader ⇒ report as copier.
+                                    # 2026-07-16: 3 -> 6. On the curated IQ-Signals cohort,
+                                    # independent traders running the SAME price-triggered
+                                    # strategy (e.g. "long gold at the intraday low") co-enter
+                                    # at the same extreme on every occasion it prints, so 3-5
+                                    # episodes is the honest shared-strategy NOISE FLOOR, not
+                                    # copying. Across the live journal every leader→follower
+                                    # pair sits at ≤5 episodes EXCEPT one at 12 (2.4× the next)
+                                    # — a clean gap. 6 flags only that outlier. Verified: gold
+                                    # 2026-07-16 day-low 3974.47 @13:05:28; two "copiers" both
+                                    # longed within 5 min of that bottom — the PRICE was the
+                                    # common cause, not a chat.
 COPY_EPISODE_S = int(os.getenv("SN89_COPY_EPISODE_S", str(30 * 60)))
                                     # Sharp follows of the SAME leader landing inside this
                                     # window are ONE episode, not N. MAX_SIGNALS_PER_UTC_DAY

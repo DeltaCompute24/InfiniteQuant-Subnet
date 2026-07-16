@@ -98,7 +98,12 @@ def weights_from_journal(
                 decisive.append((s["t0_unix"], s["status"] == "won", bool(cp)))
         rep_won, rep_dec, won_all, won_orig, copies, td = scoring.score_inputs(
             decisive, m["first_seen_unix"], now)
-        habitual = scoring.is_penalised_copier(copies, td, hk in shadow_hk)
+        # copy penalty: shadow-gated, and a LOUD SHORT-LIVED warning — it bites only
+        # while the last copy event is within COPY_PENALTY_TTL_S (default 2d).
+        cw_copies, cw_dec, cw_last = scoring.copy_gate_inputs(decisive, now)
+        habitual = (scoring.is_penalised_copier(cw_copies, cw_dec, hk in shadow_hk)
+                    and cw_last is not None
+                    and (now - cw_last) <= config.COPY_PENALTY_TTL_S)
         tw = won_orig if habitual else won_all
         # qualified post-warmup wins (point-in-time gate + tier) — sizes emission.
         qwins = scoring.qualified_wins(decisive, m["first_seen_unix"], habitual)

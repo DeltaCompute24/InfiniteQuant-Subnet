@@ -125,12 +125,12 @@ class TestDetectCopiersUsesEpisodes:
             rows.append(self._row("L", pair, "LONG", 1000 + i))
             rows.append(self._row("F", pair, "LONG", 1010 + i))
         reps = scoring.detect_copiers(rows, now_unix=100_000, eligible_leaders={"L"})
+        # 4 raw follows collapse to ONE episode, so F is never a copier here.
         assert "F" not in scoring.flagged_copier_hotkeys(reps)
-        # ...and under the OLD raw-count rule it WOULD have flagged (4 >= 3):
-        assert sum(1 for _ in range(4)) >= config.COPY_SHARP_MIN_EVENTS
 
-    def test_repeat_shadowing_across_days_still_flags(self):
-        # same follow, but on three separate days -> a real fingerprint
+    def test_repeat_shadowing_across_days_still_flags(self, monkeypatch):
+        # a real fingerprint: same follow on COPY_SHARP_MIN_EVENTS separate days
+        monkeypatch.setattr(config, "COPY_SHARP_MIN_EVENTS", 3)
         rows = []
         for d in range(3):
             t = d * 86_400
@@ -140,3 +140,49 @@ class TestDetectCopiersUsesEpisodes:
         r = reps["F"][0]
         assert r.sharp_episodes == 3
         assert r.flagged is True
+
+    def test_shared_strategy_cluster_below_threshold_not_flagged(self):
+        # 3 separate co-entries (e.g. both long gold at each intraday low) is the
+        # honest shared-strategy noise floor; the default gate (6 episodes) ignores it.
+        rows = []
+        for d in range(3):
+            t = d * 86_400
+            rows.append(self._row("L", "XAUUSD", "LONG", t))
+            rows.append(self._row("F", "XAUUSD", "LONG", t + 60))
+        reps = scoring.detect_copiers(rows, now_unix=500_000, eligible_leaders={"L"})
+        assert "F" not in scoring.flagged_copier_hotkeys(reps)
+
+
+class TestCopyGateInputsAndTTL:
+    """The penalty is windowed evidence + a freshness TTL, so a false positive
+    self-clears COPY_PENALTY_TTL_S (2d) after the trader stops landing second."""
+
+    def _dec(self, ts_flags):
+        # [(t0, won, is_copy), ...]
+        return [(t, True, cp) for t, cp in ts_flags]
+
+    def test_last_copy_timestamp_returned(self):
+        dec = self._dec([(1000.0, True), (2000.0, False), (3000.0, True)])
+        copies, decisive, last = scoring.copy_gate_inputs(dec, now_unix=4000.0)
+        assert (copies, decisive, last) == (2, 3, 3000.0)
+
+    def test_no_copies_returns_none_last(self):
+        dec = self._dec([(1000.0, False), (2000.0, False)])
+        assert scoring.copy_gate_inputs(dec, now_unix=3000.0) == (0, 2, None)
+
+    def test_only_counts_inside_copy_window(self, monkeypatch):
+        monkeypatch.setattr(config, "COPY_WINDOW_S", 86_400)  # 1d window
+        now = 1_000_000.0
+        dec = self._dec([(now - 200_000, True), (now - 1000, True)])  # one stale, one fresh
+        copies, decisive, last = scoring.copy_gate_inputs(dec, now)
+        assert (copies, decisive) == (1, 1)
+        assert last == now - 1000
+
+    def test_ttl_freshness_math(self, monkeypatch):
+        # the exact check replay/build_dashboard apply
+        monkeypatch.setattr(config, "COPY_PENALTY_TTL_S", 2 * 86_400)
+        now = 1_000_000.0
+        fresh_last = now - 1 * 86_400
+        stale_last = now - 3 * 86_400
+        assert (now - fresh_last) <= config.COPY_PENALTY_TTL_S
+        assert not ((now - stale_last) <= config.COPY_PENALTY_TTL_S)

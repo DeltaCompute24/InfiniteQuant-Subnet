@@ -208,6 +208,22 @@ def is_habitual_copier(copies: int, decisive: int) -> bool:
     return copies >= config.COPY_MIN_COPIES and (copies / decisive) >= config.COPY_HABITUAL_RATE
 
 
+def copy_gate_inputs(decisive: list[tuple[float, bool, bool]],
+                     now_unix: float) -> tuple[int, int, float | None]:
+    """(copies, decisive, last_copy_unix) inside COPY_WINDOW_S.
+
+    `last_copy_unix` is the t0 of the most recent COPY-marked decisive trade in
+    the window (None if there is none) — the penalty TTL is measured from it, so
+    a flag self-clears COPY_PENALTY_TTL_S after the trader stops landing second.
+    Pure/deterministic.
+    """
+    cutoff = now_unix - config.COPY_WINDOW_S
+    rows = [d for d in decisive if d[0] >= cutoff]
+    copies = sum(1 for _, _, cp in rows if cp)
+    last_cp = max((t for t, _, cp in rows if cp), default=None)
+    return copies, len(rows), last_cp
+
+
 def is_penalised_copier(copies: int, decisive: int, has_shadow_signature: bool) -> bool:
     """Whether to strip this hotkey's copied wins (§7.5).
 
