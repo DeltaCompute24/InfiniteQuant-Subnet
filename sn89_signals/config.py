@@ -191,7 +191,7 @@ BURN_UID = 0                        # absorbs weight when nobody qualifies
 # combined miner weight (immune dust + qualified pro-rata) DOWN to the cap — it
 # never inflates miner weight upward, so when nobody qualifies leftovers still
 # burn exactly as before. 1.0 disables the cap (legacy full pass-through).
-MINER_EMISSION_CAP = float(os.getenv("SN89_MINER_EMISSION_CAP", "0.20"))
+MINER_EMISSION_CAP = float(os.getenv("SN89_MINER_EMISSION_CAP", "0.30"))
 STRIKE_LIMIT = 3                    # consistency failures in 30d ⇒ zeroed 30d
 STRIKE_WINDOW_S = 30 * 24 * 3600
 
