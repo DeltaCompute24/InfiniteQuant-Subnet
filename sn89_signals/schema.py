@@ -90,13 +90,12 @@ def validate(sig: Signal, bands: dict | None = None,
     # the asset's class window so the miner's Nh token can't change grading.
     sig.horizon_h = config.class_horizon_h(sig.asset_class)
 
-    # 1:1 brackets at exactly the board band (program rule — fixed bands,
-    # not miner-chosen, same as today's bot).
-    want_tp = float(band["tp_bps"])
-    want_sl = float(band["sl_bps"])
-    if float(sig.tp_bps) != want_tp or float(sig.sl_bps) != want_sl:
-        raise ValidationError(
-            f"{sig.trade_pair} band is fixed at tp={want_tp}/sl={want_sl} bps "
-            f"(got {sig.tp_bps}/{sig.sl_bps})")
+    # 1:1 brackets are governed by the board (fixed per asset, not miner-chosen).
+    # Like the horizon + asset_class above, NORMALIZE the committed band to the
+    # board value instead of rejecting a mismatch — so a self-hosted miner on
+    # stale bands still grades against the governed band rather than silently
+    # voiding (invalid_payload). The miner only truly chooses asset + direction.
+    sig.tp_bps = float(band["tp_bps"])
+    sig.sl_bps = float(band["sl_bps"])
 
     return sig

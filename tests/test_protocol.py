@@ -85,11 +85,16 @@ class TestSchema:
         with pytest.raises(ValidationError):
             validate(_sig().__class__(**{**_sig().__dict__, "trade_pair": "DOGEUSD"}), BANDS)
 
-    def test_validate_rejects_wrong_band(self):
+    def test_validate_normalizes_wrong_band(self):
+        # Bands are subnet-governed: a miner's wrong band is NORMALIZED to the
+        # board value, not rejected (the miner only chooses asset + direction).
         s = _sig()
         s.tp_bps = 999
-        with pytest.raises(ValidationError):
-            validate(s, BANDS)
+        s.sl_bps = 999
+        out = validate(s, BANDS)
+        band = BANDS[s.trade_pair]
+        assert out.tp_bps == float(band["tp_bps"])
+        assert out.sl_bps == float(band["sl_bps"])
 
     def test_validate_rejects_bad_direction(self):
         s = _sig()

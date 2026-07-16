@@ -87,11 +87,15 @@ def test_band_update_does_not_void_in_flight_signal(tmp_path, monkeypatch):
     committed_under_old = Signal(
         trade_pair="AUDCAD", direction="LONG", tp_bps=50, sl_bps=50,
         ts_miner=0, hotkey=HK, asset_class="forex")
-    # committed at t0=1000 (old band 50/50) → valid even though current is 80/80
-    validate(committed_under_old, t0_unix=1000)
-    # sanity: the same signal IS invalid against the post-cutover board
-    with pytest.raises(ValidationError):
-        validate(committed_under_old, t0_unix=3000)
+    # committed at t0=1000 → NORMALIZED to the t0=1000 band (50/50), never voided
+    out1 = validate(committed_under_old, t0_unix=1000)
+    assert (out1.tp_bps, out1.sl_bps) == (50.0, 50.0)
+    # bands_as_of still governs WHICH band applies: a signal committed post-cutover
+    # normalizes to the new board (80/80) instead of raising on a stale band.
+    stale = Signal(trade_pair="AUDCAD", direction="LONG", tp_bps=50, sl_bps=50,
+                   ts_miner=0, hotkey=HK, asset_class="forex")
+    out2 = validate(stale, t0_unix=3000)
+    assert (out2.tp_bps, out2.sl_bps) == (80.0, 80.0)
 
 
 if __name__ == "__main__":
