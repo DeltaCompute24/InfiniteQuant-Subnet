@@ -9,16 +9,21 @@ license = { text = "MIT" }
 # silently land on an unsupported Python.
 requires-python = ">=3.10,<3.11"
 
-# Runtime deps for BOTH neurons. Pins mirror requirements.txt and are the set
-# proven on the MANTIS stack. async-substrate-interface and scalecodec are
-# pinned together on purpose: async-substrate-interface 2.x dropped scalecodec
-# for cyscale and aborts import with a namespace conflict, so we hold the
-# scalecodec-era line that bittensor 10.2.0 actually wants.
+# Runtime deps for BOTH neurons. Pins mirror requirements.txt.
+# bittensor 10.3.0 is REQUIRED: the finney runtime now types netuid as a
+# Composite(u16) and 10.2.0 cannot encode it -- metagraph(netuid=89) throws
+# "Invalid type for data: 89 ... Composite(u16)" and the validator crash-loops
+# at startup. 10.3.0 uses async-substrate-interface 2.x + cyscale (NOT scalecodec).
+# cyscale is pinned ==0.3.3: the >=0.3.1,<1.0.0 range would otherwise pull 0.5.0,
+# whose scalecodec shim is broken ("cannot import name 'ScaleBytes'"). Do NOT add
+# scalecodec back -- async-substrate-interface 2.x aborts import if it is present
+# (namespace conflict). Verified: a clean pip install resolves to this exact set
+# with no manual steps.
 dependencies = [
-    "bittensor==10.2.0",
+    "bittensor==10.3.0",
     "bittensor-wallet==4.0.1",
-    "async-substrate-interface==1.6.4",
-    "scalecodec==1.2.12",
+    "async-substrate-interface==2.0.2",
+    "cyscale==0.3.3",
     "timelock==0.0.1.dev0",
     "cryptography>=42.0",
     "requests>=2.31",

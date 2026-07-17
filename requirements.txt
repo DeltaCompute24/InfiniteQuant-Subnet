@@ -1,13 +1,15 @@
 # Requires Python 3.10 — `timelock` ships wheels only for 3.7–3.10; 3.11/3.12
 # fail with "No matching distribution found for timelock_wasm_wrapper".
 # pinned to the versions proven on the MANTIS stack (mantis VM venv)
-bittensor==10.2.0
+bittensor==10.3.0
 bittensor-wallet==4.0.1
-# bittensor 10.2.0 declares async-substrate-interface>=1.6.2 with no upper bound;
-# 2.x dropped scalecodec for cyscale and aborts import with a namespace conflict.
-# Pin to the proven scalecodec-era line (scalecodec==1.2.12 is what bittensor wants).
-async-substrate-interface==1.6.4
-scalecodec==1.2.12
+# bittensor 10.3.0 is required for the typed-netuid finney runtime (10.2.0 crashes
+# on metagraph(netuid=89)). It uses async-substrate-interface 2.x + cyscale, NOT
+# scalecodec. Pin cyscale==0.3.3 -- the range resolves to 0.5.0 whose scalecodec
+# shim is broken. Do NOT add scalecodec: async-substrate-interface 2.x aborts if
+# it is present (namespace conflict). Verified clean install, no manual steps.
+async-substrate-interface==2.0.2
+cyscale==0.3.3
 timelock==0.0.1.dev0
 cryptography>=42.0
 requests>=2.31
