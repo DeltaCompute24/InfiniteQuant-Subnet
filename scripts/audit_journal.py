@@ -79,8 +79,11 @@ def main():
         print("INCONCLUSIVE: no uid map (checkpoint lacks uid_by_hotkey; pass --chain)")
         sys.exit(2)
 
-    print(f"replaying {len(signals)} signals over {len(meta)} hotkeys (now={now:.0f})…")
-    replayed = replay.weights_from_journal(signals, meta, uid_by_hotkey, now)
+    referrals = cp.get("referrals") or []
+    print(f"replaying {len(signals)} signals over {len(meta)} hotkeys "
+          f"({len(referrals)} referrals, now={now:.0f})…")
+    replayed = replay.weights_from_journal(signals, meta, uid_by_hotkey, now,
+                                           referrals=referrals)
 
     if not recorded:
         print(f"  replay produced {len(replayed)} uids, but there are NO on-chain weights "
@@ -99,6 +102,8 @@ def main():
     anchors_ok = True
     if "--anchors" in args:
         anchors_ok = _check_anchors(signals, args)
+    if "--referral-anchors" in args:
+        anchors_ok = _check_referral_anchors(referrals) and anchors_ok
 
     ok = match and anchors_ok
     print("\n" + ("AUDIT PASSED — on-chain weights match a replay of the journal"
@@ -144,6 +149,39 @@ def _check_anchors(signals: list, args: list) -> bool:
     if len(have) > len(sample):
         print(f"  (note: {len(have) - len(sample)} older signals not sampled — raise "
               f"--anchors N to check more)")
+    return mismatched == 0
+
+
+def _check_referral_anchors(referrals: list) -> bool:
+    """Verify each journaled referral against on-chain CommitmentOf at its
+    commit_block (an sn89ref payload naming the same recruit — no fabricated
+    referrals). Best-effort like _check_anchors: FAILS only on a definitive
+    mismatch; an unreadable (pruned) block is reported, not failed."""
+    if not referrals:
+        print("  REFERRAL ANCHORS: none to check")
+        return True
+    try:
+        from sn89_signals import chain
+    except Exception as e:  # noqa: BLE001
+        print(f"  ⚠ referral-anchor check needs chain access: {e}")
+        return True
+    ch = chain.Chain()
+    verified = mismatched = unreadable = 0
+    bad = []
+    for r in referrals:
+        on = ch.referral_at_block(r["recruiter_hk"], int(r["commit_block"]))
+        if on is None:
+            unreadable += 1
+        elif on == r["recruit_hk"]:
+            verified += 1
+        else:
+            mismatched += 1
+            bad.append((r["recruiter_hk"][:8], r["recruit_hk"][:8], r["commit_block"]))
+    print(f"  REFERRAL ANCHORS ({len(referrals)}): {verified} verified, "
+          f"{mismatched} mismatched, {unreadable} unreadable"
+          + (" (older blocks need an archive node)" if unreadable else ""))
+    for rec, cru, blk in bad[:10]:
+        print(f"      ✗ block {blk}: {rec}… → {cru}… not anchored on-chain")
     return mismatched == 0
 
 

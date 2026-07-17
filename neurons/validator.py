@@ -64,6 +64,15 @@ CREATE TABLE IF NOT EXISTS hotkey_meta (
   eliminated_t0 REAL                   -- decisive t0 that crossed the floor
 );
 CREATE TABLE IF NOT EXISTS drand_cache (round INTEGER PRIMARY KEY, signature BLOB);
+CREATE TABLE IF NOT EXISTS referrals (
+  recruiter_hk      TEXT NOT NULL,
+  recruit_hk        TEXT NOT NULL,
+  commit_block      INTEGER NOT NULL,  -- consensus-exact inclusion block of sn89ref
+  first_seen_block  INTEGER NOT NULL,  -- observational: block our poll saw it
+  observed_unix     REAL NOT NULL,
+  recruit_reg_block INTEGER,           -- filled ONCE at first metagraph sighting; never updated
+  PRIMARY KEY (recruiter_hk, recruit_hk)
+);
 CREATE TABLE IF NOT EXISTS copier_flags (
   follower      TEXT NOT NULL,
   leader        TEXT NOT NULL,
@@ -142,6 +151,55 @@ class Validator:
         print(f"  + {status} {c['commit'][:12]}… {hk[:8]}… round={c['round']}"
               + (f" ({void_reason})" if void_reason else ""))
 
+    def _journal_referral(self, c: dict, block: int, now: float):
+        """Journal one observed referral claim (§ referral). Idempotent on the
+        (recruiter, recruit) pair — INSERT OR IGNORE keeps the FIRST observed
+        commit_block, so the earliest claim is canonical and a re-commit can't
+        move it. Raw facts only; validity (lead blocks, one-recruiter-per-
+        recruit, breadth cap, pair no-copy) is re-derived at replay time."""
+        recruiter, recruit = c["hotkey"], c["recruit"]
+        if recruiter == recruit:
+            print(f"  ✗ referral rejected {recruiter[:8]}…: self-referral")
+            return
+        cur = self.db.execute(
+            "INSERT OR IGNORE INTO referrals (recruiter_hk, recruit_hk, "
+            "commit_block, first_seen_block, observed_unix) VALUES (?,?,?,?,?)",
+            (recruiter, recruit, int(c.get("commit_block") or block), block, now))
+        if cur.rowcount:
+            print(f"  ⊕ referral {recruiter[:8]}… → {recruit[:8]}… "
+                  f"commit_block={c.get('commit_block') or block}")
+
+    def refresh_referrals(self, mg):
+        """Fill recruit_reg_block ONCE at the recruit's first metagraph sighting.
+
+        BlockAtRegistration is per-UID-slot and latest-wins: re-reading it live
+        would let an already-registered recruit deregister and re-register to
+        launder a late referral into "registered after the commit". The first
+        sighting is journaled and never updated — if the recruit was already
+        registered when the referral appeared, the recorded block is < the
+        referral's commit_block and the claim is permanently invalid at replay.
+        """
+        pend = self.db.execute(
+            "SELECT recruiter_hk, recruit_hk FROM referrals "
+            "WHERE recruit_reg_block IS NULL").fetchall()
+        if not pend:
+            return
+        uid_by_hk = {hk: i for i, hk in enumerate(mg.hotkeys)}
+        for recruiter, recruit in pend:
+            uid = uid_by_hk.get(recruit)
+            if uid is None:
+                continue                       # not registered yet — keep waiting
+            try:
+                reg_block = int(mg.block_at_registration[uid])
+            except (AttributeError, IndexError, TypeError, ValueError):
+                continue                       # metagraph without the field — retry next cycle
+            self.db.execute(
+                "UPDATE referrals SET recruit_reg_block=? WHERE recruiter_hk=? "
+                "AND recruit_hk=? AND recruit_reg_block IS NULL",
+                (reg_block, recruiter, recruit))
+            print(f"  ⊕ referral recruit sighted {recruit[:8]}… reg_block={reg_block}")
+        self.db.commit()
+
     def ingest(self):
         block = self.ch.current_block()
         # Latest on-chain snapshot (one commitment per hotkey — latest wins).
@@ -161,7 +219,10 @@ class Validator:
             self._last_scanned_block = block
         now = time.time()
         for c in sources:
-            self._journal_commit(c, block, now)
+            if c.get("kind") == "referral":
+                self._journal_referral(c, block, now)
+            else:
+                self._journal_commit(c, block, now)
         self.db.commit()
 
         # Fetch missing ciphertext blobs from R2_PUBLIC_BASE (the trust
@@ -406,6 +467,7 @@ class Validator:
         self.refresh_eliminations()
         mg = self.ch.metagraph()
         uid_by_hotkey = {hk: i for i, hk in enumerate(mg.hotkeys)}
+        self.refresh_referrals(mg)
 
         # A hotkey with no validator permit can commit weights, but the chain
         # never reveals them — they pile up until `TooManyUnrevealedCommits` and
@@ -502,7 +564,14 @@ class Validator:
         meta = {hk: {"first_seen_unix": fs, "strikes": int(sk or 0)}
                 for hk, fs, sk in self.db.execute(
                     "SELECT hotkey, first_seen_unix, strikes FROM hotkey_meta")}
-        w = replay.weights_from_journal(sig_rows, meta, uid_by_hotkey, now)
+        referral_rows = [
+            {"recruiter_hk": r, "recruit_hk": c, "commit_block": cb,
+             "recruit_reg_block": rb}
+            for r, c, cb, rb in self.db.execute(
+                "SELECT recruiter_hk, recruit_hk, commit_block, recruit_reg_block "
+                "FROM referrals")]
+        w = replay.weights_from_journal(sig_rows, meta, uid_by_hotkey, now,
+                                        referrals=referral_rows)
         uids, vals = list(w.keys()), list(w.values())
         # Every permitted signer commits the SAME vector this cycle. Advance the
         # per-tempo throttle only when at least one commit actually landed.

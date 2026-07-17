@@ -317,6 +317,48 @@ COPY_EXCLUDE_BOTH_DIR = bool(int(os.getenv("SN89_COPY_EXCLUDE_BOTH_DIR", "1")))
                                     # a hotkey holding LONG+SHORT on one pair at
                                     # once is never an eligible leader (griefer tell)
 
+# ── Referral / recruiter incentive (CONSENSUS) ────────────────────────────────
+# An existing miner (the RECRUITER) vouches for a new hotkey (the RECRUIT) by
+# committing `sn89ref:1:<recruit_ss58>` on-chain BEFORE the recruit registers.
+# The commit's inclusion block is the proof time: the referral is valid only if
+# the recruit's registration block is at least REFERRAL_MIN_LEAD_BLOCKS later
+# (defeats mempool front-running of a pending registration). While BOTH sides
+# are actively earning (decayed qualified-win tally > 0), the recruit's tally is
+# boosted by REFERRAL_RECRUIT_BONUS and the recruiter's by
+# REFERRAL_RECRUITER_BONUS × each recruit's tally (capped in total at
+# REFERRAL_MAX_X × the recruiter's own tally). If either side stops earning,
+# both bonuses lapse that cycle and resume on re-earn. Bonuses redistribute
+# WITHIN the miner pool (pre-MINER_EMISSION_CAP) — nothing new is minted.
+# STRICT pair no-copy: shadowing inside the pair suspends the pair's bonus for
+# REFERRAL_PAIR_TTL_S after the last copy event (base emission is untouched —
+# the global §7.5 machinery is separate and unchanged).
+# Env overrides are for testnet A/B only — the consensus default lives in git.
+REFERRAL_ENABLED = bool(int(os.getenv("SN89_REFERRAL_ENABLED", "0")))  # ship dark
+REFERRAL_RECRUIT_BONUS = float(os.getenv("SN89_REFERRAL_RECRUIT_BONUS", "0.10"))
+REFERRAL_RECRUITER_BONUS = float(os.getenv("SN89_REFERRAL_RECRUITER_BONUS", "0.10"))
+REFERRAL_MAX_X = float(os.getenv("SN89_REFERRAL_MAX_X", "1.0"))
+                                    # recruiter's TOTAL referral bonus ≤ this × own tally
+                                    # (referrals can at most double a recruiter's emission)
+REFERRAL_MIN_LEAD_BLOCKS = int(os.getenv("SN89_REFERRAL_MIN_LEAD_BLOCKS", "10"))
+                                    # ≈2 min at 12s blocks — far beyond mempool residence
+REFERRAL_MAX_RECRUITS = int(os.getenv("SN89_REFERRAL_MAX_RECRUITS", "10"))
+                                    # per recruiter; earliest commit_blocks win
+# Pair no-copy gate — deliberately STRICTER than the global copy detector
+# (the pair opted into scrutiny by pairing up; a false positive only pauses a
+# bonus, never touches base emission). Two honest same-strategy traders who
+# co-fire on news should simply not refer each other.
+REFERRAL_PAIR_SHARP_EPISODES = int(os.getenv("SN89_REFERRAL_PAIR_SHARP_EPISODES", "2"))
+                                    # sharp (≤COPY_SHARP_LAG_S) follow episodes either
+                                    # direction within the pair ⇒ suspend
+REFERRAL_PAIR_OVERLAP_EPISODES = int(os.getenv("SN89_REFERRAL_PAIR_OVERLAP_EPISODES", "3"))
+                                    # live-overlap (mark_copies) episodes either
+                                    # direction within the pair ⇒ suspend
+REFERRAL_PAIR_WINDOW_S = int(os.getenv("SN89_REFERRAL_PAIR_WINDOW_S", str(30 * 24 * 3600)))
+                                    # trailing window over which pair episodes count
+REFERRAL_PAIR_TTL_S = int(os.getenv("SN89_REFERRAL_PAIR_TTL_S", str(30 * 24 * 3600)))
+                                    # bonus stays suspended until this long after the
+                                    # LAST pair-copy event, then self-clears
+
 # ── Asset universe / bands (CONSENSUS — vendored from the live IQ Signals board)
 _BANDS_PATH = Path(os.getenv(
     "SN89_BANDS_PATH",

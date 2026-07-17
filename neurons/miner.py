@@ -321,6 +321,59 @@ def cmd_register_x(args) -> int:
     return 1
 
 
+def cmd_refer(args) -> int:
+    """Commit a referral claim for a NEW hotkey (§ referral incentive).
+
+    Run this BEFORE the recruit registers on netuid 89 — the claim is only
+    valid if your commitment lands at least REFERRAL_MIN_LEAD_BLOCKS (~2 min)
+    before the recruit's registration block. Sequencing guards (CommitmentOf is
+    one latest-wins slot per hotkey, and the validator polls every ~30s):
+      * refuses if YOUR last commitment landed < ~90s ago (it may not have been
+        observed yet — a referral now could shadow it);
+      * hold your next signal ~90s after this, or it could shadow the referral;
+      * register the recruit only AFTER the referral shows in the public
+        checkpoint (republished every ~5 min) — that is your confirmation.
+    """
+    w = _wallet(args)
+    hotkey = w.hotkey.ss58_address
+    recruit = (args.recruit or "").strip()
+    if chain.decode_referral(chain.encode_referral(recruit)) is None:
+        print(f"INVALID recruit address '{recruit}' — not a checksum-valid ss58 "
+              f"hotkey.", file=sys.stderr)
+        return 1
+    if recruit == hotkey:
+        print("INVALID: you cannot refer your own hotkey.", file=sys.stderr)
+        return 1
+    ch = chain.Chain()
+    if ch.uid_of(recruit) is not None:
+        print(f"REFUSING: {recruit} is ALREADY registered on netuid "
+              f"{config.NETUID} — a referral must be committed BEFORE the "
+              f"recruit registers, so this claim would be permanently invalid.",
+              file=sys.stderr)
+        return 1
+    cur_block = ch.current_block()
+    mine = ch.read_all_commitments_with_block().get(hotkey)
+    guard_blocks = 8    # ~96s at 12s blocks ≈ 3 validator polls
+    if mine and cur_block - int(mine.get("commit_block") or 0) < guard_blocks:
+        wait_s = (guard_blocks - (cur_block - int(mine["commit_block"]))) * 12
+        print(f"REFUSING: your last commitment landed {cur_block - mine['commit_block']} "
+              f"block(s) ago and may not be observed yet — a referral now could "
+              f"shadow it. Retry in ~{wait_s}s.", file=sys.stderr)
+        return 1
+    ok = ch.commit_referral(w, recruit)
+    print(json.dumps({"ok": bool(ok), "recruiter": hotkey, "recruit": recruit}, indent=2))
+    if ok:
+        print("\nNEXT STEPS:\n"
+              "  1. Hold your next SIGNAL commit for ~90s (it could shadow this "
+              "referral before the validator observes it).\n"
+              "  2. Wait until this referral appears in the public checkpoint "
+              "(republished every ~5 min) — that confirms it was journaled.\n"
+              "  3. ONLY THEN register the recruit hotkey on netuid 89.\n"
+              "The bonus starts once BOTH hotkeys are earning; strict no-copy "
+              "applies inside the pair.", file=sys.stderr)
+    return 0 if ok else 1
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description="SN89 Signals miner")
     p.add_argument("--wallet.name", dest="wallet_name", default="default")
@@ -355,6 +408,12 @@ def main() -> int:
                     help="override the registration endpoint (default SN89_REGISTER_URL "
                          "or the IQ endpoint)")
     px.set_defaults(fn=cmd_register_x)
+
+    pr = sub.add_parser("refer",
+                        help="commit a referral claim for a NEW hotkey BEFORE it "
+                             "registers (both earn a bonus once both are earning)")
+    pr.add_argument("recruit", help="the recruit's hotkey ss58 (NOT yet registered)")
+    pr.set_defaults(fn=cmd_refer)
 
     args = p.parse_args()
     return args.fn(args)

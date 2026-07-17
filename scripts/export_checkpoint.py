@@ -44,12 +44,25 @@ def main():
         for hk, fs, sk in con.execute(
             "SELECT hotkey, first_seen_unix, strikes FROM hotkey_meta")
     }
+    # Referral claims (§ referral) — raw journaled facts; the auditor re-derives
+    # validity. Old auditors ignore unknown keys, so exporting these is fully
+    # backward-compatible while REFERRAL_ENABLED=0 (the dark-ship stage).
+    try:
+        referrals = [
+            {"recruiter_hk": r, "recruit_hk": c, "commit_block": cb,
+             "recruit_reg_block": rb}
+            for r, c, cb, rb in con.execute(
+                "SELECT recruiter_hk, recruit_hk, commit_block, recruit_reg_block "
+                "FROM referrals")
+        ]
+    except sqlite3.OperationalError:   # DB predates the referrals table
+        referrals = []
     con.close()
 
     cp_out = {
         "schema": 1, "netuid": config.NETUID, "network": config.NETWORK,
         "now_unix": now, "generated_at_ms": int(now * 1000),
-        "signals": signals, "meta": meta,
+        "signals": signals, "meta": meta, "referrals": referrals,
     }
 
     if "--chain" in args:
@@ -74,8 +87,8 @@ def main():
     with open(out, "w") as fh:
         json.dump(cp_out, fh)
     dec = sum(1 for s in signals if s["status"] in ("won", "lost"))
-    print(f"wrote {out}: {len(signals)} signals ({dec} decisive), {len(meta)} hotkeys "
-          f"(now_unix={now:.0f})")
+    print(f"wrote {out}: {len(signals)} signals ({dec} decisive), {len(meta)} hotkeys, "
+          f"{len(referrals)} referrals (now_unix={now:.0f})")
 
 
 if __name__ == "__main__":

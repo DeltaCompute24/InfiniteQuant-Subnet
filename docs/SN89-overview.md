@@ -135,6 +135,35 @@ Three ways to submit (all commit with **your** local hotkey — keys never leave
 forge your blob, and pins it at submit (no forfeit risk). Or host your own S3/R2 bucket. New
 hotkeys get 8 days of warmup (dust weight) to build a record before emissions start.
 
+### Referral / recruiter incentive
+
+An existing miner (the **recruiter**) can vouch for a **new** hotkey (the **recruit**) and both
+earn a bonus once the recruit earns:
+
+```bash
+python neurons/miner.py --wallet.name mywallet --wallet.hotkey miner refer <recruit_ss58>
+# … wait until the referral shows in the public checkpoint (~5 min), THEN register the recruit
+```
+
+Rules (all enforced consensus-side; `REFERRAL_*` in `sn89_signals/config.py`):
+
+- **Commit BEFORE registration.** The `sn89ref:1:<recruit_ss58>` commitment must land at least
+  `REFERRAL_MIN_LEAD_BLOCKS` (~2 min) before the recruit's registration block, or the claim is
+  permanently invalid. One recruit belongs to the earliest claimant; a recruiter keeps at most
+  `REFERRAL_MAX_RECRUITS` recruits.
+- **Both must be earning.** While both hotkeys have a positive qualified-win tally, the recruit's
+  emission tally is boosted `+10%` and the recruiter gains `+10%` of each recruit's tally (total
+  referral bonus capped at `100%` of the recruiter's own tally). If either side stops earning,
+  both bonuses lapse and resume on re-earn. Bonuses redistribute inside the miner pool — nothing
+  new is minted.
+- **Strict no-copy inside the pair.** Shadowing between the two hotkeys (a stricter, pair-scoped
+  version of the §7.5 detector: 2 sharp episodes or 3 live-overlap episodes, either direction)
+  suspends the pair's bonus until 30 days after the last copy event. Base emission is untouched.
+- **Sequencing.** `CommitmentOf` is one latest-wins slot per hotkey: don't commit a referral
+  within ~90s of your last signal (either could go unobserved), hold your next signal ~90s, and
+  register the recruit only after the referral appears in the checkpoint. The `refer` subcommand
+  enforces the first guard and refuses already-registered recruits.
+
 ### Validators
 
 Two prerequisites: a paid **Massive/Polygon** plan (Currencies + Crypto, 1-second + 1-minute

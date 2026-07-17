@@ -348,6 +348,119 @@ def flagged_copier_hotkeys(reports: dict[str, list[CopyReport]]) -> set[str]:
     return {f for f, rs in reports.items() if any(r.flagged for r in rs)}
 
 
+# ── referral / recruiter incentive (§ referral) ───────────────────────────────
+def valid_referral_pairs(referrals: list[dict]) -> list[tuple[str, str]]:
+    """Deterministic validity filter over journaled referral claims.
+
+    referrals: [{recruiter_hk, recruit_hk, commit_block, recruit_reg_block}].
+    A claim is valid iff the recruit's FIRST-OBSERVED registration block is at
+    least REFERRAL_MIN_LEAD_BLOCKS after the referral's inclusion block — the
+    chain-anchored "committed before the recruit registered" proof. The lead
+    margin defeats mempool front-running (sniping a stranger's pending
+    registration extrinsic); the first-sighting reg block (journaled once,
+    never re-read live — see validator.refresh_referrals) defeats
+    deregister/re-register laundering of an already-registered recruit.
+
+    One recruit belongs to at most ONE recruiter (earliest commit_block wins,
+    recruiter hotkey as the same-block tiebreak), and a recruiter keeps at most
+    its REFERRAL_MAX_RECRUITS earliest recruits. Pure/deterministic; the pair
+    no-copy gate is applied separately (it needs the graded rows).
+    """
+    claims = []
+    for r in referrals or []:
+        recruiter, recruit = r.get("recruiter_hk"), r.get("recruit_hk")
+        cb, rb = r.get("commit_block"), r.get("recruit_reg_block")
+        if not recruiter or not recruit or recruiter == recruit:
+            continue
+        if cb is None or rb is None:
+            continue                       # recruit never registered (yet)
+        if int(cb) + config.REFERRAL_MIN_LEAD_BLOCKS > int(rb):
+            continue                       # too late: registered first / front-run
+        claims.append((int(cb), recruiter, recruit))
+
+    # one recruit, one recruiter — earliest claim wins
+    by_recruit: dict[str, tuple[int, str]] = {}
+    for cb, recruiter, recruit in sorted(claims, key=lambda c: (c[0], c[1])):
+        by_recruit.setdefault(recruit, (cb, recruiter))
+
+    # per-recruiter breadth cap — earliest recruits win
+    by_recruiter: dict[str, list[tuple[int, str]]] = defaultdict(list)
+    for recruit, (cb, recruiter) in by_recruit.items():
+        by_recruiter[recruiter].append((cb, recruit))
+    pairs: list[tuple[str, str]] = []
+    for recruiter in sorted(by_recruiter):
+        kept = sorted(by_recruiter[recruiter])[:config.REFERRAL_MAX_RECRUITS]
+        pairs.extend((recruiter, recruit) for _, recruit in kept)
+    return sorted(pairs)
+
+
+def referral_pair_suspended_until(pair_rows: list[GradedRow], hk_a: str, hk_b: str,
+                                  now_unix: float) -> float | None:
+    """Pair-scoped no-copy gate: the unix time until which the (hk_a, hk_b)
+    referral bonus is SUSPENDED, or None if it isn't. Pure/deterministic.
+
+    Deliberately far stricter than the global §7.5 detector — the pair opted
+    into scrutiny by pairing up, and a trip here only pauses the bonus (base
+    emission is untouched, no public flag). Two triggers, either direction:
+
+      * SHARP shadowing — same (pair, direction) commits within
+        COPY_SHARP_LAG_S, collapsed into decisions by _episodes();
+        ≥ REFERRAL_PAIR_SHARP_EPISODES trips.
+      * LIVE-OVERLAP follows — mark_copies restricted to the pair (leader
+        eligibility bypassed: both parties consented), episode-collapsed;
+        ≥ REFERRAL_PAIR_OVERLAP_EPISODES trips.
+
+    Events are counted over the trailing REFERRAL_PAIR_WINDOW_S; a trip
+    suspends until REFERRAL_PAIR_TTL_S after the LAST event, then self-clears
+    (same philosophy as COPY_PENALTY_TTL_S — a warning, not a scarlet letter).
+    """
+    cutoff = now_unix - config.REFERRAL_PAIR_WINDOW_S
+    pair_hk = {hk_a, hk_b}
+    rows = [r for r in pair_rows
+            if r.hotkey in pair_hk and r.status != "void" and r.t0_unix >= cutoff]
+    if not rows:
+        return None
+    rows.sort(key=lambda r: (r.t0_unix, r.hotkey))
+
+    suspended_until: float | None = None
+
+    # sharp shadowing, per direction-of-follow
+    groups: dict[tuple[str, str], list[GradedRow]] = defaultdict(list)
+    for r in rows:
+        groups[(r.trade_pair, r.direction)].append(r)
+    sharp_ts: dict[str, list[float]] = defaultdict(list)   # follower → event t0s
+    for evs in groups.values():
+        for i, f in enumerate(evs):
+            leader = next((evs[j] for j in range(i - 1, -1, -1)
+                           if evs[j].hotkey != f.hotkey), None)
+            if leader is None:
+                continue
+            if 0 <= f.t0_unix - leader.t0_unix <= config.COPY_SHARP_LAG_S:
+                sharp_ts[f.hotkey].append(f.t0_unix)
+    for follower, ts in sharp_ts.items():
+        if _episodes(ts, config.COPY_EPISODE_S) >= config.REFERRAL_PAIR_SHARP_EPISODES:
+            until = max(ts) + config.REFERRAL_PAIR_TTL_S
+            suspended_until = max(suspended_until or 0.0, until)
+
+    # live-overlap follows (fresh copies of the rows — mark_copies mutates is_copy)
+    marked = mark_copies([GradedRow(hotkey=r.hotkey, trade_pair=r.trade_pair,
+                                    direction=r.direction, t0_unix=r.t0_unix,
+                                    status=r.status, horizon_h=r.horizon_h)
+                          for r in rows], eligible_leaders=pair_hk)
+    overlap_ts: dict[str, list[float]] = defaultdict(list)
+    for r in marked:
+        if r.is_copy:
+            overlap_ts[r.hotkey].append(r.t0_unix)
+    for follower, ts in overlap_ts.items():
+        if _episodes(ts, config.COPY_EPISODE_S) >= config.REFERRAL_PAIR_OVERLAP_EPISODES:
+            until = max(ts) + config.REFERRAL_PAIR_TTL_S
+            suspended_until = max(suspended_until or 0.0, until)
+
+    if suspended_until is not None and now_unix < suspended_until:
+        return suspended_until
+    return None
+
+
 # ── weights (§7.2 CONFIRMED: gate → tier-weighted pro-rata wins, trailing 30 days) ─
 @dataclass
 class MinerState:
@@ -411,7 +524,8 @@ def score_inputs(decisive: list[tuple[float, bool, bool]], first_seen_unix: floa
 
 def compute_weights(states: list[MinerState], now_unix: float,
                     burn_uid: int = config.BURN_UID,
-                    excluded_uids: set[int] | None = None) -> dict[int, float]:
+                    excluded_uids: set[int] | None = None,
+                    referral_pairs: list[tuple[str, str]] | None = None) -> dict[int, float]:
     """{uid: normalized_weight}. Immune miners get the dust floor; the pool is
     split across miners by a time-decayed, tier-weighted tally of their QUALIFIED
     wins (a relative competition of recent qualified wins); a probation dust floor
@@ -429,6 +543,17 @@ def compute_weights(states: list[MinerState], now_unix: float,
     excluded_uids (flagged copiers, §7.5) earn nothing — neither the immunity
     dust floor nor a pro-rata share — for as long as they stay flagged. Their
     forfeited budget burns; the exclusion is reversible (recomputed each cycle).
+
+    referral_pairs (§ referral): VALID, UNSUSPENDED (recruiter, recruit) hotkey
+    pairs — the caller (replay.weights_from_journal) has already applied
+    valid_referral_pairs + referral_pair_suspended_until. While BOTH sides have
+    a positive base tally and neither is excluded, the recruit's effective tally
+    gains REFERRAL_RECRUIT_BONUS × its own base and the recruiter's gains
+    REFERRAL_RECRUITER_BONUS × the recruit's base (total capped at
+    REFERRAL_MAX_X × the recruiter's own base). Bonuses are computed from BASE
+    tallies only — never from boosted ones — so A→B→C referral chains cannot
+    compound. Pure share-shifting within the miner pool: the pro-rata split
+    below normalizes over boosted tallies, and the emission cap is unchanged.
 
     Eliminated hotkeys must be filtered out by the caller before this — they get
     nothing, not dust.
@@ -478,13 +603,36 @@ def compute_weights(states: list[MinerState], now_unix: float,
             if 0.0 <= now_unix - anchor < config.PROBATION_S:
                 weights[s.uid] = config.DUST_WEIGHT
 
+    # ── referral bonus (§ referral) — from BASE tallies only, never boosted ones ─
+    # (base-not-effective is what stops an A→B→C chain from compounding.)
+    base = {s.hotkey: qtally(s) for s in states}
+    bonus: dict[str, float] = defaultdict(float)
+    if referral_pairs and config.REFERRAL_ENABLED:
+        by_hk = {s.hotkey: s for s in states}
+        per_recruiter: dict[str, float] = defaultdict(float)
+        for recruiter, recruit in referral_pairs:
+            r, c = by_hk.get(recruiter), by_hk.get(recruit)
+            if r is None or c is None:          # deregistered/eliminated/struck → lapses
+                continue
+            if r.uid in excluded_uids or c.uid in excluded_uids:
+                continue                        # globally copy-zeroed → lapses
+            if base[recruiter] <= 0 or base[recruit] <= 0:
+                continue                        # mutual-conditional: both must be earning
+            bonus[recruit] += config.REFERRAL_RECRUIT_BONUS * base[recruit]
+            per_recruiter[recruiter] += config.REFERRAL_RECRUITER_BONUS * base[recruit]
+        for hk, b in per_recruiter.items():
+            bonus[hk] += min(b, config.REFERRAL_MAX_X * base[hk])
+
+    def eff(s: MinerState) -> float:
+        return base[s.hotkey] + bonus.get(s.hotkey, 0.0)
+
     # ── distribute the pool by decayed qualified-win tally (relative share) ──────
-    earners = [s for s in states if s.uid not in excluded_uids and qtally(s) > 0]
+    earners = [s for s in states if s.uid not in excluded_uids and eff(s) > 0]
     budget = 1.0 - sum(weights.values())
-    total_q = sum(qtally(s) for s in earners)
+    total_q = sum(eff(s) for s in earners)
     if total_q > 0 and budget > 0:
         for s in earners:
-            weights[s.uid] = weights.get(s.uid, 0.0) + budget * (qtally(s) / total_q)
+            weights[s.uid] = weights.get(s.uid, 0.0) + budget * (eff(s) / total_q)
     else:
         weights[burn_uid] = weights.get(burn_uid, 0.0) + max(budget, 0.0)
 

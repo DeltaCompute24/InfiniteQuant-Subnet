@@ -26,6 +26,15 @@ _PREFIX = "sn89"
 _V = 1
 _RE = re.compile(rf"^{_PREFIX}:(\d+):([0-9a-f]{{64}}):(\d+):([0-9a-f]{{16}})$")
 
+# Referral commitment (§ referral incentive): the RECRUITER's hotkey commits
+# "sn89ref:1:<recruit_ss58>" BEFORE the recruit registers. ~60 raw bytes —
+# comfortably inside the 128-byte commitment budget. The inclusion block is the
+# chain-anchored proof time; scoring.valid_referral_pairs enforces
+# commit_block + REFERRAL_MIN_LEAD_BLOCKS <= recruit registration block.
+_REF_PREFIX = "sn89ref"
+_REF_V = 1
+_REF_RE = re.compile(rf"^{_REF_PREFIX}:(\d+):(5[1-9A-HJ-NP-Za-km-z]{{46,50}})$")
+
 
 def url_tag(url: str) -> str:
     return hashlib.sha256(url.encode()).hexdigest()[:16]
@@ -53,6 +62,46 @@ def decode_commitment(data: str) -> dict | None:
     if not 0 < rnd < 2**63:
         return None
     return {"commit": commit_hex, "round": rnd, "url_tag": tag}
+
+
+def encode_referral(recruit_ss58: str) -> str:
+    return f"{_REF_PREFIX}:{_REF_V}:{recruit_ss58}"
+
+
+def decode_referral(data: str) -> dict | None:
+    """Decode an sn89ref referral commitment, or None. The recruit address must
+    be a checksum-valid ss58 AccountId (deterministic — every validator accepts
+    or rejects the identical payload); a typo'd address is dropped here rather
+    than journaled as a permanently-invalid referral."""
+    m = _REF_RE.match((data or "").strip())
+    if not m:
+        return None
+    v, recruit = m.groups()
+    if int(v) != _REF_V:
+        return None
+    try:
+        from scalecodec.utils.ss58 import ss58_decode
+        ss58_decode(recruit)
+    except Exception:  # noqa: BLE001 — bad checksum / not an AccountId
+        return None
+    return {"recruit": recruit}
+
+
+def _decode_any(data: str | None) -> dict | None:
+    """Decode a commitment payload of either kind. Signal entries keep their
+    exact legacy shape plus kind="signal" (existing consumers ignore unknown
+    keys); referral entries carry {kind:"referral", recruit}."""
+    if not data:
+        return None
+    dec = decode_commitment(data)
+    if dec:
+        dec["kind"] = "signal"
+        return dec
+    ref = decode_referral(data)
+    if ref:
+        ref["kind"] = "referral"
+        return ref
+    return None
 
 
 def _extract_raw_str(info) -> str | None:
@@ -174,6 +223,20 @@ class Chain:
         return self.st.set_commitment(wallet=wallet, netuid=self.netuid, data=data,
                                       wait_for_finalization=False)
 
+    def commit_referral(self, wallet: "bt.Wallet", recruit_ss58: str) -> bool:
+        """Commit a referral claim for `recruit_ss58`, signed by the RECRUITER's
+        hotkey (this wallet). MUST be placed before the recruit registers —
+        scoring requires commit_block + REFERRAL_MIN_LEAD_BLOCKS <= reg block.
+
+        ⚠ CommitmentOf is one latest-wins slot per hotkey and the validator
+        polls every POLL_INTERVAL_S: don't call this within ~90s of this
+        hotkey's last signal commit (either commitment could go unobserved),
+        and hold the next signal commit ~90s. See neurons/miner.py `refer`.
+        """
+        data = encode_referral(recruit_ss58)
+        return self.st.set_commitment(wallet=wallet, netuid=self.netuid, data=data,
+                                      wait_for_finalization=False)
+
     # ── validator side ───────────────────────────────────────────────────────
     def read_all_commitments(self, block: int | None = None) -> dict[str, dict]:
         """{hotkey: decoded_commitment} for every hotkey with a valid sn89 commitment.
@@ -213,7 +276,7 @@ class Chain:
             if not isinstance(v, dict):
                 continue
             data = _extract_raw_str(v.get("info"))
-            dec = decode_commitment(data) if data else None
+            dec = _decode_any(data)
             if not dec:
                 continue
             hk = _to_ss58(hotkey)
@@ -272,7 +335,7 @@ class Chain:
                     if not isinstance(v, dict):
                         continue
                     data = _extract_raw_str(v.get("info"))
-                    dec = decode_commitment(data) if data else None
+                    dec = _decode_any(data)
                     if not dec:
                         continue
                     dec["hotkey"] = _to_ss58(acct)
@@ -379,6 +442,25 @@ class Chain:
             data = _extract_raw_str(v.get("info"))
             dec = decode_commitment(data) if data else None
             return dec.get("commit") if dec else None
+        except Exception:  # noqa: BLE001 — audit helper, never raise
+            return None
+
+    def referral_at_block(self, recruiter_ss58: str, block: int) -> "str | None":
+        """The recruit ss58 the recruiter's CommitmentOf held AT `block`, or None
+        if unreadable / not a referral payload. Audit helper mirroring
+        commitment_at_block — lets --referral-anchors confirm each journaled
+        referral is anchored to a real on-chain sn89ref commitment."""
+        try:
+            bh = self.st.get_block_hash(block)
+            reg = self.st.substrate.query(
+                "Commitments", "CommitmentOf", [self.netuid, recruiter_ss58],
+                block_hash=bh)
+            v = reg.value if hasattr(reg, "value") else reg
+            if not isinstance(v, dict):
+                return None
+            data = _extract_raw_str(v.get("info"))
+            dec = decode_referral(data) if data else None
+            return dec.get("recruit") if dec else None
         except Exception:  # noqa: BLE001 — audit helper, never raise
             return None
 

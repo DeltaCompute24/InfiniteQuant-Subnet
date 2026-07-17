@@ -72,6 +72,15 @@ Notes
 - `first_seen_unix` (immunity clock) is **not** in the file — it is the block time of a
   hotkey's first on-chain commitment, which the follower reads from chain.
 - Delta form: `GET …?since_block=N` returns only `signals[]` whose `commit_block > N`.
+- `referrals[]` (§ referral incentive): raw journaled claims
+  `{recruiter_hk, recruit_hk, commit_block, recruit_reg_block}`. `commit_block` is the
+  on-chain inclusion block of the recruiter's `sn89ref:1:<recruit_ss58>` commitment
+  (anchor-checkable via `audit_journal.py --referral-anchors`); `recruit_reg_block` is
+  the recruit's registration block at the validator's FIRST metagraph sighting (null
+  until the recruit registers). Validity, the one-recruiter-per-recruit rule, the
+  breadth cap, and the pair no-copy suspension are all **re-derived** by
+  `replay.weights_from_journal` — never trusted from the file. Inert while
+  `REFERRAL_ENABLED=0`; old auditors ignore the key.
 
 ---
 

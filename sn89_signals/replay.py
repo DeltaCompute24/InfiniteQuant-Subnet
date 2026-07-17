@@ -25,6 +25,7 @@ def weights_from_journal(
     meta: dict[str, dict],
     uid_by_hotkey: dict[str, int],
     now: float,
+    referrals: list[dict] | None = None,
 ) -> dict[int, float]:
     """Re-derive {uid: weight} from a published journal, identically to the
     validator. PURE.
@@ -35,6 +36,11 @@ def weights_from_journal(
     meta:    {hotkey: {first_seen_unix, strikes}}. Eliminations are NOT taken from
              here — they are re-derived from the decisive history below.
     uid_by_hotkey: hotkey → metagraph uid (the auditor reads the metagraph).
+    referrals: journaled referral claims [{recruiter_hk, recruit_hk, commit_block,
+             recruit_reg_block}] (§ referral). Validity and the pair no-copy gate
+             are RE-DERIVED here (never trusted from the journal); inert unless
+             config.REFERRAL_ENABLED. Default None → byte-identical to the
+             pre-referral output.
     """
     # ── re-derive eliminations from the decisive history (don't trust the journal) ─
     decisive_by_hk: dict[str, list[tuple[float, bool, bool]]] = {}
@@ -111,4 +117,26 @@ def weights_from_journal(
             hotkey=hk, uid=uid, first_seen_unix=m["first_seen_unix"],
             rep_wins=rep_won, rep_decisive=rep_dec, trailing_wins=tw, qwins=qwins))
 
-    return scoring.compute_weights(states, now, excluded_uids=excluded_uids)
+    # ── referral pairs (§ referral): validity + pair no-copy, re-derived ─────────
+    referral_pairs = None
+    if config.REFERRAL_ENABLED and referrals:
+        cand = scoring.valid_referral_pairs(referrals)
+        ref_hks = {hk for pair in cand for hk in pair}
+        pcut = now - config.REFERRAL_PAIR_WINDOW_S
+        ref_rows: list[scoring.GradedRow] = []
+        for s in signals:
+            if (s["hotkey"] not in ref_hks or s["status"] == "void"
+                    or not s.get("plaintext") or s["t0_unix"] < pcut):
+                continue
+            sig = Signal.from_bytes(s["plaintext"].encode())
+            ref_rows.append(scoring.GradedRow(
+                hotkey=s["hotkey"], trade_pair=sig.trade_pair, direction=sig.direction,
+                t0_unix=s["t0_unix"], status=s["status"],
+                horizon_h=config.horizon_h_for(sig.trade_pair, s["t0_unix"])))
+        referral_pairs = [
+            (recruiter, recruit) for recruiter, recruit in cand
+            if scoring.referral_pair_suspended_until(
+                ref_rows, recruiter, recruit, now) is None]
+
+    return scoring.compute_weights(states, now, excluded_uids=excluded_uids,
+                                   referral_pairs=referral_pairs)
