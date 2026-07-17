@@ -593,7 +593,8 @@ class TestValidity:
         assert rows[1].status == "ok"
 
     def test_no_min_spacing(self):
-        # the spacing gate was removed — back-to-back signals are accepted.
+        # ERA 1 (flat 6/day, no gap — small t0s resolve to the first
+        # SUBMISSION_RULES_HISTORY entry): back-to-back signals are accepted.
         rows = scoring.apply_validity_filters([
             _row("A", "BTCUSD", "LONG", 0),
             _row("A", "XAUUSD", "LONG", 60),                 # 1 min later — still ok
@@ -601,8 +602,8 @@ class TestValidity:
         assert [r.status for r in rows] == ["ok", "ok"]
 
     def test_daily_quota(self):
-        # up to MAX_SIGNALS_PER_UTC_DAY (6) accepted per hotkey per UTC day;
-        # the 7th in the same day is voided. No spacing required.
+        # ERA 1: up to 6 accepted per hotkey per UTC day; the 7th in the same
+        # day is voided. No spacing required.
         rows = scoring.apply_validity_filters([
             _row("A", "BTCUSD", "LONG", i * 600) for i in range(7)  # 10 min apart
         ])
@@ -610,11 +611,58 @@ class TestValidity:
         assert (rows[6].status, rows[6].void_reason) == ("void", "daily_quota")
 
     def test_quota_resets_next_utc_day(self):
-        # the 7th signal lands on the next UTC day → accepted, not over quota.
+        # ERA 1: the 7th signal lands on the next UTC day → accepted.
         rows = scoring.apply_validity_filters(
             [_row("A", "BTCUSD", "LONG", i * 600) for i in range(6)]
             + [_row("A", "BTCUSD", "LONG", 86_400 + 1)])
         assert all(r.status == "ok" for r in rows)
+
+    # ── ERA 2 — the 2026-07-18T00:00:00Z revert: 3/day + 1h min gap ──────────
+    E2 = 1784332800.0
+
+    def test_era2_min_gap_voids_burst(self):
+        rows = scoring.apply_validity_filters([
+            _row("A", "BTCUSD", "LONG", self.E2),
+            _row("A", "XAUUSD", "LONG", self.E2 + 3599),   # 1s short of the gap
+            _row("A", "ETHUSD", "LONG", self.E2 + 3600),   # exactly 1h from the
+        ])                                                 # last ACCEPTED commit
+        assert rows[0].status == "ok"
+        assert (rows[1].status, rows[1].void_reason) == ("void", "min_spacing")
+        # gap measures from the last ACCEPTED commit (t=E2), not the voided row
+        assert rows[2].status == "ok"
+
+    def test_era2_daily_quota_3(self):
+        rows = scoring.apply_validity_filters([
+            _row("A", "BTCUSD", "LONG", self.E2 + i * 7200) for i in range(4)])
+        assert [r.status for r in rows[:3]] == ["ok"] * 3
+        assert (rows[3].status, rows[3].void_reason) == ("void", "daily_quota")
+
+    def test_era2_gap_is_per_hotkey(self):
+        rows = scoring.apply_validity_filters([
+            _row("A", "BTCUSD", "LONG", self.E2),
+            _row("B", "BTCUSD", "LONG", self.E2 + 60),     # different hotkey — fine
+        ])
+        assert [r.status for r in rows] == ["ok", "ok"]
+
+    def test_era2_long_then_short_same_pair_allowed(self):
+        # self-overlap was deliberately NOT restored: long gold, an hour later
+        # short gold is legal (both may be open at once).
+        rows = scoring.apply_validity_filters([
+            _row("A", "XAUUSD", "LONG", self.E2),
+            _row("A", "XAUUSD", "SHORT", self.E2 + 3600),
+        ])
+        assert [r.status for r in rows] == ["ok", "ok"]
+
+    def test_era_boundary_not_retroactive(self):
+        # rows BEFORE the flip keep era-1 rules (6/day, no gap) even when the
+        # same hotkey's post-flip rows are judged by era 2 — the as-of gate is
+        # what stops grade_revealed's full-journal re-run from rewriting history.
+        pre = [_row("A", "BTCUSD", "LONG", self.E2 - 7200 + i * 60) for i in range(6)]
+        post = [_row("A", "BTCUSD", "LONG", self.E2 + i * 7200) for i in range(4)]
+        rows = scoring.apply_validity_filters(pre + post)
+        assert all(r.status == "ok" for r in rows[:6])       # era 1: burst of 6 fine
+        assert [r.status for r in rows[6:9]] == ["ok"] * 3   # era 2 day: 3 accepted
+        assert (rows[9].status, rows[9].void_reason) == ("void", "daily_quota")
 
     def test_self_overlap_allowed(self):
         # a hotkey may now hold multiple open calls on the same (pair, direction)

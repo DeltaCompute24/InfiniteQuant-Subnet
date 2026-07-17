@@ -59,26 +59,35 @@ def apply_validity_filters(rows: list[GradedRow]) -> list[GradedRow]:
     Voided rows: not graded, don't count toward quotas, no strike.
     """
     rows = sorted(rows, key=lambda r: (r.t0_unix, r.hotkey))
-    per_hotkey_times: dict[str, list[float]] = {}           # daily quota
+    per_hotkey_times: dict[str, list[float]] = {}           # accepted commits
 
     # NOTE: the old 15-min cross-miner (pair, direction) cooldown was retired —
     # multiple miners may now hold the same trade. Repeated shadowing of one
     # hotkey by another is handled out-of-band by detect_copiers() (§7.5), which
     # penalizes the copier's weight rather than voting the signal.
     #
-    # The per-hotkey spacing gate and the self-overlap (one open per
-    # (hotkey, pair, direction)) rule were both removed — a hotkey may fire
-    # signals with no minimum gap and hold multiple open calls on the same
-    # pair/direction. The only submission cap is MAX_SIGNALS_PER_UTC_DAY.
+    # Self-overlap stays allowed — a hotkey may hold multiple open calls on
+    # the same (pair, direction), and long-then-short on one pair is legal.
+    # The per-hotkey limits (daily cap + min gap between ACCEPTED commits) are
+    # AS-OF versioned: each row is judged by the rules in force at its OWN t0
+    # (config.submission_rules_as_of), so the 2026-07-18 revert to 3/day + 1h
+    # never retroactively voids rows accepted under the flat-6/no-gap era —
+    # this function re-runs over the whole journal every grade cycle.
     for r in rows:
         if r.status == "void":
             continue
 
+        cap, gap = config.submission_rules_as_of(r.t0_unix)
         times = per_hotkey_times.setdefault(r.hotkey, [])
 
-        # ≤ MAX_SIGNALS_PER_UTC_DAY per UTC day
+        # ≥ gap since this hotkey's last ACCEPTED commit
+        if gap and times and r.t0_unix - times[-1] < gap:
+            r.status, r.void_reason = "void", "min_spacing"
+            continue
+
+        # ≤ cap per UTC day
         day = int(r.t0_unix // 86_400)
-        if sum(1 for t in times if int(t // 86_400) == day) >= config.MAX_SIGNALS_PER_UTC_DAY:
+        if sum(1 for t in times if int(t // 86_400) == day) >= cap:
             r.status, r.void_reason = "void", "daily_quota"
             continue
 

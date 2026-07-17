@@ -62,10 +62,39 @@ OWNER_PK_HEX = os.getenv(
 )
 
 # ── Submission rules (CONSENSUS — §6.4 of SPEC) ──────────────────────────────
-# No spacing gate and no self-overlap limit: a hotkey may fire up to
-# MAX_SIGNALS_PER_UTC_DAY signals per UTC day with no minimum gap between them
-# and may hold multiple open calls on the same (pair, direction).
-MAX_SIGNALS_PER_UTC_DAY = 6
+# Current-era limits: up to MAX_SIGNALS_PER_UTC_DAY per hotkey per UTC day,
+# with at least MIN_GAP_S between a hotkey's ACCEPTED commits. Self-overlap
+# stays allowed — a hotkey may hold multiple open calls on the same
+# (pair, direction), and long-then-short on one pair is legal.
+#
+# Rules are AS-OF versioned like the bands: apply_validity_filters resolves
+# the (cap, gap) in force at each signal's OWN t0 via submission_rules_as_of(),
+# so a rules change NEVER retroactively voids signals accepted under the old
+# rules. This gate is load-bearing — grade_revealed re-runs the validity
+# filters over the whole journal every cycle, so an ungated tighten would
+# rewrite historical records and break replay parity.
+MAX_SIGNALS_PER_UTC_DAY = 3
+MIN_GAP_S = 3600
+# (effective_from_unix, max_per_utc_day, min_gap_s) — ascending, CONSENSUS.
+# Era 1: the 2026-06-23 loosening (flat 6/day, no gap — 90f412d + c8ee1d4,
+#        meant to let traders re-establish qualification quickly).
+# Era 2: the 2026-07-18T00:00:00Z revert to 3/day + 1h gap (Whit 2026-07-17:
+#        it worked better as it was; conviction over volume).
+SUBMISSION_RULES_HISTORY = (
+    (0, 6, 0),
+    (1784332800, MAX_SIGNALS_PER_UTC_DAY, MIN_GAP_S),   # 2026-07-18T00:00:00Z
+)
+
+
+def submission_rules_as_of(t0_unix: float) -> tuple[int, int]:
+    """(max_per_utc_day, min_gap_s) in force at t0 — mirrors bands_as_of."""
+    cap, gap = SUBMISSION_RULES_HISTORY[0][1], SUBMISSION_RULES_HISTORY[0][2]
+    for eff, c, g in SUBMISSION_RULES_HISTORY:
+        if t0_unix >= eff:
+            cap, gap = c, g
+    return cap, gap
+
+
 MAX_HORIZON_H = 72                  # upper bound / overlap cap
 DEFAULT_HORIZON_H = 72              # fallback for an unknown asset class
 
@@ -272,9 +301,10 @@ COPY_SHARP_MIN_EVENTS = int(os.getenv("SN89_COPY_SHARP_MIN_EVENTS", "6"))
                                     # common cause, not a chat.
 COPY_EPISODE_S = int(os.getenv("SN89_COPY_EPISODE_S", str(30 * 60)))
                                     # Sharp follows of the SAME leader landing inside this
-                                    # window are ONE episode, not N. MAX_SIGNALS_PER_UTC_DAY
-                                    # is 6, so a high-impact print (CPI/PPI/NFP) makes every
-                                    # trader fire its whole daily allowance within minutes:
+                                    # window are ONE episode, not N. The daily cap (6 at the
+                                    # time, 3 since 2026-07-18) means a high-impact print
+                                    # (CPI/PPI/NFP) makes a trader fire much of its daily
+                                    # allowance within minutes:
                                     # on 2026-07-15 12:19-12:25, 8 hotkeys fired 34 signals
                                     # and every pair skewed one way. Counting each pair
                                     # separately turns ONE reaction into 5-6 "independent"

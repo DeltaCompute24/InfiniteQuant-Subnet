@@ -75,8 +75,8 @@ class TestSybilSprayStillMarked:
 class TestEpisodes:
     """Sharp follows inside COPY_EPISODE_S are ONE decision, not N.
 
-    MAX_SIGNALS_PER_UTC_DAY is 6, so a CPI/PPI print makes a trader fire its whole
-    allowance across many pairs within minutes. Counting each pair as separate
+    The daily cap (6 at the time; 3 since 2026-07-18) means a CPI/PPI print makes
+    a trader fire its whole allowance across pairs within minutes. Counting each pair as separate
     evidence is pseudo-replication — it is what put an honest news trader over a
     3-event gate (haroldyeah902 / 5H8Vq6jZ: 3 raw follows, 2 real occasions).
     """

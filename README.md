@@ -45,14 +45,14 @@ recent wins, emissions burn.
 
 | Rule | Value |
 |---|---|
-| Max signals per UTC day | 6 per hotkey |
-| Min spacing | none — fire as fast as you like |
+| Max signals per UTC day | 3 per hotkey (effective 2026-07-18T00:00:00Z; 6 before) |
+| Min spacing | 1 h between a hotkey's accepted commits (effective 2026-07-18T00:00:00Z; none before) |
 | TP / SL | per-asset, symmetric 1:1 — `data/signals-bands.json` |
 | Horizon | crypto 8 h · forex/metals 12 h · equities 48 h |
-| Overlap | unlimited — a hotkey may hold multiple open calls on the same (pair, direction) |
+| Overlap | unlimited — a hotkey may hold multiple open calls on the same (pair, direction); long-then-short on one pair is legal |
 | Unrevealed blob | LOSS 6 h past reveal round |
 
-The only submission cap is 6 signals per hotkey per UTC day. Exception: a blob that fails hash-verification or won't decrypt at reveal is a strike — three strikes in 30 days zeroes the hotkey for 30 days.
+Submission limits are as-of versioned (`config.SUBMISSION_RULES_HISTORY`): each signal is judged by the rules in force at its own commit time, so a rules change never retroactively voids older signals. Exception: a blob that fails hash-verification or won't decrypt at reveal is a strike — three strikes in 30 days zeroes the hotkey for 30 days.
 
 ### Copy penalty
 
