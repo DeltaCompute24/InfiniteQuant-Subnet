@@ -18,10 +18,10 @@ Miners publish **encrypted directional trade calls**; validators grade them on r
 data and pay emissions to miners who prove **consistent, statistically-real edge**.
 
 1. **Commit.** A miner picks a pair + direction, encrypts the call under a [drand](https://drand.love)
-   24-hour timelock, and writes `SHA256(signal)` on-chain via `set_commitment`. The block it
+   2-hour timelock, and writes `SHA256(signal)` on-chain via `set_commitment`. The block it
    lands in **is** the timestamp; entry is anchored to the first 1-second bar at/after that
-   block time + 30 s, so every validator derives the identical entry price.
-2. **Reveal.** After 24 h the timelock opens; validators verify the plaintext matches the
+   block time, so every validator derives the identical entry price.
+2. **Reveal.** After 2 h the timelock opens; validators verify the plaintext matches the
    on-chain hash, then grade on candles — first touch of TP wins, first touch of SL loses, no
    touch by the horizon is a wash.
 3. **Earn.** Emissions go to qualified miners, sized by recent wins × a hit-rate tier.
@@ -49,7 +49,7 @@ function of public inputs that anyone can recompute. Here is exactly what that m
   Each validator independently re-grades from the on-chain entry block, the public price feed,
   and the on-chain bands-in-force — and independently computes weights. The owner's opinion of
   who won is worth nothing.
-- **Cannot read your signal early.** The call is sealed under a 24-hour drand timelock and
+- **Cannot read your signal early.** The call is sealed under a 2-hour drand timelock and
   AEAD-bound to your hotkey. The owner relay (default blob transport) is **untrusted transport
   only** — it cannot decrypt or forge a blob, and a relay-hosted blob is **pinned at submit**,
   so a hosting outage can never cost you a forfeit.
@@ -98,7 +98,7 @@ state and verifying every entry against the chain** — not by trusting us (see 
   **lifetime** confidence bound, so a genuinely-good trader is never zeroed by a cold fortnight,
   while a never-real trader is reliably removed.
 - **Copy resistance.** Systematic landing-second into other miners' live trades strips your
-  copied wins; the 24-hour timelock makes live copying impossible, and a throwaway hotkey
+  copied wins; the timelock keeps calls sealed while fresh, and systematic following is penalized, and a throwaway hotkey
   can't manufacture copy-flags against honest miners.
 - **Real prices only.** Candles are bad-tick sanitized (an uncorroborated wick is clamped
   unless a second feed confirms it); forex/metals rollover bars are dropped from grading.
@@ -127,7 +127,7 @@ btcli subnet register --netuid 89 --wallet.name mywallet --wallet.hotkey miner
 Three ways to submit (all commit with **your** local hotkey — keys never leave your box):
 
 - **Follow mode** — mirror your IQ Signals Telegram-bot / Chrome-extension calls onto SN89:
-  `python neurons/miner.py … follow` (DM `/miner` to the Signals Bot for a feed token).
+  `python neurons/miner.py … follow` (DM `/token` to the Signals Bot for a feed token).
 - **REST API** — `python neurons/miner.py … serve --port 8089` then POST to `/submit`.
 - **CLI one-shot** — `python neurons/miner.py … submit --pair BTCUSD --direction LONG`.
 

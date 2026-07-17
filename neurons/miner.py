@@ -10,7 +10,7 @@ Three modes:
                     Long-polls the IQ Signals feed for calls you submitted via
                     the Telegram Signals Bot / Chrome extension and auto-commits
                     them with YOUR local hotkey (non-custodial — keys never
-                    leave this box). DM /miner to the Signals Bot for a token,
+                    leave this box). DM /token to the Signals Bot for a token,
                     then set SN89_FEED_TOKEN.
   * link X handle:  python neurons/miner.py register-x --handle @yourname
                     Signs a message with your hotkey and links your X (Twitter)
@@ -20,12 +20,12 @@ Three modes:
 
 All paths do the same thing (§4 of SPEC):
   1. build + validate the Signal (band/tp/sl come from the board file)
-  2. dual-encrypt (tlock to T+24h round, owner X25519)
+  2. dual-encrypt (tlock to T+2h round, owner X25519)
   3. upload the blob to your public bucket
   4. set_commitment(89) with the commitment hash + round + url tag
 
 The commit BLOCK is your timestamp — your entry price is the open of the
-first 1-second market bar ~30s after that block's on-chain timestamp, not
+first 1-second market bar at or after that block's on-chain timestamp, not
 anything you claim. Submit means submit *now*.
 """
 from __future__ import annotations
@@ -278,7 +278,7 @@ def cmd_follow(args) -> int:
                                   "https://partner.infinitequant.app/api/sn89/feed")
     token = os.getenv("SN89_FEED_TOKEN", "")
     if not token:
-        print("SN89_FEED_TOKEN not set — DM /miner to the IQ Signals Bot to get one.",
+        print("SN89_FEED_TOKEN not set — DM /token to the IQ Signals Bot to get one.",
               file=sys.stderr)
         return 1
 
@@ -297,7 +297,7 @@ def cmd_follow(args) -> int:
             r = requests.get(feed, params={"after_id": state["last_id"]},
                              headers={"Authorization": f"Bearer {token}"}, timeout=10)
             if r.status_code == 401:
-                print("feed: token rejected — re-issue with /miner in the Signals Bot",
+                print("feed: token rejected — re-issue with /token in the Signals Bot",
                       file=sys.stderr)
                 return 1
             calls = r.json().get("signals", []) if r.status_code == 200 else []

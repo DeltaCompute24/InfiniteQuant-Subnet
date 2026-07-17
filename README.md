@@ -1,72 +1,64 @@
 # InfiniteQuant Subnet — SN89
 
-Bittensor subnet 89 — trading-signals. Miners commit encrypted directional trade calls; validators grade them on real market data and distribute emissions to miners who prove consistent edge.
+Bittensor subnet 89. Miners commit encrypted directional trade calls. Validators grade them against real market data. Emissions go to miners with statistically proven edge.
 
-> ⚠️ **Requires Python 3.10.** The `timelock` dependency (drand sealed-bid encryption) publishes wheels only for Python 3.7–3.10 — **Python 3.11 and 3.12 will fail to install** with `No matching distribution found for timelock_wasm_wrapper`. Create your virtualenv with `python3.10` (see Setup). On 3.11/3.12, install pyenv or `apt install python3.10 python3.10-venv` and use that.
+> **Requires Python 3.10.** The `timelock` dependency publishes wheels only for 3.7–3.10. On 3.11/3.12: `apt install python3.10 python3.10-venv` (or pyenv) and build the venv with `python3.10`.
 
-## How it works
+## Protocol
 
-1. **Commit** — a miner picks a pair + direction, encrypts the signal with a [drand](https://drand.love) 24-hour timelock, and records `SHA256(signal)` on-chain via `set_commitment`. The block the commitment lands in is the signal's timestamp; validators anchor entry at the open of the first 1-second bar at or after that block time + 30 s, so every validator derives the same entry price.
-2. **Reveal** — after 24 hours the timelock opens; validators verify the plaintext matches the on-chain hash, then grade on 1-minute candles: first touch of TP wins, first touch of SL loses, no touch by the horizon is a wash.
-3. **Earn** — emissions flow to qualified miners weighted by wins in the last 30 days × hit-rate tier (hit-rate measured over a rolling reputation window, below).
+1. **COMMIT** — pick a pair + direction. The signal is encrypted with a 2-hour [drand](https://drand.love) timelock; `SHA256(signal)` goes on-chain via `set_commitment`. The commit block is the signal's timestamp. Entry price = open of the first 1-second bar at or after that block's time — every validator derives the same entry.
+2. **REVEAL** — after 2 hours the timelock opens. Validators verify the plaintext against the on-chain hash, then grade on 1-minute candles: TP touched first = **WON** · SL touched first = **LOST** · neither by the horizon = **WASH**.
+3. **EARN** — emissions ∝ trailing-30-day qualified wins (capped at 20) × hit-rate tier.
 
-**You must reveal what you commit.** A blob still unfetchable 6 hours after its reveal round is a decisive LOSS — there is no free option to hide losers.
+- A committed blob that never reveals is a decisive **LOSS**. Committing costs what revealing costs.
+- Candles are bad-tick sanitized (uncorroborated wicks clamped; crypto cross-checked against Hyperliquid). Forex/metals rollover bars [20:55–21:20 UTC] are dropped from grading.
 
-**Touches must be real prices.** Candles are bad-tick sanitized: an uncorroborated spike wick is clamped unless a second independent feed (Hyperliquid, for crypto) confirms the level in the same minute. Forex/metals bars during the rollover window [20:55–21:20 UTC] are dropped from grading entirely; a real breach persists past the window and is caught on the next clean bar.
-
-### Scoring
-
-```
-decisive    = WON + LOST   (washes and voids never count)
-reputation  = your decisive trades in the last ~60 days, capped at the most recent ~100
-QUALIFIED   = window decisive ≥ 8  AND  we are ~90% confident your TRUE hit rate
-              beats a coin flip  (Wilson lower bound ≥ 50%) — a lucky short streak
-              does NOT qualify; a clear edge qualifies in a handful of trades
-tier        = applied to a SHRUNK hit-rate estimate (pulls thin samples toward 50%,
-              so a 9/4 hot streak can't grab WOLF off 13 trades):
-              QUALIFIED ≥ 55% → 1.0×  |  SHARP ≥ 60% → 1.2×  |  WOLF ≥ 70% → 2.0×
-your weight ∝ (min(your wins in last 30 days, 20) × tier) / Σ same over all qualified
-              — recent wins are capped, so conviction/edge outweighs raw volume
-```
-
-The gate and tier reward **statistical confidence, not luck**: qualification is a lower
-confidence bound on your true hit-rate (we must be ~90% sure you beat a coin flip), and the
-tier uses a shrunk estimate, so a thin lucky streak neither qualifies nor grabs a high tier —
-while a clear edge clears in a few trades. Reputation decays over a rolling ~60-day / ~100-trade
-window, so a once-great miner that starts trading badly loses its tier and falls below the gate
-as the good history ages out, and a bad early stretch can't sink a miner that has since turned
-it around. Wins decay after 30 days for emission sizing, and are capped (≈one month of ~1/day
-at a strong hit-rate) so quality, not volume, separates the top. If no qualified miner has
-recent wins, emissions burn.
-
-**Warmup:** new hotkeys get 8 days of immunity with dust emissions. Warmup trades build your hit-rate record (within the reputation window) but warmup wins never pay emissions — you must post fresh wins after warmup ends to rise above dust.
-
-### Rules
+## Rules
 
 | Rule | Value |
 |---|---|
-| Max signals per UTC day | 3 per hotkey (effective 2026-07-18T00:00:00Z; 6 before) |
-| Min spacing | 1 h between a hotkey's accepted commits (effective 2026-07-18T00:00:00Z; none before) |
+| Signals per UTC day | **3** per hotkey (from 2026-07-18T00:00:00Z; 6 before) |
+| Min gap between calls | **1 h** (from 2026-07-18T00:00:00Z; none before) |
 | TP / SL | per-asset, symmetric 1:1 — `data/signals-bands.json` |
-| Horizon | crypto 8 h · forex/metals 12 h · equities 48 h |
-| Overlap | unlimited — a hotkey may hold multiple open calls on the same (pair, direction); long-then-short on one pair is legal |
+| Grade window | crypto 8 h · forex/metals 12 h · equities 48 h |
+| Same-pair repeats | allowed — including long-then-short on one pair |
 | Unrevealed blob | LOSS 6 h past reveal round |
+| Bad blob (hash/decrypt fail) | strike — 3 strikes in 30 d zeroes the hotkey 30 d |
 
-Submission limits are as-of versioned (`config.SUBMISSION_RULES_HISTORY`): each signal is judged by the rules in force at its own commit time, so a rules change never retroactively voids older signals. Exception: a blob that fails hash-verification or won't decrypt at reveal is a strike — three strikes in 30 days zeroes the hotkey for 30 days.
+Limits are as-of versioned (`config.SUBMISSION_RULES_HISTORY`): each signal is judged by the rules in force at its own commit time. A rules change never retroactively voids older signals. The miner tooling enforces the limits locally, so an over-limit call is refused with a reason instead of silently voiding.
 
-### Copy penalty
+## Scoring
 
-The first **eligible** hotkey to open a `(pair, direction)` is the original. Any other hotkey opening the same trade while the original is live lands second. A hotkey whose landed-second trades exceed half its decisive trades is a habitual copier — its copied wins stop counting toward hit-rate, dragging it below the qualification gate. Occasional overlap is fine; systematic copying is strictly negative.
+```
+decisive    = WON + LOST   (washes and voids never count)
+reputation  = decisive trades in the last ~60 days, capped at the most recent ~100
+QUALIFIED   = window decisive ≥ 8  AND  Wilson lower bound on true hit-rate ≥ 50%
+              (~90% confidence you beat a coin flip — luck does not qualify)
+tier        = on a SHRUNK hit-rate (thin samples pulled toward 50%):
+              QUALIFIED ≥ 55% → 1.0×  |  SHARP ≥ 60% → 1.2×  |  WOLF ≥ 70% → 2.0×
+your weight ∝ (min(wins last 30 d, 20) × tier) / Σ same over all qualified
+```
 
-Only an **eligible leader** can make you land "second": a hotkey with a real track record (≥ 10 decisive outcomes), not eliminated, and not holding both directions of the same pair at once. This is the anti-grief boundary — the 24-hour timelock makes live copying impossible, so a throwaway hotkey can't register, occupy a `(pair, direction)` early (or both sides of a pair), and manufacture copy-flags against honest miners who merely traded the same pair. A hotkey caught holding LONG and SHORT on one pair simultaneously is barred from the leader role outright.
+- Reputation decays (~60 d / ~100 trades): old wins can't mask bad recent trading, and a bad early stretch ages out.
+- Wins decay linearly over 30 days and are capped at 20 — conviction outweighs volume.
+- **Warmup:** first 8 days = dust weight. Warmup trades build the record; warmup wins never pay. Post fresh wins after warmup to earn.
+- If no qualified miner has recent wins, emissions burn.
 
-The mechanism is leader-agnostic among eligible leaders: it counts how often you land second into *any* eligible miner's live trade, not how often you follow one specific miner. Rotating victims doesn't help — your landed-second rate climbs all the same.
+## Copy penalty
 
-> The first mover is always safe. An honest miner who only occasionally lands second on a crowded trade keeps those wins — the penalty fires only once landed-second trades dominate your record (≥ 50%, min 5).
+- The first eligible hotkey on a `(pair, direction)` is the original; a different hotkey opening the same trade while it is live lands second.
+- Landing second on ≥ 50% of your decisive trades (min 5) + a sharp 1:1 shadowing signature = habitual copier. Copied wins stop counting toward hit-rate.
+- The first mover is always safe. Occasional overlap on a crowded trade is fine — the penalty targets systematic following.
+- Leader eligibility (≥ 10 decisive, not eliminated, not holding both directions of a pair) blocks throwaway hotkeys from manufacturing copy-flags.
 
-### Assets
+## Referral
 
-13 assets across three classes:
+- An existing miner can claim a **new** hotkey before it registers: `python neurons/miner.py refer <new_hotkey_ss58>` — commit the claim, wait for it to appear in the public checkpoint (~5 min), **then** register the recruit.
+- While both hotkeys are earning: recruit +10% emissions, recruiter +10% of each recruit's score (capped at 100% of own score, max 10 recruits).
+- A hotkey that registered before the claim can never be claimed. Adding a second miner? Claim it first.
+- Strict pair no-copy: shadowing inside the pair suspends the bonus 30 days.
+
+## Assets
 
 | Class | Pairs |
 |---|---|
@@ -74,157 +66,117 @@ The mechanism is leader-agnostic among eligible leaders: it counts how often you
 | Metals | XAUUSD · XAGUSD |
 | Forex | AUDUSD · EURUSD · GBPUSD · NZDUSD · USDCAD · USDCHF · USDJPY |
 
-Bands are per-asset volatility-scaled and symmetric 1:1. The grade (wash) window is fixed by asset class — 8 h for crypto, 12 h for forex/metals, 48 h for equities — and is derived by the validator from the pair's class on the board, not from anything the miner puts in the payload. The live board is `data/signals-bands.json`; each version is recorded with an effective date in `data/signals-bands-history.json`, and a signal is graded against the band that was in force **at its commit block** — so a band update never retroactively changes an in-flight signal. To change a band, append a new entry to the history file with `effective_from_unix` set to when it goes live (keep the prior entries).
+Bands are per-asset, volatility-scaled, symmetric 1:1. A signal is graded against the band in force **at its commit block** (`data/signals-bands.json` + `data/signals-bands-history.json`) — a band update never changes an in-flight signal.
 
 ---
 
-## Running a Miner
-
-### Setup
+## Mine
 
 ```bash
+# 1. install
 git clone https://github.com/DeltaCompute24/InfiniteQuant-Subnet && cd InfiniteQuant-Subnet
-python3.10 -m venv .venv && . .venv/bin/activate     # MUST be 3.10 — timelock has no 3.11/3.12 wheels
+python3.10 -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt
+
+# 2. register your hotkey (~0.05 TAO burn)
 btcli subnet register --netuid 89 --wallet.name mywallet --wallet.hotkey miner
+
+# 3. get a token — DM  /token  to @Iqsignals2026_bot
+export SN89_FEED_TOKEN=<token>
+
+# 4. run (pick one mode)
+python neurons/miner.py --wallet.name mywallet --wallet.hotkey miner follow   # mirror your IQ Signals bot/extension calls
+python neurons/miner.py --wallet.name mywallet --wallet.hotkey miner serve --port 8089   # REST intake
+python neurons/miner.py --wallet.name mywallet --wallet.hotkey miner submit --pair BTCUSD --direction LONG   # one-shot
 ```
 
-Or, for a fully pinned/reproducible install with [uv](https://docs.astral.sh/uv/) (resolves the exact versions in `uv.lock`, picks Python 3.10 automatically):
+- No market-data subscription needed — validators handle all pricing.
+- The token scopes the feed to your own calls and authorizes the blob relay. Non-custodial: keys never leave your box.
+- **One feed = one hotkey.** Mirroring the same feed from a second hotkey flags the duplicate as a copier.
+- **Second miner? Claim it before registering** — see Referral above.
+- Prefer auto-update (validators must track releases; miners should too):
 
 ```bash
-uv sync                 # validators; add --extra miner if you self-host blobs to S3/R2
+bash run.sh miner follow --wallet.name mywallet --wallet.hotkey miner
 ```
-
-Miners do not need a market data subscription — validators handle all pricing.
 
 ### Blob hosting
 
-Your signal is encrypted locally and served at a public URL so validators can fetch it. The transport is untrusted (integrity is the on-chain commitment), so it doesn't matter where it lives. Pick one:
+Signals are encrypted locally and served at a public URL for validators. The transport is untrusted — integrity is the on-chain commitment. Default is the **owner relay** (zero setup, activated by `SN89_FEED_TOKEN`; blobs are pinned at submit, so a hosting outage can never cause a forfeit). Alternatives:
 
-**1. Owner relay (default — zero setup).** Set `SN89_FEED_TOKEN` or `SN89_RELAY_TOKEN` and the miner pushes the encrypted blob through the IQ relay. No bucket, no server, no extra keys. We can't read it (24-hour timelock, bound to your hotkey) and can't forge one (hash is on-chain). Relay-hosted blobs are pinned at submit, so a hosting outage can never cause a forfeit.
-
-**2. Your own S3/R2 bucket:**
 ```bash
+# your own S3/R2 bucket
 export SN89_R2_ENDPOINT=https://<account>.r2.cloudflarestorage.com
 export SN89_R2_BUCKET=<bucket>
 export SN89_R2_ACCESS_KEY_ID=… SN89_R2_SECRET_ACCESS_KEY=…
 export SN89_R2_PUBLIC_BASE=https://<public-bucket-host>
-```
 
-**3. Local disk + static server** (testnet / soaks):
-```bash
+# local disk + static server (testnet)
 export SN89_BLOB_DIR=$HOME/.sn89/blobs
 export SN89_R2_PUBLIC_BASE=http://<your-host>:8799
 ```
 
-### Interface 1 — Follow mode (Telegram bot / Chrome extension)
-
-Already submitting calls through the IQ Signals Telegram bot or Chrome extension? Mirror them onto SN89 automatically. DM `/miner` to the Signals Bot for a feed token, then:
-
-```bash
-export SN89_FEED_TOKEN=<token from /miner>
-python neurons/miner.py --wallet.name mywallet --wallet.hotkey miner follow
-```
-
-The token scopes the feed to your own calls and authorizes the blob relay — no bucket needed. The follower long-polls your submissions only and commits each one with your local hotkey the moment it appears. Non-custodial: the platform never sees your keys, and the token can't read anyone else's calls. The program's rules (6 calls/day) match the subnet's rules exactly.
-
-### Interface 2 — REST API
-
-```bash
-python neurons/miner.py --wallet.name mywallet --wallet.hotkey miner serve --port 8089
-curl -s localhost:8089/submit -d '{"trade_pair":"XAUUSD","direction":"SHORT"}'
-```
-
-To expose beyond localhost, set a bearer token (the server refuses a public bind without one):
-
-```bash
-export SN89_INTAKE_TOKEN=<long random string>
-python neurons/miner.py --wallet.name mywallet --wallet.hotkey miner \
-    serve --host 0.0.0.0 --port 8089
-curl -s https://<your-host>:8089/submit \
-    -H "Authorization: Bearer $SN89_INTAKE_TOKEN" \
-    -d '{"trade_pair":"XAUUSD","direction":"SHORT"}'
-```
-
-### Interface 3 — CLI one-shot
-
-```bash
-python neurons/miner.py --wallet.name mywallet --wallet.hotkey miner \
-    submit --pair BTCUSD --direction LONG
-```
-
 ### Link your X handle
 
-Put your handle on the public leaderboard and get tagged in social posts:
-
 ```bash
-python neurons/miner.py --wallet.name mywallet --wallet.hotkey miner \
-    register-x --handle @yourname
+python neurons/miner.py --wallet.name mywallet --wallet.hotkey miner register-x --handle @yourname
 ```
 
-Signs `sn89-register-x:<hotkey>:<handle>:<timestamp>` locally — keys never leave the box. Re-run any time to update your handle.
+Shows your handle on the public leaderboard. Signed locally; keys never leave the box.
 
 ### Emissions & elimination
 
-Weight is earned purely on your track record — no collateral, no deposit:
+No collateral, no deposit — weight is earned on track record:
 
 | State | Result |
 |---|---|
-| In immunity (first 8 days) | Dust weight (building a record) |
-| Not yet ~90% confidently above a coin flip | No emissions |
-| ~90% confident your true hit rate ≥ 50% (≥ 8 decisive in the window) | Emissions, sized by capped trailing-30d wins × hit-rate tier |
-| ~90% confident your **lifetime** hit rate is below 45% (≥ 40 decisive) | **ELIMINATED** — hotkey zeroed permanently |
+| Immunity (first 8 days) | dust weight |
+| Below the confidence gate | no emissions |
+| Qualified (≥ 8 decisive, Wilson LB ≥ 50%) | emissions ∝ capped trailing-30d wins × tier |
+| Lifetime hit-rate confidently < 45% (≥ 40 decisive) | **eliminated** — hotkey zeroed permanently |
 
-Elimination is a slow, conservative **lifetime** confidence test, decoupled from "stop paying":
-a cold fortnight just drops you below the (recency-weighted, reversible) qualify gate and you
-earn nothing until you recover — it does not eliminate you. Only a record that is confidently,
-durably below the floor over a large sample is zeroed, so a genuinely-good trader is never
-noise-killed while a never-real one is reliably removed.
+Elimination is a lifetime confidence test, separate from the (reversible) qualify gate: a cold streak drops you to zero emissions until you recover; only a durably sub-floor record is removed.
 
-### Testnet (netuid 514)
+### Testnet (netuid 496)
 
-Every command above works on testnet — same code, same protocol, free TAO, no risk:
+Same code, free TAO:
 
 ```bash
-export SN89_NETWORK=test SN89_NETUID=514
+export SN89_NETWORK=test SN89_NETUID=496
 btcli wallet faucet --wallet.name mywallet --subtensor.network test
-btcli subnet register --netuid 514 --wallet.name mywallet --wallet.hotkey miner \
-    --subtensor.network test
+btcli subnet register --netuid 496 --wallet.name mywallet --wallet.hotkey miner --subtensor.network test
 ```
 
-Signals are still drand-timelocked — grading takes ~24 h on testnet too. A fresh testnet miner shows dust weight until its first revealed signals grade.
+Reveals still take 2 h; grading follows each call's horizon.
 
 ---
 
-## Running a Validator
+## Validate
 
-Two requirements before you start:
+Requirements:
 
-**Market-data subscription.** Validators need a paid [Massive](https://massive.com) (formerly Polygon.io) plan covering the Currencies feed (forex + metals) and the Crypto feed, with intraday aggregates — 1-second bars for entry anchoring and 1-minute bars for TP/SL grading across all 13 assets. The free tier cannot grade signals; without a sufficient plan your validator leaves signals stuck `pending` and weights diverge from consensus.
-
-**Validator permit.** The hotkey must be staked into the validator set. Without a permit, commits pile up unrevealed until `TooManyUnrevealedCommits` and the validator earns nothing. The validator logs a warning and skips weight-setting in that state.
+1. **Market data** — a paid [Massive](https://massive.com) (Polygon) plan: Currencies + Crypto feeds, 1-second and 1-minute aggregates. The free tier cannot grade.
+2. **Validator permit** — the hotkey must be staked into the validator set, or weight commits never reveal.
 
 ```bash
 export POLYGON_API_KEY=…
-python neurons/validator.py --wallet.name myvali --wallet.hotkey vali
+bash run.sh validator --wallet.name myvali --wallet.hotkey vali    # auto-updater (recommended)
 ```
 
-State lives in `~/.sn89/validator.db` (SQLite). Grading is deterministic — same chain + same market data ⇒ same weights — so validators converge without coordination. Crypto bad-tick corroboration queries Hyperliquid's public candle API (no key needed). Entry timing design rationale: `docs/entry-timing.md`.
+State: `~/.sn89/validator.db`. Grading is deterministic — same chain + same market data ⇒ same weights. **Run the current release**: grading code is consensus; a stale validator diverges and loses VTRUST.
 
 ### Timelock version compatibility
 
-Miners seal the `W_time` half of each blob with the `timelock` library. The PyPI-pinned `timelock==0.0.1.dev0` (this repo pin, `timelock_wasm_wrapper 0.0.2`) and the newer `0.0.2.dev0` (`wasm_wrapper 0.3.0`) produce **incompatible** drand-tlock ciphertext formats (372 vs 356 bytes) — one cannot open the other (`tld()` Rust-aborts). The validator opens **both**: it tries its own `timelock` first, then a legacy sidecar. Point `SN89_TLD_FALLBACK_PYTHON` at a python from a venv that has ONLY the *other* `timelock` version installed:
+`timelock==0.0.1.dev0` (this repo's pin) and `0.0.2.dev0` produce incompatible ciphertexts. The validator opens both via a sidecar venv holding the *other* version:
 
 ```bash
 python3.10 -m venv .venv-tl001 && .venv-tl001/bin/pip install "timelock==0.0.1.dev0"
 export SN89_TLD_FALLBACK_PYTHON=$PWD/.venv-tl001/bin/python
 ```
 
-Without the sidecar a validator still will not penalise these miners (their reveals void **without a strike**), but it cannot **grade** their signals — which diverges from any validator that can. Run the sidecar so every validator reaches the same verdict.
-
 ### Delegate via child-key (recommended)
 
-Rather than run your own validator (and a market-data plan), delegate to the authoritative SN89 validator with a child-hotkey — one journal, one weight vector:
+Skip the market-data plan — delegate to the authoritative validator:
 
 ```bash
 btcli stake child set --netuid 89 \
@@ -232,53 +184,25 @@ btcli stake child set --netuid 89 \
     --children <AUTHORITATIVE_HOTKEY_SS58> --proportion 1.0
 ```
 
-### Checkpoint
+### Audit the validator
 
-The authoritative validator publishes its journal as a checkpoint. Replay it and check it against chain:
-
-```bash
-python3 scripts/audit_journal.py <CHECKPOINT_URL> --chain --anchors
-```
-
-This re-derives the weight vector from the journal and confirms it matches the on-chain weights, and that each signal is anchored to an on-chain commitment. See `docs/single-validator-model.md`.
-
-### Testnet
+The authoritative validator publishes its journal as a public checkpoint. Anyone can replay it:
 
 ```bash
-export SN89_NETWORK=test SN89_NETUID=514 POLYGON_API_KEY=…
-python neurons/validator.py --wallet.name myvali --wallet.hotkey vali
+python3 scripts/audit_journal.py <CHECKPOINT_URL> --chain --anchors --referral-anchors
 ```
+
+Re-derives the weight vector from the journal and confirms it matches on-chain. See `docs/single-validator-model.md`.
 
 ---
-
-## Staying updated (recommended: `run.sh`)
-
-Grading code evolves, and **validators must run a compatible version or their
-weights diverge from consensus** (miners likewise need the current submission
-format). Launch your neuron through the auto-updater so it tracks releases
-itself — on a timer it checks `origin/master`, and when a new version ships it
-pulls, reinstalls changed deps, and restarts the neuron (and it restarts the
-neuron if it crashes):
-
-```bash
-# validator
-bash run.sh validator --wallet.name myvali --wallet.hotkey vali
-# miner (any mode: follow / submit / serve)
-bash run.sh miner follow --wallet.name mywallet --wallet.hotkey miner
-```
-
-Run it from the repo root (where `.venv` lives). Knobs: `SN89_AUTO_UPDATE=0`
-disables updates, `SN89_UPDATE_INTERVAL_S` sets the check cadence (default 30 m).
 
 ## FAQ
 
-**Why can't I set my own TP/SL?** Symmetric fixed bands make hit-rate a meaningful skill metric. Vol-scaled bands keep the bar equivalent across assets — an 18 bps FX cross and a 180 bps crypto are scored on the same relative standard.
+**Why can't I set my own TP/SL?** Symmetric fixed bands make hit-rate a clean skill metric; vol-scaling keeps the bar equivalent across assets.
 
-**What if my blob is unreachable when validators poll?** They retry every 30 s through reveal + a 6 h grace. A blob fetched in that window grades normally and stays pinned even if you later remove it. A blob never served is a forfeit LOSS — use the owner relay to eliminate this risk entirely.
+**What if my blob is unreachable when validators poll?** They retry every 30 s through reveal + 6 h grace, and a fetched blob stays pinned. Use the relay and this risk is zero.
 
-**When do emissions arrive?** Weights update every tempo (~72 min). Your first non-dust weight lands once you have enough decisive trades that we're ~90% confident your true hit rate beats a coin flip — a handful of trades for a clear edge, more for a marginal one (and never, for a true coin-flipper). That's by design: the gate credits demonstrated edge, not a lucky start.
-
----
+**When do emissions arrive?** Weights update every tempo (~72 min). Your first non-dust weight lands once the gate is cleared — a handful of trades for a clear edge.
 
 ## License
 
