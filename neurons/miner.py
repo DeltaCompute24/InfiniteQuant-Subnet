@@ -64,6 +64,56 @@ def _fx_market_closed(now_utc: float | None = None) -> bool:
     return False
 
 
+# ── local submission-limits guard (UX only — consensus enforcement is the
+# validator's, per config.SUBMISSION_RULES_HISTORY). Without this a miner that
+# fires over the daily cap or inside the min gap gets its commitment silently
+# VOIDED at grading (daily_quota / min_spacing), which reads as "my signal
+# disappeared". We track this box's own submits per hotkey and refuse locally
+# with a clear message instead. Best-effort: only sees submits made through
+# this tool on this box; the validator's judgment is authoritative.
+def _submit_log_path(hotkey: str) -> str:
+    return os.path.expanduser(f"~/.sn89/submits_{hotkey}.json")
+
+
+def _load_submit_log(hotkey: str) -> list[float]:
+    try:
+        with open(_submit_log_path(hotkey), encoding="utf-8") as fh:
+            return [float(t) for t in json.load(fh)]
+    except (FileNotFoundError, ValueError, TypeError):
+        return []
+
+
+def record_local_submit(hotkey: str, now: float | None = None) -> None:
+    now = now if now is not None else time.time()
+    ts = _load_submit_log(hotkey)
+    ts = sorted(t for t in ts if now - t < 2 * 86_400)[-49:] + [now]
+    path = _submit_log_path(hotkey)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(ts, fh)
+
+
+def check_local_limits(hotkey: str, now: float | None = None) -> "tuple[str, str] | None":
+    """(kind, message) if a submit NOW would void under the rules in force
+    (kind: 'quota' | 'gap'), else None. Era-aware via submission_rules_as_of,
+    so the guard flips to the new limits exactly when consensus does."""
+    now = now if now is not None else time.time()
+    cap, gap = config.submission_rules_as_of(now)
+    ts = _load_submit_log(hotkey)
+    if gap and ts:
+        since = now - max(ts)
+        if since < gap:
+            wait_min = int((gap - since) / 60) + 1
+            return ("gap", f"min {gap // 60} min between calls — ~{wait_min} min to go "
+                           f"(a commit now would VOID as min_spacing)")
+    day = int(now // 86_400)
+    today = sum(1 for t in ts if int(t // 86_400) == day)
+    if today >= cap:
+        return ("quota", f"daily cap reached ({cap}/UTC day) — a commit now would "
+                         f"VOID as daily_quota; resets 00:00 UTC")
+    return None
+
+
 def build_signal(hotkey: str, pair: str, direction: str,
                  horizon_h: int | None = None, comment: str = "") -> Signal:
     bands = config.allowed_assets()
@@ -142,6 +192,10 @@ def _wallet(args) -> "bt.Wallet":
 
 def cmd_submit(args) -> int:
     w = _wallet(args)
+    limit = check_local_limits(w.hotkey.ss58_address)
+    if limit:
+        print(f"REFUSED ({limit[0]}): {limit[1]}", file=sys.stderr)
+        return 1
     try:
         sig = build_signal(w.hotkey.ss58_address, args.pair, args.direction,
                            args.horizon, args.comment or "")
@@ -149,6 +203,8 @@ def cmd_submit(args) -> int:
         print(f"INVALID: {e}", file=sys.stderr)
         return 1
     res = submit(w, sig)
+    if res["ok"]:
+        record_local_submit(w.hotkey.ss58_address)
     print(json.dumps(res, indent=2))
     return 0 if res["ok"] else 1
 
@@ -172,10 +228,15 @@ def cmd_serve(args) -> int:
             if token and self.headers.get("Authorization", "") != f"Bearer {token}":
                 return self._reply(401, {"error": "bad or missing bearer token"})
             try:
+                limit = check_local_limits(hotkey)
+                if limit:
+                    return self._reply(429, {"error": limit[1], "kind": limit[0]})
                 body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
                 sig = build_signal(hotkey, body["trade_pair"], body["direction"],
                                    body.get("horizon_h"), body.get("comment", ""))
                 res = submit(w, sig, ch)
+                if res["ok"]:
+                    record_local_submit(hotkey)
                 self._reply(200 if res["ok"] else 502, res)
             except ValidationError as e:
                 self._reply(400, {"error": str(e)})
@@ -241,11 +302,24 @@ def cmd_follow(args) -> int:
                 return 1
             calls = r.json().get("signals", []) if r.status_code == 200 else []
             for c in sorted(calls, key=lambda x: x["id"]):
+                limit = check_local_limits(hotkey)
+                if limit and limit[0] == "gap":
+                    # hold — the commit lands cleanly once the gap has passed
+                    print(f"  ⏸ #{c['id']} held: {limit[1]} — retrying next poll")
+                    break
+                if limit:  # quota — committing later (after 00:00) would be stale; drop
+                    print(f"  ✗ #{c['id']} dropped: {limit[1]}")
+                    state["last_id"] = max(state["last_id"], c["id"])
+                    with open(state_path, "w", encoding="utf-8") as fh:
+                        json.dump(state, fh)
+                    continue
                 try:
                     sig = build_signal(hotkey, c["asset"], c["direction"],
                                        c.get("horizon_hours"),
                                        f"iq-follow:{c['id']}")
                     res = submit(w, sig, ch)
+                    if res["ok"]:
+                        record_local_submit(hotkey)
                     print(f"  ↗ #{c['id']} {c['direction']} {c['asset']} → "
                           f"commit {res['commitment'][:12]}… ok={res['ok']}")
                 except ValidationError as e:
