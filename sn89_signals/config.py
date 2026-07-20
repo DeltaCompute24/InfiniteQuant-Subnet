@@ -359,7 +359,7 @@ COPY_EXCLUDE_BOTH_DIR = bool(int(os.getenv("SN89_COPY_EXCLUDE_BOTH_DIR", "1")))
 # REFERRAL_PAIR_TTL_S after the last copy event (base emission is untouched —
 # the global §7.5 machinery is separate and unchanged).
 # Env overrides are for testnet A/B only — the consensus default lives in git.
-REFERRAL_ENABLED = bool(int(os.getenv("SN89_REFERRAL_ENABLED", "0")))  # ship dark
+REFERRAL_ENABLED = bool(int(os.getenv("SN89_REFERRAL_ENABLED", "1")))  # LIVE (enabled 2026-07-20)
 REFERRAL_RECRUIT_BONUS = float(os.getenv("SN89_REFERRAL_RECRUIT_BONUS", "0.10"))
 REFERRAL_RECRUITER_BONUS = float(os.getenv("SN89_REFERRAL_RECRUITER_BONUS", "0.20"))
 REFERRAL_MAX_X = float(os.getenv("SN89_REFERRAL_MAX_X", "1.0"))
