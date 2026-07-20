@@ -198,10 +198,10 @@ class TestBonusMath:
     def test_bonus_shifts_shares_and_is_zero_sum(self, lit):
         states = [_state("A", 1), _state("B", 2), _state("D", 3)]
         w = self._shares(states, [("A", "B")])
-        # eff: A = 1 + 0.1·1 = 1.1, B = 1.1, D = 1.0
-        assert w[1] == pytest.approx(1.1 / 3.2)
-        assert w[2] == pytest.approx(1.1 / 3.2)
-        assert w[3] == pytest.approx(1.0 / 3.2)
+        # eff: A = 1 + 0.2·1 = 1.2, B = 1.1, D = 1.0
+        assert w[1] == pytest.approx(1.2 / 3.3)
+        assert w[2] == pytest.approx(1.1 / 3.3)
+        assert w[3] == pytest.approx(1.0 / 3.3)
 
     def test_mutual_conditional_recruiter_idle_kills_both(self, lit):
         states = [_state("A", 1, tally=0.0), _state("B", 2), _state("D", 3)]
@@ -224,13 +224,13 @@ class TestBonusMath:
     def test_multiple_recruits_sum(self, lit):
         states = [_state("A", 1), _state("R1", 2), _state("R2", 3), _state("D", 4)]
         w = self._shares(states, [("A", "R1"), ("A", "R2")])
-        # eff: A = 1 + 0.1 + 0.1 = 1.2, recruits 1.1 each, D 1.0
-        assert w[1] == pytest.approx(1.2 / 4.4)
-        assert w[2] == pytest.approx(1.1 / 4.4)
-        assert w[4] == pytest.approx(1.0 / 4.4)
+        # eff: A = 1 + 0.2 + 0.2 = 1.4, recruits 1.1 each, D 1.0
+        assert w[1] == pytest.approx(1.4 / 4.6)
+        assert w[2] == pytest.approx(1.1 / 4.6)
+        assert w[4] == pytest.approx(1.0 / 4.6)
 
     def test_recruiter_cap_binds(self, lit):
-        # tiny recruiter, three big recruits: raw bonus 0.1·3.0 = 0.3 but the cap
+        # tiny recruiter, three big recruits: raw bonus 0.2·3.0 = 0.6 but the cap
         # is REFERRAL_MAX_X (1.0) × own base (0.1) = 0.1.
         states = [_state("A", 1, tally=0.1), _state("R1", 2), _state("R2", 3),
                   _state("R3", 4)]
@@ -243,10 +243,10 @@ class TestBonusMath:
         # B's base (1.0), not B's boosted 1.2.
         states = [_state("A", 1), _state("B", 2), _state("C", 3)]
         w = self._shares(states, [("A", "B"), ("B", "C")])
-        # eff: A = 1.1, B = 1 + 0.1(recruit of A) + 0.1(recruiter of C) = 1.2, C = 1.1
-        total = 1.1 + 1.2 + 1.1
-        assert w[1] == pytest.approx(1.1 / total)
-        assert w[2] == pytest.approx(1.2 / total)
+        # eff: A = 1.2, B = 1 + 0.1(recruit of A) + 0.2(recruiter of C) = 1.3, C = 1.1
+        total = 1.2 + 1.3 + 1.1
+        assert w[1] == pytest.approx(1.2 / total)
+        assert w[2] == pytest.approx(1.3 / total)
         assert w[3] == pytest.approx(1.1 / total)
 
     def test_excluded_party_kills_bonus(self, lit):
@@ -327,7 +327,7 @@ class TestReplayEndToEnd:
             base[hk] = scoring.decayed_qwin_tally(
                 scoring.qualified_wins(dec, OLD, False), NOW)
         assert base["A"] > 0 and base["A"] == pytest.approx(base["B"])
-        eff = {"A": base["A"] + 0.1 * base["B"],
+        eff = {"A": base["A"] + 0.2 * base["B"],
                "B": 1.1 * base["B"], "D": base["D"]}
         total = sum(eff.values())
         for hk, uid in self.UIDS.items():

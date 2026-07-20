@@ -372,7 +372,7 @@ def valid_referral_pairs(referrals: list[dict]) -> list[tuple[str, str]]:
 
     One recruit belongs to at most ONE recruiter (earliest commit_block wins,
     recruiter hotkey as the same-block tiebreak), and a recruiter keeps at most
-    its REFERRAL_MAX_RECRUITS earliest recruits. Pure/deterministic; the pair
+    its REFERRAL_MAX_RECRUITS earliest recruits (0 = unlimited). Pure/deterministic; the pair
     no-copy gate is applied separately (it needs the graded rows).
     """
     claims = []
@@ -398,7 +398,9 @@ def valid_referral_pairs(referrals: list[dict]) -> list[tuple[str, str]]:
         by_recruiter[recruiter].append((cb, recruit))
     pairs: list[tuple[str, str]] = []
     for recruiter in sorted(by_recruiter):
-        kept = sorted(by_recruiter[recruiter])[:config.REFERRAL_MAX_RECRUITS]
+        kept = sorted(by_recruiter[recruiter])
+        if config.REFERRAL_MAX_RECRUITS > 0:            # 0 = unlimited (no breadth cap)
+            kept = kept[:config.REFERRAL_MAX_RECRUITS]
         pairs.extend((recruiter, recruit) for _, recruit in kept)
     return sorted(pairs)
 

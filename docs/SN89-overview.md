@@ -149,10 +149,11 @@ Rules (all enforced consensus-side; `REFERRAL_*` in `sn89_signals/config.py`):
 
 - **Commit BEFORE registration.** The `sn89ref:1:<recruit_ss58>` commitment must land at least
   `REFERRAL_MIN_LEAD_BLOCKS` (~2 min) before the recruit's registration block, or the claim is
-  permanently invalid. One recruit belongs to the earliest claimant; a recruiter keeps at most
-  `REFERRAL_MAX_RECRUITS` recruits.
+  permanently invalid. One recruit belongs to the earliest claimant. A recruiter may refer any
+  number of recruits (no per-recruiter breadth cap); its total referral bonus is still bounded
+  by `REFERRAL_MAX_X` × its own tally.
 - **Both must be earning.** While both hotkeys have a positive qualified-win tally, the recruit's
-  emission tally is boosted `+10%` and the recruiter gains `+10%` of each recruit's tally (total
+  emission tally is boosted `+10%` and the recruiter gains `+20%` of each recruit's tally (total
   referral bonus capped at `100%` of the recruiter's own tally). If either side stops earning,
   both bonuses lapse and resume on re-earn. Bonuses redistribute inside the miner pool — nothing
   new is minted.

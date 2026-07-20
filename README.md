@@ -54,7 +54,7 @@ your weight ∝ (min(wins last 30 d, 20) × tier) / Σ same over all qualified
 ## Referral
 
 - An existing miner can claim a **new** hotkey before it registers: `python neurons/miner.py refer <new_hotkey_ss58>` — commit the claim, wait for it to appear in the public checkpoint (~5 min), **then** register the recruit.
-- While both hotkeys are earning: recruit +10% emissions, recruiter +10% of each recruit's score (capped at 100% of own score, max 10 recruits).
+- While both hotkeys are earning: recruit +10% emissions, recruiter +20% of each recruit's score (capped at 100% of own score).
 - A hotkey that registered before the claim can never be claimed. Adding a second miner? Claim it first.
 - Strict pair no-copy: shadowing inside the pair suspends the bonus 30 days.
 

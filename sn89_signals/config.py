@@ -350,8 +350,8 @@ COPY_EXCLUDE_BOTH_DIR = bool(int(os.getenv("SN89_COPY_EXCLUDE_BOTH_DIR", "1")))
 # the recruit's registration block is at least REFERRAL_MIN_LEAD_BLOCKS later
 # (defeats mempool front-running of a pending registration). While BOTH sides
 # are actively earning (decayed qualified-win tally > 0), the recruit's tally is
-# boosted by REFERRAL_RECRUIT_BONUS and the recruiter's by
-# REFERRAL_RECRUITER_BONUS × each recruit's tally (capped in total at
+# boosted by REFERRAL_RECRUIT_BONUS (10%) and the recruiter's by
+# REFERRAL_RECRUITER_BONUS (20%) × each recruit's tally (capped in total at
 # REFERRAL_MAX_X × the recruiter's own tally). If either side stops earning,
 # both bonuses lapse that cycle and resume on re-earn. Bonuses redistribute
 # WITHIN the miner pool (pre-MINER_EMISSION_CAP) — nothing new is minted.
@@ -361,14 +361,17 @@ COPY_EXCLUDE_BOTH_DIR = bool(int(os.getenv("SN89_COPY_EXCLUDE_BOTH_DIR", "1")))
 # Env overrides are for testnet A/B only — the consensus default lives in git.
 REFERRAL_ENABLED = bool(int(os.getenv("SN89_REFERRAL_ENABLED", "0")))  # ship dark
 REFERRAL_RECRUIT_BONUS = float(os.getenv("SN89_REFERRAL_RECRUIT_BONUS", "0.10"))
-REFERRAL_RECRUITER_BONUS = float(os.getenv("SN89_REFERRAL_RECRUITER_BONUS", "0.10"))
+REFERRAL_RECRUITER_BONUS = float(os.getenv("SN89_REFERRAL_RECRUITER_BONUS", "0.20"))
 REFERRAL_MAX_X = float(os.getenv("SN89_REFERRAL_MAX_X", "1.0"))
                                     # recruiter's TOTAL referral bonus ≤ this × own tally
                                     # (referrals can at most double a recruiter's emission)
 REFERRAL_MIN_LEAD_BLOCKS = int(os.getenv("SN89_REFERRAL_MIN_LEAD_BLOCKS", "10"))
                                     # ≈2 min at 12s blocks — far beyond mempool residence
-REFERRAL_MAX_RECRUITS = int(os.getenv("SN89_REFERRAL_MAX_RECRUITS", "10"))
-                                    # per recruiter; earliest commit_blocks win
+REFERRAL_MAX_RECRUITS = int(os.getenv("SN89_REFERRAL_MAX_RECRUITS", "0"))
+                                    # per recruiter; 0 = UNLIMITED (no breadth
+                                    # cap). >0 keeps only the earliest N recruits
+                                    # by commit_block. Total bonus is still bounded
+                                    # by REFERRAL_MAX_X × own tally regardless.
 # Pair no-copy gate — deliberately STRICTER than the global copy detector
 # (the pair opted into scrutiny by pairing up; a false positive only pauses a
 # bonus, never touches base emission). Two honest same-strategy traders who
