@@ -340,18 +340,19 @@ class TestGrader:
         return grade(s, self.T0, self.T0 + now_off_h * 3_600_000,
                      entry_price=self.ENTRY, bars=bars)
 
-    def test_long_tp_touch_wins(self):
-        # BTC band 150bps → tp 101.5 / sl 98.5
-        g = self._grade("LONG", _bars((self.T0 + 60_000, 100, 101.6, 99.9, 101)))
+    def test_long_tp_close_wins(self):
+        # BTC band 150bps → tp 101.5 / sl 98.5. Close crosses TP.
+        g = self._grade("LONG", _bars((self.T0 + 60_000, 100, 101.6, 99.9, 101.6)))
         assert (g.status, g.outcome_bps, g.exit_reason) == (WON, 150, "tp_touch")
 
-    def test_long_sl_touch_loses(self):
-        g = self._grade("LONG", _bars((self.T0 + 60_000, 100, 100.5, 98.4, 99)))
+    def test_long_sl_close_loses(self):
+        g = self._grade("LONG", _bars((self.T0 + 60_000, 100, 100.5, 98.4, 98.4)))
         assert (g.status, g.outcome_bps, g.exit_reason) == (LOST, -150, "sl_touch")
 
-    def test_both_touched_same_candle_is_lost(self):
-        """Single candle pierces both levels ⇒ SL first (conservative)."""
-        g = self._grade("LONG", _bars((self.T0 + 60_000, 100, 101.6, 98.4, 100)))
+    def test_sl_close_beats_tp_wick(self):
+        """Close falls to SL while the same candle's high pierced TP ⇒ LOST
+        (the close wins over the wick; SL-first is conservative)."""
+        g = self._grade("LONG", _bars((self.T0 + 60_000, 100, 101.6, 98.4, 98.4)))
         assert g.status == LOST
 
     def test_first_touch_wins_ordering(self):
@@ -361,9 +362,9 @@ class TestGrader:
         ))
         assert g.status == WON
 
-    def test_short_tp_touch(self):
-        # SHORT: tp below entry (98.5), sl above (101.5)
-        g = self._grade("SHORT", _bars((self.T0 + 60_000, 100, 100.2, 98.4, 99)))
+    def test_short_tp_close(self):
+        # SHORT: tp below entry (98.5), sl above (101.5). Close crosses tp.
+        g = self._grade("SHORT", _bars((self.T0 + 60_000, 100, 100.2, 98.4, 98.4)))
         assert (g.status, g.outcome_bps) == (WON, 150)
 
     def test_no_touch_within_horizon_pending(self):
@@ -379,10 +380,12 @@ class TestGrader:
         g = self._grade("LONG", _bars((self.T0 - 60_000, 100, 105, 95, 100)))
         assert g.status == PENDING
 
-    def test_wick_touch_counts(self):
-        """Submission #78 lesson: the wick IS the fill."""
-        g = self._grade("LONG", _bars((self.T0 + 60_000, 100, 101.5, 100, 100.1)))
-        assert g.status == WON  # high exactly at tp → touched
+    def test_close_at_level_counts(self):
+        """A close exactly AT the level counts (inclusive crossing). The old
+        'wick IS the fill' rule (#78) is retired — a high that pierces TP but
+        closes back does NOT score (see test_median_fill)."""
+        g = self._grade("LONG", _bars((self.T0 + 60_000, 100, 101.5, 100, 101.5)))
+        assert g.status == WON  # close exactly at tp → hit
 
     def test_crypto_wash_window_is_class_fixed(self):
         # class-fixed: crypto washes at its class horizon regardless of the
@@ -440,20 +443,18 @@ class TestSanitize:
         assert polygon.sanitize_minute_bars("BTCUSD", "crypto", bars,
                                             hl_fetch=lambda *a: None) == bars
 
-    def test_spike_no_longer_falsely_stops_short(self):
-        """End-to-end: the rogue wick would SL a short pre-filter; post-filter
-        the trade keeps running (and here goes on to win)."""
+    def test_rogue_wick_never_stops_short_close_based(self):
+        """End-to-end: with close-based grading a rogue high wick can't SL a
+        short at all — grading only reads the close, so no sanitize is even
+        needed to keep the trade alive. The real TP registers when a close
+        crosses it."""
         s = _sig(pair="BTCUSD", direction="SHORT")        # 150bps band on 58.0
         entry = 58.0                                       # sl 58.87 / tp 57.13
-        dirty = _bars((self.T,           58.00, 58.10, 57.90, 58.05),
-                      (self.T + 60_000,  58.05, 61.67, 58.00, 58.02),  # rogue
-                      (self.T + 120_000, 58.02, 58.12, 57.10, 57.20))  # real TP
-        g_dirty = grade(s, self.T, self.T + 3_600_000, entry_price=entry, bars=dirty)
-        assert g_dirty.status == LOST                      # the bug
-        clean = polygon.sanitize_minute_bars("BTCUSD", "crypto", dirty,
-                                             hl_fetch=lambda *a: None)
-        g_clean = grade(s, self.T, self.T + 3_600_000, entry_price=entry, bars=clean)
-        assert (g_clean.status, g_clean.exit_reason) == (WON, "tp_touch")
+        bars = _bars((self.T,           58.00, 58.10, 57.90, 58.05),
+                     (self.T + 60_000,  58.05, 61.67, 58.00, 58.02),  # rogue high — ignored
+                     (self.T + 120_000, 58.02, 58.12, 57.05, 57.05))  # close crosses TP
+        g = grade(s, self.T, self.T + 3_600_000, entry_price=entry, bars=bars)
+        assert (g.status, g.exit_reason) == (WON, "tp_touch"), g
 
     def test_noncrypto_wick_tol_is_tighter(self):
         # a +0.5% wick passes the crypto 1% gate but trips the non-crypto 0.25% gate

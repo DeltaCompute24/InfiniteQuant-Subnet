@@ -23,7 +23,8 @@ H = 3_600_000                   # one hour in ms
 
 
 def _minute(t_ms, hi):
-    return {"t": t_ms, "o": 1.0, "h": hi, "l": 1.0, "c": 1.0}
+    # Grading decides on the CLOSE, so a "touch" bar must close at the level.
+    return {"t": t_ms, "o": 1.0, "h": hi, "l": 1.0, "c": hi}
 
 
 # ── #1: forged asset_class is ignored by grading ──────────────────────────────
