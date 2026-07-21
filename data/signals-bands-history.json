@@ -2,7 +2,7 @@
  {
   "version": "volnorm-ewma7d",
   "effective_from_unix": 0,
-  "note": "Seed entry: the current board is treated as effective for all prior commits. On a band change, APPEND a new entry with effective_from_unix = the UTC epoch-seconds the new board goes live, and keep this one — in-flight signals are graded against the entry in force at their commit block (config.bands_as_of).",
+  "note": "Seed entry: the current board is treated as effective for all prior commits. On a band change, APPEND a new entry with effective_from_unix = the UTC epoch-seconds the new board goes live, and keep this one \u2014 in-flight signals are graded against the entry in force at their commit block (config.bands_as_of).",
   "bands": {
    "AUDCAD": {
     "asset_class": "forex",
@@ -462,6 +462,98 @@
     "asset_class": "crypto",
     "sl_bps": 142,
     "tp_bps": 142
+   }
+  }
+ },
+ {
+  "version": "volnorm-ewma7d-fxexpand17-20260721",
+  "effective_from_unix": 1784660400,
+  "note": "Forex expansion + recalibration, effective 2026-07-21T19:00:00Z. ADDS 4 vol-calibrated crosses (NZDCHF 21, AUDNZD 19, GBPCAD 23, NZDJPY 26) from Canefis GARCH backtest (1m Wilson LB 61-66%). RECALIBRATES 3 majors that had drifted under their EWMA-7d 12h vol curve (GBPUSD 20->26, USDCHF 20->25, USDCAD 13->17; GBPUSD had the board's worst winrate 33%/30d) and tightens NZDUSD 32->27 (over-vol). EURUSD/USDJPY/AUDUSD unchanged (on-curve; AUDUSD 23==vol, best 62% WR). Crypto/metals unchanged. Signals committed before effective_from_unix grade on the prior entry (no regrade). Miner universe now 17; product board_assets() widened to match.",
+  "bands": {
+   "BTCUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 103,
+    "tp_bps": 103
+   },
+   "ETHUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 150,
+    "tp_bps": 150
+   },
+   "SOLUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 175,
+    "tp_bps": 175
+   },
+   "XRPUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 142,
+    "tp_bps": 142
+   },
+   "XAUUSD": {
+    "asset_class": "forex-commodities",
+    "sl_bps": 62,
+    "tp_bps": 62
+   },
+   "XAGUSD": {
+    "asset_class": "forex-commodities",
+    "sl_bps": 125,
+    "tp_bps": 125
+   },
+   "EURUSD": {
+    "asset_class": "forex",
+    "sl_bps": 17,
+    "tp_bps": 17
+   },
+   "GBPUSD": {
+    "asset_class": "forex",
+    "sl_bps": 26,
+    "tp_bps": 26
+   },
+   "USDJPY": {
+    "asset_class": "forex",
+    "sl_bps": 17,
+    "tp_bps": 17
+   },
+   "USDCHF": {
+    "asset_class": "forex",
+    "sl_bps": 25,
+    "tp_bps": 25
+   },
+   "USDCAD": {
+    "asset_class": "forex",
+    "sl_bps": 17,
+    "tp_bps": 17
+   },
+   "AUDUSD": {
+    "asset_class": "forex",
+    "sl_bps": 23,
+    "tp_bps": 23
+   },
+   "NZDUSD": {
+    "asset_class": "forex",
+    "sl_bps": 27,
+    "tp_bps": 27
+   },
+   "NZDCHF": {
+    "asset_class": "forex",
+    "sl_bps": 21,
+    "tp_bps": 21
+   },
+   "AUDNZD": {
+    "asset_class": "forex",
+    "sl_bps": 19,
+    "tp_bps": 19
+   },
+   "GBPCAD": {
+    "asset_class": "forex",
+    "sl_bps": 23,
+    "tp_bps": 23
+   },
+   "NZDJPY": {
+    "asset_class": "forex",
+    "sl_bps": 26,
+    "tp_bps": 26
    }
   }
  }
