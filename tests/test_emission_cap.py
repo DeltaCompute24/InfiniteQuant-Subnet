@@ -99,7 +99,7 @@ class TestNoCliff:
         monkeypatch.setattr(config, "MINER_EMISSION_CAP", 1.0)
         assert not scoring._qualifies(5, 12)          # 42% now — below the gate
         fallen = _ms(1, self.NOW - 60 * DAY, 5, 12,   # currently UNqualified …
-                     [(self.NOW - 3 * DAY, 2.0), (self.NOW - 5 * DAY, 2.0)])  # … banked WOLF wins
+                     [(self.NOW - 1 * DAY, 2.0), (self.NOW - 2 * DAY, 2.0)])  # … banked WOLF wins
         active = _ms(2, self.NOW - 60 * DAY, 9, 12, [(self.NOW - DAY, 1.0)])
         w = scoring.compute_weights([fallen, active], self.NOW)
         assert w.get(1, 0.0) > 0.0                    # NO cliff — still earning
@@ -108,16 +108,18 @@ class TestNoCliff:
     def test_more_recent_qwins_earn_more(self, monkeypatch):
         monkeypatch.setattr(config, "MINER_EMISSION_CAP", 1.0)
         recent = _ms(1, self.NOW - 60 * DAY, 9, 12, [(self.NOW - 1 * DAY, 1.0)])
-        old = _ms(2, self.NOW - 60 * DAY, 9, 12, [(self.NOW - 25 * DAY, 1.0)])
+        old = _ms(2, self.NOW - 60 * DAY, 9, 12,
+                  [(self.NOW - 0.8 * config.EMISSION_DECAY_S, 1.0)])   # nearly decayed out
         w = scoring.compute_weights([recent, old], self.NOW)
         assert w[1] > w[2]                            # linear decay favours recency
 
     def test_qwin_fully_decayed_out_earns_nothing_from_pool(self, monkeypatch):
-        # a single qualified win older than SCORE_WINDOW contributes 0 to the pool
+        # a single qualified win older than EMISSION_DECAY_S contributes 0 to the pool
         monkeypatch.setattr(config, "MINER_EMISSION_CAP", 1.0)
         monkeypatch.setattr(config, "PROBATION_S", 0)     # isolate the pool math
         w = scoring.compute_weights(
-            [_ms(1, self.NOW - 90 * DAY, 5, 12, [(self.NOW - 40 * DAY, 2.0)])], self.NOW)
+            [_ms(1, self.NOW - 90 * DAY, 5, 12,
+                  [(self.NOW - config.EMISSION_DECAY_S - DAY, 2.0)])], self.NOW)
         assert w == {config.BURN_UID: 1.0}
 
 
@@ -136,17 +138,19 @@ class TestProbation:
         w = scoring.compute_weights([s], self.NOW)
         assert w[1] == pytest.approx(config.DUST_WEIGHT, rel=1e-6)
 
-    def test_decayed_out_within_30d_gets_dust(self):
-        # last qualified win 35d ago → tally 0, but only 5d past the earning-window
-        # close (35-30) → inside the 30d probation runway → dust
-        s = _ms(1, self.NOW - 90 * DAY, 5, 12, [(self.NOW - 35 * DAY, 2.0)])
+    def test_decayed_out_within_probation_gets_dust(self):
+        # last qualified win (decay window + 5d) ago → tally 0, but only 5d past the
+        # earning-window close → inside the 30d probation runway → dust
+        s = _ms(1, self.NOW - 90 * DAY, 5, 12,
+                [(self.NOW - config.EMISSION_DECAY_S - 5 * DAY, 2.0)])
         w = scoring.compute_weights([s], self.NOW)
         assert w[1] == pytest.approx(config.DUST_WEIGHT, rel=1e-6)
 
     def test_probation_expires_after_30d(self):
-        # last qualified win 70d ago → 40d past the earning-window close → runway
-        # expired → nothing (burns)
-        s = _ms(1, self.NOW - 120 * DAY, 5, 12, [(self.NOW - 70 * DAY, 2.0)])
+        # last qualified win (decay window + 40d) ago → 40d past the earning-window
+        # close → runway expired → nothing (burns)
+        s = _ms(1, self.NOW - 120 * DAY, 5, 12,
+                [(self.NOW - config.EMISSION_DECAY_S - 40 * DAY, 2.0)])
         w = scoring.compute_weights([s], self.NOW)
         assert 1 not in w
         assert w[config.BURN_UID] == pytest.approx(1.0)

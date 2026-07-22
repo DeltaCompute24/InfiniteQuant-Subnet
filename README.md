@@ -8,7 +8,7 @@ Bittensor subnet 89. Miners commit encrypted directional trade calls. Validators
 
 1. **COMMIT** — pick a pair + direction. The signal is encrypted with a 2-hour [drand](https://drand.love) timelock; `SHA256(signal)` goes on-chain via `set_commitment`. The commit block is the signal's timestamp. Entry price = open of the first 1-second bar at or after that block's time — every validator derives the same entry.
 2. **REVEAL** — after 2 hours the timelock opens. Validators verify the plaintext against the on-chain hash, then grade on 1-minute candles: TP touched first = **WON** · SL touched first = **LOST** · neither by the horizon = **WASH**.
-3. **EARN** — emissions ∝ trailing-30-day qualified wins (capped at 20) × hit-rate tier.
+3. **EARN** — emissions ∝ trailing-7-day qualified wins (capped at 20) × hit-rate tier.
 
 - A committed blob that never reveals is a decisive **LOSS**. Committing costs what revealing costs.
 - Candles are bad-tick sanitized (uncorroborated wicks clamped; crypto cross-checked against Hyperliquid). Forex/metals rollover bars [20:55–21:20 UTC] are dropped from grading.
@@ -40,7 +40,7 @@ your weight ∝ (min(wins last 30 d, 20) × tier) / Σ same over all qualified
 ```
 
 - Reputation decays (~60 d / ~100 trades): old wins can't mask bad recent trading, and a bad early stretch ages out.
-- Wins decay linearly over 30 days and are capped at 20 — conviction outweighs volume.
+- Wins decay linearly over 7 days and are capped at 20 — conviction outweighs volume.
 - **Warmup:** first 8 days = dust weight. Warmup trades build the record; warmup wins never pay. Post fresh wins after warmup to earn.
 - If no qualified miner has recent wins, emissions burn.
 
@@ -132,7 +132,7 @@ No collateral, no deposit — weight is earned on track record:
 |---|---|
 | Immunity (first 8 days) | dust weight |
 | Below the confidence gate | no emissions |
-| Qualified (≥ 8 decisive, Wilson LB ≥ 50%) | emissions ∝ capped trailing-30d wins × tier |
+| Qualified (≥ 8 decisive, Wilson LB ≥ 50%) | emissions ∝ capped trailing-7d wins × tier |
 | Lifetime hit-rate confidently < 45% (≥ 40 decisive) | **eliminated** — hotkey zeroed permanently |
 
 Elimination is a lifetime confidence test, separate from the (reversible) qualify gate: a cold streak drops you to zero emissions until you recover; only a durably sub-floor record is removed.

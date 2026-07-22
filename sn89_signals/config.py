@@ -147,10 +147,17 @@ FOREX_ROLLOVER_UTC = ((20, 55), (21, 20))   # [20:55, 21:20)
 # identically. See grader.py.
 
 # ── Scoring (CONSENSUS — §7 of SPEC) ─────────────────────────────────────────
-SCORE_WINDOW_S = 30 * 24 * 3600     # EMISSION window: a miner's share is sized by
-                                    # its WON count in the trailing 30 days, so you
-                                    # must keep trading to earn. (Distinct from the
-                                    # hit-rate window below.)
+SCORE_WINDOW_S = 30 * 24 * 3600     # ELIMINATION / reporting window: the trailing
+                                    # span for the elimination hit-rate floor and the
+                                    # trailing_* reporting counters. (Distinct from
+                                    # the emission decay and hit-rate windows below.)
+
+# EMISSION decay window. A qualified win decays LINEARLY to zero over this span:
+# full tier weight at the moment it lands, zero once it is EMISSION_DECAY_S old.
+# One week — a win pays for a week and then it is gone, so a miner's share tracks
+# what it did THIS week, not what it did a month ago. Recency is the whole point:
+# emissions must follow current trading, and a stale book cannot coast.
+EMISSION_DECAY_S = int(os.getenv("SN89_EMISSION_DECAY_S", str(7 * 24 * 3600)))
 
 # Hit-rate REPUTATION window. The qualify gate and the per-win tier are computed
 # over a ROLLING window — the trailing HIT_RATE_WINDOW_S, capped at the most
@@ -204,10 +211,10 @@ IMMUNITY_S = 8 * 24 * 3600          # from first commit observed for the hotkey
 DUST_WEIGHT = 1e-4                  # normalized floor during immunity
 # Probation grace: a QUALIFIED miner that currently earns zero emission keeps the
 # dust floor for this long instead of dropping straight to nothing. Covers (a) a
-# miner whose earning wins have aged out of the SCORE_WINDOW (was earning, now 0)
+# miner whose earning wins have aged out of the decay window (was earning, now 0)
 # and (b) a warmup-qualified miner that hasn't landed a post-warmup win yet. The
 # clock runs from the close of the miner's earning window (last post-warmup win +
-# SCORE_WINDOW_S), or from warmup end if it has no post-warmup win. 0 disables.
+# EMISSION_DECAY_S), or from warmup end if it has no post-warmup win. 0 disables.
 PROBATION_S = int(os.getenv("SN89_PROBATION_S", str(30 * 24 * 3600)))
 BURN_UID = 0                        # absorbs weight when nobody qualifies
 # Miner emission cap (Mantis-sn123-style). The field of real miners collectively
