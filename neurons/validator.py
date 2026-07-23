@@ -29,7 +29,7 @@ import bittensor as bt
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from sn89_signals import bucket, chain, config, crypto, replay, scoring
+from sn89_signals import hf_grade, bucket, chain, config, crypto, replay, scoring
 from sn89_signals.grader import PENDING, grade
 from sn89_signals.schema import Signal, ValidationError, validate
 from timelock import Timelock
@@ -607,6 +607,24 @@ class Validator:
                       f"{msg or 'no message returned by SDK'}")
         if any_ok:
             self._last_weights_block = block
+
+        # ── mechanism 1 (HF) — same signers, same tempo, graded from PUBLIC logs ──
+        # Wrapped so ANY HF failure is isolated: mecid 0 already committed above and
+        # is never affected. Graded off HF_PUBLIC_BASE, so every validator computes
+        # the identical vector (replayable, same as mecid 0). All-burn until an HF
+        # miner clears the 8-decisive gate.
+        if config.HF_MECID1_WEIGHTS:
+            try:
+                from sn89_signals import hf as _hf, hf_grade as _hfg
+                hw = _hfg.mecid1_weights(uid_by_hotkey, now)
+                huids, hvals = list(hw.keys()), list(hw.values())
+                for sw in signers:
+                    ok, msg = self.ch.set_mechanism_weights(sw, _hf.MECID_1, huids, hvals)
+                    print(f"  ⚡ set_mechanism_weights[mecid1][{sw.hotkey.ss58_address[:8]}…] "
+                          f"ok={ok} ({len(huids)} uids, burn={hw.get(config.BURN_UID, 0):.3f})"
+                          + (f" — {msg}" if msg else ""))
+            except Exception as e:  # noqa: BLE001 — never let HF break mecid-0
+                print(f"  ! mecid-1 weights skipped (mecid-0 unaffected): {e}")
 
     # ── loop ─────────────────────────────────────────────────────────────────
     def run(self):

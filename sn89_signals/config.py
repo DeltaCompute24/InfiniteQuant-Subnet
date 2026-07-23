@@ -626,6 +626,13 @@ POLL_INTERVAL_S = 30
 # once per TEMPO by the normal cadence.)
 WEIGHTS_RETRY_BLOCKS = int(os.getenv("SN89_WEIGHTS_RETRY_BLOCKS", "100"))
 
+# Set mechanism-1 (HF) weights from the validator, every tempo, right after mecid 0.
+# ON by default so validators set BOTH mechanisms out of the box on update. The HF
+# weights are graded from the PUBLIC window logs (hf_grade), so every validator
+# reproduces the same vector — same trust model as mecid 0. Any failure here NEVER
+# touches the mecid-0 commit (which already landed above). Flip to 0 to disable.
+HF_MECID1_WEIGHTS = os.getenv("SN89_HF_MECID1_WEIGHTS", "1") == "1"
+
 # Blob fetching is bounded so a slow or malicious host can't stall the
 # synchronous validator loop (audit #7). Each fetch has a hard wall-clock
 # deadline (bucket.fetch); per loop iteration the outstanding fetches run in a

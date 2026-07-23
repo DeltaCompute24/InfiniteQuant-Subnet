@@ -394,6 +394,27 @@ class Chain:
             return ok, str(resp[1]) if len(resp) > 1 else ""
         return bool(resp), ""                      # bare bool
 
+    def set_mechanism_weights(
+        self, wallet: "bt.Wallet", mecid: int, uids: list[int], weights: list[float]
+    ) -> tuple[bool, str]:
+        """Commit a sub-mechanism (mecid) weight vector via the timelocked
+        commit-reveal path. Commit-reveal is enabled on SN89, so a plain
+        set_mechanism_weights is rejected (CommitRevealEnabled) -- and the tlock
+        commit MUST bind to get_mechid_storage_index(netuid, mecid), not the bare
+        netuid, or it is accepted but never reveals. The SDK extrinsic handles both;
+        this wraps it so the validator sets mecid-1 the same way it sets mecid-0."""
+        from bittensor.core.extrinsics.weights import commit_timelocked_weights_extrinsic
+        resp = commit_timelocked_weights_extrinsic(
+            subtensor=self.st, wallet=wallet, netuid=self.netuid, mechid=mecid,
+            uids=uids, weights=weights, block_time=12.0, mev_protection=False,
+            wait_for_inclusion=True, wait_for_finalization=False,
+            wait_for_revealed_execution=False)
+        if hasattr(resp, "success"):
+            return bool(resp.success), str(getattr(resp, "message", "") or "")
+        if isinstance(resp, tuple):
+            return bool(resp[0]), str(resp[1]) if len(resp) > 1 else ""
+        return bool(resp), ""
+
     def metagraph(self):
         return self.st.metagraph(netuid=self.netuid)
 
