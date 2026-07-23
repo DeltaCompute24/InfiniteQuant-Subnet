@@ -311,7 +311,13 @@ BURN_UID = 0                        # absorbs weight when nobody qualifies
 # combined miner weight (immune dust + qualified pro-rata) DOWN to the cap — it
 # never inflates miner weight upward, so when nobody qualifies leftovers still
 # burn exactly as before. 1.0 disables the cap (legacy full pass-through).
-MINER_EMISSION_CAP = float(os.getenv("SN89_MINER_EMISSION_CAP", "0.30"))
+# 2026-07-23: doubled the miner incentive pool for the two-mechanism launch.
+# 0.30 -> 0.60: real miners now collectively receive up to 60%% of incentive
+# (was 30%%), burn 70%% -> 40%%. Applies to BOTH mechanisms (hf.HF_MINER_EMISSION_CAP
+# defaults to this), so with a 50/50 emission split miners get 60%% of total.
+# Must live in master, not an env override, or external validators would burn
+# a different fraction and disagree with the chef in consensus.
+MINER_EMISSION_CAP = float(os.getenv("SN89_MINER_EMISSION_CAP", "0.60"))
 STRIKE_LIMIT = 3                    # consistency failures in 30d ⇒ zeroed 30d
 STRIKE_WINDOW_S = 30 * 24 * 3600
 
