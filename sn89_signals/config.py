@@ -146,6 +146,42 @@ FOREX_ROLLOVER_UTC = ((20, 55), (21, 20))   # [20:55, 21:20)
 # availability-dependent fallback, so every validator replays the grade
 # identically. See grader.py.
 
+# ── Grading rule (CONSENSUS, as-of versioned) ────────────────────────
+# A level is HIT when a traded/quoted price TOUCHES it. Two substrates have been
+# used to decide that:
+#
+#   "close_1m"    a 1-minute aggregate CLOSE crosses the level  (2026-07-20, 3d79274)
+#   "touch_ticks" any tick in the anchored series touches it    (the HF rule)
+#
+# close_1m was never a principle. It was a prosthetic for an untrustworthy
+# substrate: the high/low of a Polygon 1-minute bar can be a single untradeable
+# print with no depth behind it, which is what stopped USDCAD #3546. Discarding
+# every intrabar price was a blunt way to reject one bad print, and it also made
+# wide TPs strictly harder to earn.
+#
+# It was justified in-code as matching the SN8/PTN standard. THAT WAS FALSE --
+# PTN fires brackets on the EXTREMUM of a 30 s websocket window
+# (order_trigger.py: LONG SL min_bid <= SL, LONG TP max_bid >= TP). PTN grades on
+# the touch; we graded on the close and cited them as authority for it.
+#
+# touch_ticks fixes #3546 at the source instead: that 1-pip wick never appeared on
+# the tick feed at all, so a touch rule reading real quotes would not have stopped
+# him either. It also unifies both mechanisms on ONE rule -- LF and HF then differ
+# only in bands, horizon, and which series they are handed.
+#
+# NEVER retroactive: resolved as-of the call's own t0, exactly like the bands, so
+# arming it can never re-grade a call that already scored.
+# 0 = not scheduled. Set to the HF launch timestamp to arm it.
+TOUCH_TICKS_FROM = int(os.getenv("SN89_TOUCH_TICKS_FROM", "0"))
+
+
+def grading_rule_as_of(t0_unix: float) -> str:
+    """Which hit rule governs a call committed at t0."""
+    if TOUCH_TICKS_FROM and t0_unix >= TOUCH_TICKS_FROM:
+        return "touch_ticks"
+    return "close_1m"
+
+
 # ── Scoring (CONSENSUS — §7 of SPEC) ─────────────────────────────────────────
 SCORE_WINDOW_S = 30 * 24 * 3600     # ELIMINATION / reporting window: the trailing
                                     # span for the elimination hit-rate floor and the

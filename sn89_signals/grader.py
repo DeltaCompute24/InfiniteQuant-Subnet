@@ -46,6 +46,30 @@ class Grade:
     entry_price: float | None
 
 
+def touch_hit(px: float, is_long: bool, tp_price: float, sl_price: float):
+    """THE canonical hit rule, shared by both mechanisms.
+
+    A level is hit when a traded/quoted price touches it. TP sits strictly on one
+    side of entry and SL on the other, so one price can never satisfy both -- there
+    is no "gapped through both levels" case to arbitrate.
+
+    The SUBSTRATE is the caller's business (ticks for mechanism 1; whatever
+    config.grading_rule_as_of selects for mechanism 0). The RULE does not vary
+    between mechanisms -- that is the entire point of this function existing.
+    """
+    if is_long:
+        if px >= tp_price:
+            return "won"
+        if px <= sl_price:
+            return "lost"
+    else:
+        if px <= tp_price:
+            return "won"
+        if px >= sl_price:
+            return "lost"
+    return None
+
+
 def grade(sig: Signal, t0_ms: int, now_ms: int,
           entry_price: float | None = None,
           bars: list[dict] | None = None) -> Grade:
