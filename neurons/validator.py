@@ -413,6 +413,21 @@ class Validator:
                 "COALESCE(t0_ms, CAST(t0_unix * 1000 AS INTEGER)), plaintext "
                 "FROM signals WHERE status IN ('revealed','pending')").fetchall():
             s = Signal.from_bytes(pt.encode())
+            # Re-apply the GOVERNED band before grading. schema.validate() already
+            # normalises tp/sl to the board row as-of t0 when the blob is revealed,
+            # but the reveal path stores the miner's RAW plaintext -- it is hash-bound
+            # to the commitment and must stay verbatim -- so that normalisation was
+            # discarded and never reached the grader. Without this the TP/SL brackets
+            # are built from the miner's payload, so a hotkey running a stale vendored
+            # board is scored against its OWN bands instead of the governed board's.
+            # SKIP (never void) on failure: this payload already passed validate() at
+            # reveal, so a raise here means a transient board-resolution problem, and
+            # voiding on that would destroy good signals. It retries next cycle.
+            try:
+                validate(s, t0_unix=t0_ms / 1000.0)
+            except Exception as e:  # noqa: BLE001
+                print(f"  ! band-normalise skip {commit_hex[:12]}… {e}")
+                continue
             g = grade(s, t0_ms, now_ms)
             if g.status == PENDING:
                 self.db.execute("UPDATE signals SET status='pending', entry_price=? "
