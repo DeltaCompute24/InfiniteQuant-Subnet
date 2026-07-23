@@ -59,18 +59,54 @@ HF_BOARD_V1 = {
     "USDJPY": ( 4.0,  4.0,  7200, "forex"),               #  6 pips   8.0x
 }
 
+# Typical spread per pair in BPS, measured 2026-07-22. The board is built against
+# these: a pair only earns a slot if its band clears MIN_BAND_SPREAD_RATIO x spread,
+# because below that the outcome is microstructure rather than opinion. Kept in the
+# module (not a script) so the invariant is testable and a ninth pair cannot be added
+# without meeting it.
+HF_TYPICAL_SPREAD_BPS = {
+    "XAUUSD": 0.61, "BTCUSD": 0.91, "ETHUSD": 1.81, "SOLUSD": 2.56,
+    "XRPUSD": 1.32, "EURUSD": 0.53, "GBPUSD": 0.67, "USDJPY": 0.49,
+}
+MIN_BAND_SPREAD_RATIO = 8.0
+
+
+def band_spread_ratio(pair: str, t0_unix: float = 0.0) -> float | None:
+    """Band / typical spread. None when the spread is unmeasured — which must block
+    a listing rather than pass it silently."""
+    row = (hf_bands_as_of(t0_unix) or HF_BOARD_V1).get(str(pair).upper())
+    sp = HF_TYPICAL_SPREAD_BPS.get(str(pair).upper())
+    if not row or not sp:
+        return None
+    return row[0] / sp
+
+
 # As-of versioned exactly like the LF board, so a band change never re-grades a past
 # call and any validator can resolve the board in force at any t0.
+#
+# The first entry's effective_from is the LAUNCH time, not 0, and hf_bands_as_of
+# returns None before it. A default-to-v1 fallback would have made a pre-launch
+# timestamp resolve to a board that did not exist at that time — the same class of
+# error as grading against a board row the miner was never subject to.
+# The board exists from this instant, not before. This is a VALIDITY gate, not an
+# earning gate -- whether HF pays anything is governed solely by
+# MechanismEmissionSplit on chain, which is a separate lever. Keeping the two apart
+# means HF can accept and grade calls while still paying zero, which is exactly the
+# preview posture.
+HF_LAUNCH_FROM = int(os.getenv("SN89_HF_LAUNCH_FROM", "1784764800"))   # 2026-07-23T00:00:00Z
 HF_BANDS_HISTORY = (
-    (0, HF_BOARD_V1),
+    (HF_LAUNCH_FROM, HF_BOARD_V1),
 )
 
-MIN_BAND_SPREAD_RATIO = 8.0      # the inclusion test above, recorded for re-measures
 
+def hf_bands_as_of(t0_unix: float) -> dict | None:
+    """The HF board in force at t0, or None if HF was not yet live.
 
-def hf_bands_as_of(t0_unix: float) -> dict:
-    """The HF board in force at t0 (mirrors config.bands_as_of)."""
-    board = HF_BANDS_HISTORY[0][1]
+    None is load-bearing: validate_submission then rejects every pair, which is the
+    correct answer before launch. Returning a board would silently grade calls that
+    could not have existed.
+    """
+    board = None
     for eff, b in HF_BANDS_HISTORY:
         if t0_unix >= eff:
             board = b
@@ -78,7 +114,8 @@ def hf_bands_as_of(t0_unix: float) -> dict:
 
 
 def hf_horizon_s(pair: str, t0_unix: float) -> int | None:
-    row = hf_bands_as_of(t0_unix).get(pair.upper())
+    board = hf_bands_as_of(t0_unix)
+    row = (board or {}).get(pair.upper())
     return None if row is None else int(row[2])
 
 
@@ -245,7 +282,12 @@ MIN_SETTLE_MS = 50
 
 
 def grid_ms_for(pair: str, t0_unix: float = 0.0) -> int:
-    row = hf_bands_as_of(t0_unix).get(str(pair).upper())
+    # Falls back to the v1 board when t0 predates launch: the grid is a mechanical
+    # property of the FEED, not a governed consensus value, so it must resolve even
+    # for a timestamp with no board. Never returns finer than the coarsest grid for
+    # an unknown pair.
+    board = hf_bands_as_of(t0_unix) or HF_BOARD_V1
+    row = board.get(str(pair).upper())
     return GRID_MS_DEFAULT if row is None else GRID_MS_BY_CLASS.get(row[3], GRID_MS_DEFAULT)
 
 
@@ -399,6 +441,8 @@ class HFRejected(Exception):
 
 def validate_submission(payload: dict, t0_unix: float) -> None:
     board = hf_bands_as_of(t0_unix)
+    if board is None:
+        raise HFRejected("hf_not_live_at_t0")
     pair = str(payload.get("trade_pair", "")).upper()
     if pair not in board:
         raise HFRejected(f"pair_not_on_hf_board:{pair}")
@@ -455,6 +499,73 @@ HF_QUALIFY_LB_FLOOR = config.QUALIFY_LB_FLOOR             # identical to mech 0
 HF_HIT_RATE_WINDOW_S = config.HIT_RATE_WINDOW_S           # 60 days, same as mech 0
 HF_HIT_RATE_WINDOW_TRADES = int(os.getenv("SN89_HF_HIT_RATE_WINDOW_TRADES", "2000"))
 
+# Within-mechanism burn cap for HF, analogous to config.MINER_EMISSION_CAP for
+# mecid 0. The chain-level emission split divides emissions BETWEEN mechanisms;
+# this caps how much of HF's own share reaches miners vs. burns to UID 0. Defaults
+# to the mecid-0 cap so both mechanisms burn the same fraction unless set otherwise.
+HF_MINER_EMISSION_CAP = float(os.getenv("SN89_HF_MINER_EMISSION_CAP",
+                                        str(config.MINER_EMISSION_CAP)))
+
+MECID_1 = 1
+
+
+def hf_compute_weights(decisive_by_hk: dict, first_seen_by_hk: dict,
+                       uid_by_hk: dict, now: float) -> dict:
+    """{uid: normalized_weight} for mecid 1, from HF-ONLY graded outcomes.
+
+    Reuses the SAME battle-tested gate and tally as mecid 0 (scoring.qualified_wins,
+    scoring.compute_weights, scoring._qualifies) so the two mechanisms behave
+    identically — a win qualifies only if the miner had >= QUALIFY_MIN_DECISIVE (8)
+    decisive outcomes with a passing Wilson bound AT THAT WIN. The ONLY differences
+    are the HF window constants (48h decay, 200 cap) and the HF burn cap.
+
+    What is deliberately NOT run here (unlike mecid 0): copy detection, referrals,
+    and elimination re-derivation. Signed real-time submissions have no timelock-copy
+    surface, HF has no referral program, and a bad HF miner simply stops qualifying
+    and decays to zero (the no-cliff design) rather than being eliminated.
+
+    CRITICAL — decisive_by_hk must contain ONLY HF outcomes. A miner qualified on
+    mecid 0 is NOT qualified here: their HF decisive count starts at zero, so their
+    first HF win cannot qualify (1 < 8). Verified by test.
+
+    Constant overrides are scoped with try/finally and NEVER applied at import time,
+    because hf.py is imported by the ingest — a module-level mutation of config would
+    corrupt LF scoring in any process that imports both.
+    """
+    from . import scoring
+
+    saved = {k: getattr(config, k) for k in (
+        "EMISSION_DECAY_S", "WIN_CAP", "SCORE_WINDOW_S",
+        "HIT_RATE_WINDOW_TRADES", "HIT_RATE_WINDOW_TRADES_V2", "MINER_EMISSION_CAP")}
+    try:
+        config.EMISSION_DECAY_S = HF_EMISSION_DECAY_S
+        config.WIN_CAP = HF_WIN_CAP
+        config.SCORE_WINDOW_S = HF_EMISSION_DECAY_S          # trailing_* (reporting) only
+        # make hit_rate_window_trades_as_of return the HF cap for every t0
+        config.HIT_RATE_WINDOW_TRADES = HF_HIT_RATE_WINDOW_TRADES
+        config.HIT_RATE_WINDOW_TRADES_V2 = HF_HIT_RATE_WINDOW_TRADES
+        config.MINER_EMISSION_CAP = HF_MINER_EMISSION_CAP
+
+        states = []
+        for hk, decisive in decisive_by_hk.items():
+            uid = uid_by_hk.get(hk)
+            if uid is None:
+                continue
+            fs = first_seen_by_hk.get(hk)
+            if fs is None:
+                continue
+            rep_won, rep_dec, won_all, _won_orig, _copies, tw = scoring.score_inputs(
+                decisive, fs, now)
+            qwins = scoring.qualified_wins(decisive, fs, habitual=False)
+            states.append(scoring.MinerState(
+                hotkey=hk, uid=uid, first_seen_unix=fs,
+                rep_wins=rep_won, rep_decisive=rep_dec, trailing_wins=won_all,
+                qwins=qwins))
+        return scoring.compute_weights(states, now)
+    finally:
+        for k, v in saved.items():
+            setattr(config, k, v)
+
 
 # ── on-chain anchor encoding (CONSENSUS) ─────────────────────────────────────
 # A commitment field holds at most 128 RAW BYTES, and two 64-char hex roots alone
@@ -467,6 +578,13 @@ HF_HIT_RATE_WINDOW_TRADES = int(os.getenv("SN89_HF_HIT_RATE_WINDOW_TRADES", "200
 # extrinsics from the anchoring hotkey, exactly as mechanism 0 does for miners. A
 # window whose anchor was overwritten before anyone observed it is unverifiable, which
 # is why the anchoring hotkey must anchor and do nothing else.
+# Where a replaying validator fetches published HF window logs (receipts + ticks
+# + anchor) - the mecid-1 analogue of config.R2_PUBLIC_BASE for LF blobs. A window
+# lives at <base>/<w>/{receipts.jsonl,ticks.jsonl,ticks.json,anchor.json}; the
+# index is <base>/index.json. Makes HF weights REPRODUCIBLE by any validator.
+HF_PUBLIC_BASE = os.getenv("SN89_HF_PUBLIC_BASE",
+                           "https://partner.infinitequant.app/sn89/hf")
+
 ANCHOR_PREFIX = "sn89hf:1:"
 ANCHOR_MAX_BYTES = 128
 
