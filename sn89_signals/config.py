@@ -225,6 +225,32 @@ HIT_RATE_WINDOW_TRADES_V2_FROM = int(
     os.getenv("SN89_HIT_RATE_TRADES_V2_FROM", "1784937600"))   # 2026-07-25T00:00:00Z
 
 
+# ── cross-mechanism pair lock, LF side (CONSENSUS, as-of versioned) ──────────
+# A pair a hotkey trades on ONE mechanism is locked on the other for
+# hf.PAIR_LOCK_S. The HF side enforces synchronously at ingest (a signed refusal,
+# the call never exists). The LF side cannot: an LF commit is already on chain and
+# immutable by the time we can see it, so the only available action is to VOID it
+# at reveal, with a reason and no strike.
+#
+# That asymmetry is inherent to the two transports, not a design choice, and it
+# should be stated plainly to miners: on HF you are told no; on LF the call is
+# accepted on chain and then voided.
+#
+# Replayability: the lock resolves from the PUBLISHED, anchored HF receipt logs,
+# never from our private ingest state, so any third party reaches the same verdict.
+# There is no race — LF validity is evaluated at reveal (2 h after commit) and HF
+# windows anchor within 180 s, so every relevant HF window is long since sealed.
+#
+# 0 = not enforced. Arm only once HF receipts are actually being published, or
+# every LF call would be judged against an empty lock set and nothing would void.
+PAIR_LOCK_LF_FROM = int(os.getenv("SN89_PAIR_LOCK_LF_FROM", "0"))
+
+
+def pair_lock_lf_enforced_as_of(t0_unix: float) -> bool:
+    """Whether an LF call at t0 is subject to the cross-mechanism lock."""
+    return bool(PAIR_LOCK_LF_FROM and t0_unix >= PAIR_LOCK_LF_FROM)
+
+
 def hit_rate_window_trades_as_of(t0_unix: float) -> int:
     """Reputation trade cap in force at t0 (mirrors bands_as_of)."""
     if HIT_RATE_WINDOW_TRADES_V2_FROM and t0_unix >= HIT_RATE_WINDOW_TRADES_V2_FROM:

@@ -52,11 +52,18 @@ class GradedRow:
 
 
 # ── validity (deterministic re-derivation of the live gateway checks) ─────────
-def apply_validity_filters(rows: list[GradedRow]) -> list[GradedRow]:
+def apply_validity_filters(rows: list[GradedRow],
+                           hf_locks: dict | None = None) -> list[GradedRow]:
     """Voids rows in-place per §6.4 and returns the list (ordered by t0, then
     hotkey as the same-block tiebreak — callers must pre-sort identically).
 
     Voided rows: not graded, don't count toward quotas, no strike.
+
+    `hf_locks` is the cross-mechanism pair-lock index ((hotkey, PAIR, mecid) ->
+    last submit ms), built from the PUBLISHED HF receipt logs. Passing None (the
+    default) disables the check entirely, which is also what happens before
+    config.PAIR_LOCK_LF_FROM. Callers that cannot see the HF logs must pass None
+    rather than an empty dict, so "no lock data" never masquerades as "no locks".
     """
     rows = sorted(rows, key=lambda r: (r.t0_unix, r.hotkey))
     per_hotkey_times: dict[str, list[float]] = {}           # accepted commits
@@ -90,6 +97,16 @@ def apply_validity_filters(rows: list[GradedRow]) -> list[GradedRow]:
         if sum(1 for t in times if int(t // 86_400) == day) >= cap:
             r.status, r.void_reason = "void", "daily_quota"
             continue
+
+        # cross-mechanism pair lock: this pair traded on HF inside the window?
+        # Checked AFTER the quota checks so a locked call does not also consume
+        # the hotkey's daily allowance -- it was never a valid call to begin with.
+        if hf_locks is not None and config.pair_lock_lf_enforced_as_of(r.t0_unix):
+            from . import hf as _hf
+            if _hf.is_pair_locked(hf_locks, r.hotkey, r.trade_pair,
+                                  _hf.MECH_LF, int(r.t0_unix * 1000)):
+                r.status, r.void_reason = "void", "pair_locked_other_mechanism"
+                continue
 
         # accepted
         times.append(r.t0_unix)
