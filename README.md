@@ -68,6 +68,8 @@ your weight ∝ (min(wins last 30 d, 20) × tier) / Σ same over all qualified
 
 Bands are per-asset, volatility-scaled, symmetric 1:1. A signal is graded against the band in force **at its commit block** (`data/signals-bands.json` + `data/signals-bands-history.json`) — a band update never changes an in-flight signal.
 
+The table above is the **low-frequency** board (mechanism 0). The **high-frequency** board (mechanism 1) is a smaller set — see *Mine — High-Frequency* below.
+
 ---
 
 ## Mine
@@ -99,6 +101,56 @@ python neurons/miner.py --wallet.name mywallet --wallet.hotkey miner submit --pa
 ```bash
 bash run.sh miner follow --wallet.name mywallet --wallet.hotkey miner
 ```
+
+### Mine — High-Frequency (mechanism 1)
+
+SN89 runs **two incentive mechanisms** under one netuid. Mechanism 0 is the
+low-frequency Signals program above. Mechanism 1 is **high-frequency**: shorter
+holding times, tighter bands sized to what a pair actually moves in that window, and
+up to **30 calls/day**. Same hotkey — **no separate registration**. The owner sets
+the emission share between the two on chain.
+
+HF does not commit each call on chain (a 12-second block cannot carry HF cadence).
+Instead you open a WebSocket to the ingest, send a **signed frame**, and get back a
+**countersigned receipt** — the receipt is your proof we accepted the call. Every
+window of receipts is Merkle-rooted on chain and the full log is published, so
+grading is replayable: anyone can re-derive the weights from the public logs.
+
+```bash
+# one HF call (same wallet/hotkey as your LF miner)
+python neurons/miner.py --wallet.name mywallet --wallet.hotkey miner \
+    submit-hf --pair XAUUSD --direction LONG
+```
+
+The command signs the frame with your hotkey, sends it to `wss://hf.infinitequant.app`,
+verifies the receipt against the published ingest key, and appends it to
+`~/.sn89/hf_receipts_<hotkey>.jsonl` (keep these — they are your fraud-proof). A
+strictly-increasing sequence per hotkey is tracked in `~/.sn89/hf_seq_<hotkey>.json`.
+
+**HF board** (bands fixed by the board; you cannot choose them):
+
+| Pair | TP / SL | Horizon |
+|---|---|---|
+| XAUUSD | ±12 bps | 30 min |
+| BTCUSD | ±19 bps | 30 min |
+| ETHUSD / SOLUSD / XRPUSD | ±24 bps | 30 min |
+| EURUSD | ±5 bps | 120 min |
+| GBPUSD | ±6 bps | 120 min |
+| USDJPY | ±4 bps | 120 min |
+
+Fewer pairs than LF by design: a pair is listed only if its band clears ≈8× the
+typical spread at the HF horizon — below that the outcome is microstructure, not
+signal. Live board + wash times: <https://partner.infinitequant.app/sn89/mechanisms>.
+
+**Rules.** Up to 30/day per hotkey, ≥250 ms apart. A pair you trade on one mechanism
+is **locked on the other for 24 h** (same view can't earn twice). Qualification is the
+same gate as LF — 8 decisive results, hit-rate beating a coin flip — computed over your
+**HF-only** record, so your LF standing gives no head start: a first HF win earns nothing.
+
+**Verify us.** Every window's receipts + ticks + anchor are public at
+`<HF_PUBLIC_BASE>/<window>/` (index at `.../index.json`). Fetch them, recompute the
+Merkle roots, check them against the on-chain anchor, re-grade off the published
+ticks. Full design: <https://infinitequant.app/signals-hf-spec>.
 
 ### Blob hosting
 

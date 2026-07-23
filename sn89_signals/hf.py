@@ -508,6 +508,14 @@ HF_MINER_EMISSION_CAP = float(os.getenv("SN89_HF_MINER_EMISSION_CAP",
 
 MECID_1 = 1
 
+# ── self-hosted miner submission ─────────────────────────────────────────────
+# Where a miner sends signed HF frames, and the ingest's published receipt key so
+# the miner can verify the receipt it gets back is genuinely ours. The key set is
+# also published on chain; this default is the current ingest identity.
+HF_INGEST_WSS = os.getenv("SN89_HF_INGEST_WSS", "wss://hf.infinitequant.app")
+HF_RECEIPT_PUBKEY = os.getenv(
+    "SN89_HF_RECEIPT_PUBKEY", "5FTc1VxLMabBGqzqHjy62cDuMmRLGdMohxyhkBAUBpzfstCz")
+
 
 def hf_compute_weights(decisive_by_hk: dict, first_seen_by_hk: dict,
                        uid_by_hk: dict, now: float) -> dict:

@@ -41,7 +41,7 @@ import bittensor as bt
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from sn89_signals import bucket, chain, config, crypto
+from sn89_signals import bucket, chain, config, crypto, hf
 from sn89_signals.schema import Signal, ValidationError, validate
 
 
@@ -184,6 +184,104 @@ def submit(wallet: "bt.Wallet", sig: Signal, ch: chain.Chain | None = None) -> d
         "blob_url": url,
         "pushed": pushed,  # owner has the blob in real time (relay or webhook)
     }
+
+
+
+def _hf_seq_path(hotkey: str) -> str:
+    return os.path.expanduser(f"~/.sn89/hf_seq_{hotkey}.json")
+
+
+def _hf_next_seq(hotkey: str) -> int:
+    """Strictly-increasing per-hotkey sequence — the ingest rejects a stale seq,
+    so this must never go backwards. Persisted locally."""
+    p = _hf_seq_path(hotkey)
+    seq = 0
+    try:
+        with open(p, encoding="utf-8") as fh:
+            seq = int(json.load(fh).get("seq", 0))
+    except (OSError, ValueError):
+        pass
+    seq += 1
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p, "w", encoding="utf-8") as fh:
+        json.dump({"seq": seq}, fh)
+    return seq
+
+
+def submit_hf(wallet: "bt.Wallet", pair: str, direction: str) -> dict:
+    """Submit one HF call to the ingest and return the signed receipt.
+
+    Unlike LF (an on-chain commit), HF binds via a countersigned receipt over a
+    persistent WSS connection — the receipt IS your proof we accepted the call.
+    The board dictates the band and horizon; you cannot choose them.
+    """
+    import asyncio
+    import secrets
+    import websockets
+    from bittensor_wallet import Keypair
+
+    pair = pair.upper()
+    direction = direction.upper()
+    now = time.time()
+    board = hf.hf_bands_as_of(now)
+    if board is None or pair not in board:
+        raise ValueError(
+            f"{pair} is not on the HF board. HF pairs: {', '.join(sorted(board or {}))}")
+    tp, sl, horizon_s, cls = board[pair]
+    if direction not in ("LONG", "SHORT"):
+        raise ValueError("direction must be LONG or SHORT")
+
+    hk = wallet.hotkey.ss58_address
+    seq = _hf_next_seq(hk)
+    nonce = secrets.token_hex(16)
+    ts_ms = int(now * 1000)
+    payload = {"trade_pair": pair, "direction": direction, "asset_class": cls,
+               "tp_bps": tp, "sl_bps": sl, "horizon_s": horizon_s}
+    sb = hf.submit_signing_bytes(hk, seq, nonce, payload, ts_ms)
+    frame = {"v": 1, "kind": "hf.submit", "hk": hk, "seq": seq, "nonce": nonce,
+             "ts_miner": ts_ms, "payload": payload, "sig": wallet.hotkey.sign(sb).hex()}
+
+    async def _send():
+        async with websockets.connect(hf.HF_INGEST_WSS, open_timeout=20) as ws:
+            await ws.send(json.dumps(frame))
+            return json.loads(await asyncio.wait_for(ws.recv(), timeout=20))
+
+    resp = asyncio.run(_send())
+
+    if resp.get("kind") == "hf.receipt":
+        rb = hf.receipt_signing_bytes(resp["hk"], resp["seq"], resp["ph"],
+                                      resp["t_recv_us"], resp["grid_t0_ms"], resp["ing"])
+        try:
+            resp["verified"] = Keypair(ss58_address=hf.HF_RECEIPT_PUBKEY).verify(
+                rb, bytes.fromhex(resp["sig_owner"]))
+        except Exception:
+            resp["verified"] = False
+        # keep the receipt — it is the miner's proof of acceptance
+        rp = os.path.expanduser(f"~/.sn89/hf_receipts_{hk}.jsonl")
+        os.makedirs(os.path.dirname(rp), exist_ok=True)
+        with open(rp, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"submit": frame, "receipt": resp}) + "\n")
+    return resp
+
+
+def cmd_submit_hf(args) -> int:
+    w = _wallet(args)
+    try:
+        resp = submit_hf(w, args.pair, args.direction)
+    except ValueError as e:
+        print(f"INVALID: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:  # noqa: BLE001
+        print(f"SUBMIT FAILED: {e}", file=sys.stderr)
+        return 1
+    print(json.dumps(resp, indent=2))
+    if resp.get("kind") == "hf.receipt":
+        if not resp.get("verified"):
+            print("WARNING: receipt signature did NOT verify against the known "
+                  "ingest key — keep it anyway and flag the operator.", file=sys.stderr)
+        return 0
+    print(f"REFUSED: {resp.get('reason', 'unknown')}", file=sys.stderr)
+    return 1
 
 
 def _wallet(args) -> "bt.Wallet":
@@ -460,6 +558,13 @@ def main() -> int:
     ps.add_argument("--horizon", type=int, default=None)
     ps.add_argument("--comment", default="")
     ps.set_defaults(fn=cmd_submit)
+
+    ph = sub.add_parser("submit-hf",
+                        help="submit one HIGH-FREQUENCY signal now (mecid 1)")
+    ph.add_argument("--pair", required=True)
+    ph.add_argument("--direction", required=True,
+                    choices=["LONG", "SHORT", "long", "short"])
+    ph.set_defaults(fn=cmd_submit_hf)
 
     pv = sub.add_parser("serve", help="run REST intake")
     pv.add_argument("--port", type=int, default=8089)
