@@ -205,6 +205,32 @@ EMISSION_DECAY_S = int(os.getenv("SN89_EMISSION_DECAY_S", str(7 * 24 * 3600)))
 HIT_RATE_WINDOW_S = 60 * 24 * 3600          # ≈2 months of history
 HIT_RATE_WINDOW_TRADES = 100                # …capped at the most recent ~100 decisive
 
+# The trade cap was silently shortening the window. Reputation is meant to span
+# HIT_RATE_WINDOW_S (60 days); the cap is only there so a burst of activity can't
+# make the sample unboundedly large. But at the 3/day allowance a full-cadence
+# trader posts ~2.4 decisive/day, reaching 100 in ~42 days — so the CAP bound
+# first and their reputation quietly covered 42 days, not 60. Trading more often
+# should never shorten how far back a miner's record is read.
+#
+# 200 is above the theoretical maximum (3/day x 60d = 180 at zero wash), so the
+# 60-day clock is always what binds.
+#
+# AS-OF VERSIONED, and never retroactive: qualified_wins resolves the cap at each
+# WIN's own t0, so a win that scored under the old cap keeps the verdict it was
+# given. Measured before shipping: the busiest miner on the subnet has 59 decisive
+# in the 60-day window, so NO current miner is at the cap and no tally moves on
+# the effective date. This is a latent defect being closed, not a live one.
+HIT_RATE_WINDOW_TRADES_V2 = 200
+HIT_RATE_WINDOW_TRADES_V2_FROM = int(
+    os.getenv("SN89_HIT_RATE_TRADES_V2_FROM", "1784937600"))   # 2026-07-25T00:00:00Z
+
+
+def hit_rate_window_trades_as_of(t0_unix: float) -> int:
+    """Reputation trade cap in force at t0 (mirrors bands_as_of)."""
+    if HIT_RATE_WINDOW_TRADES_V2_FROM and t0_unix >= HIT_RATE_WINDOW_TRADES_V2_FROM:
+        return HIT_RATE_WINDOW_TRADES_V2
+    return HIT_RATE_WINDOW_TRADES
+
 # ── Confidence-based scoring (CONSENSUS) ─────────────────────────────────────
 # Master switch between the legacy point-estimate rules (raw hit-rate gate / tier
 # / rolling-window elimination floor) and the confidence-based rules (Wilson

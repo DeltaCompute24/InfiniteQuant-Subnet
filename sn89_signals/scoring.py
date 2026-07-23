@@ -516,7 +516,7 @@ def score_inputs(decisive: list[tuple[float, bool, bool]], first_seen_unix: floa
     # HIT_RATE_WINDOW_TRADES of those (sort by t0 so "most recent" is well-defined
     # regardless of the caller's row order).
     recent = sorted((d for d in decisive if d[0] >= rep_cutoff), key=lambda d: d[0])
-    recent = recent[-config.HIT_RATE_WINDOW_TRADES:]
+    recent = recent[-config.hit_rate_window_trades_as_of(now_unix):]
     rep_wins = sum(1 for _, won, _ in recent if won)
     rep_decisive = len(recent)
 
@@ -740,7 +740,10 @@ def qualified_wins(decisive: list[tuple[float, bool, bool]], first_seen_unix: fl
         if not won or t0 < warmup_end or (habitual and cp):
             continue
         rep_cut = t0 - config.HIT_RATE_WINDOW_S
-        window = [d for d in dec[:i + 1] if d[0] >= rep_cut][-config.HIT_RATE_WINDOW_TRADES:]
+        # cap resolved at THIS win's t0 — a win that scored under the old cap keeps
+        # the verdict it was given, exactly like the bands
+        window = [d for d in dec[:i + 1] if d[0] >= rep_cut][
+            -config.hit_rate_window_trades_as_of(t0):]
         rw = sum(1 for _, w2, _ in window if w2)
         rd = len(window)
         if _qualifies(rw, rd):
