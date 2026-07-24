@@ -87,8 +87,11 @@ def apply_validity_filters(rows: list[GradedRow],
         cap, gap = config.submission_rules_as_of(r.t0_unix)
         times = per_hotkey_times.setdefault(r.hotkey, [])
 
-        # ≥ gap since this hotkey's last ACCEPTED commit
-        if gap and times and r.t0_unix - times[-1] < gap:
+        # ≥ gap since this hotkey's last ACCEPTED commit, minus a block-jitter
+        # tolerance: T0 is the inclusion-block timestamp (12 s quantized), so an
+        # honestly-spaced pair of commits can read a few seconds under min_gap on
+        # chain. Void only when the shortfall exceeds SUBMISSION_GAP_SLACK_S.
+        if gap and times and r.t0_unix - times[-1] < gap - config.SUBMISSION_GAP_SLACK_S:
             r.status, r.void_reason = "void", "min_spacing"
             continue
 

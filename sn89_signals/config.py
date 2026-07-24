@@ -95,6 +95,19 @@ def submission_rules_as_of(t0_unix: float) -> tuple[int, int]:
     return cap, gap
 
 
+# Min-gap block-jitter tolerance (CONSENSUS). The min-gap rule is checked against
+# T0 = the commitment's INCLUSION-BLOCK timestamp, which is quantized to the 12 s
+# block time. A miner submitting exactly min_gap apart by its own clock can still
+# have its two commits land in blocks up to one block closer together, so the
+# on-chain gap comes out as much as ~12 s under min_gap — voiding an honest signal
+# for `min_spacing` through no fault of the miner (observed: Canefis XAGUSD 2026-
+# 07-23 10:00, real submit gap 3602 s, on-chain gap 3599 s, voided by 1 s). Void
+# only when the gap is short by MORE than this slack. 30 s covers one block of
+# jitter plus a couple of blocks of inclusion delay; against a 3600 s rule it is
+# 0.8 %, so it cannot be used to submit meaningfully faster than hourly.
+SUBMISSION_GAP_SLACK_S = int(os.getenv("SN89_SUBMISSION_GAP_SLACK_S", "30"))
+
+
 MAX_HORIZON_H = 72                  # upper bound / overlap cap
 DEFAULT_HORIZON_H = 72              # fallback for an unknown asset class
 

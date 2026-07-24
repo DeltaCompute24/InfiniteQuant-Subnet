@@ -622,15 +622,41 @@ class TestValidity:
     E2 = 1784332800.0
 
     def test_era2_min_gap_voids_burst(self):
+        # Short by MORE than the block-jitter slack -> still voided.
         rows = scoring.apply_validity_filters([
             _row("A", "BTCUSD", "LONG", self.E2),
-            _row("A", "XAUUSD", "LONG", self.E2 + 3599),   # 1s short of the gap
+            _row("A", "XAUUSD", "LONG", self.E2 + 3000),   # 600s short -> real burst
             _row("A", "ETHUSD", "LONG", self.E2 + 3600),   # exactly 1h from the
         ])                                                 # last ACCEPTED commit
         assert rows[0].status == "ok"
         assert (rows[1].status, rows[1].void_reason) == ("void", "min_spacing")
         # gap measures from the last ACCEPTED commit (t=E2), not the voided row
         assert rows[2].status == "ok"
+
+    def test_block_jitter_within_slack_is_not_voided(self):
+        # T0 is the 12s-quantized inclusion-block time, so an honestly-hourly
+        # miner can read a few seconds under the gap on chain (Canefis XAGUSD
+        # 2026-07-23: real submit gap 3602s, on-chain 3599s). Not a burst.
+        rows = scoring.apply_validity_filters([
+            _row("A", "BTCUSD", "LONG", self.E2),
+            _row("A", "XAUUSD", "LONG", self.E2 + 3599),   # 1s short -> tolerated
+        ])
+        assert [r.status for r in rows] == ["ok", "ok"]
+
+    def test_slack_boundary_is_exact(self):
+        from sn89_signals import config
+        slack = config.SUBMISSION_GAP_SLACK_S
+        # short by exactly slack -> ok; short by slack+1 -> voided
+        ok = scoring.apply_validity_filters([
+            _row("A", "BTCUSD", "LONG", self.E2),
+            _row("A", "XAUUSD", "LONG", self.E2 + 3600 - slack),
+        ])
+        assert ok[1].status == "ok"
+        bad = scoring.apply_validity_filters([
+            _row("A", "BTCUSD", "LONG", self.E2),
+            _row("A", "XAUUSD", "LONG", self.E2 + 3600 - slack - 1),
+        ])
+        assert (bad[1].status, bad[1].void_reason) == ("void", "min_spacing")
 
     def test_era2_daily_quota_3(self):
         rows = scoring.apply_validity_filters([
