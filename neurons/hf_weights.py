@@ -123,19 +123,21 @@ def grade_new_calls(now_ms: int) -> int:
 
 
 # ── scoring inputs from the grade cache ──────────────────────────────────────
-def build_history() -> tuple[dict, dict]:
+def build_history() -> tuple[dict, dict, dict]:
     db = _db()
     decisive_by_hk: dict = {}
     first_seen: dict = {}
+    subs: dict = {}
     for hk, t0_ms, status in db.execute("SELECT hk, t0_ms, status FROM grades"):
         t0 = t0_ms / 1000.0
         first_seen[hk] = min(first_seen.get(hk, t0), t0)
+        subs.setdefault(hk, []).append(int(t0_ms))       # accepted-submission set (HF gate)
         if status in ("won", "lost"):
             decisive_by_hk.setdefault(hk, []).append((t0, status == "won", False))
     db.close()
     for v in decisive_by_hk.values():
         v.sort(key=lambda x: x[0])
-    return decisive_by_hk, first_seen
+    return decisive_by_hk, first_seen, subs
 
 
 # ── weight commit ────────────────────────────────────────────────────────────
@@ -170,10 +172,10 @@ def main() -> int:
         try:
             now_ms = int(time.time() * 1000)
             n = grade_new_calls(now_ms)
-            dec, fs = build_history()
+            dec, fs, subs = build_history()
             mg = sub.metagraph(netuid=NETUID)
             uid_by_hk = {h: i for i, h in enumerate(mg.hotkeys)}
-            weights = hf.hf_compute_weights(dec, fs, uid_by_hk, time.time())
+            weights = hf.hf_compute_weights(dec, fs, uid_by_hk, time.time(), subs)
             earners = {u: w for u, w in weights.items() if u != 0 and w > 0}
             _log(f"graded +{n} · {len(dec)} miners w/ decisive · "
                  f"{len(earners)} earning · burn={weights.get(0, 0.0):.3f}")

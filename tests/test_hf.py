@@ -862,42 +862,92 @@ class TestPreLaunchAndSpreadInvariant:
             assert p not in hf.HF_BOARD_V1
 
 
+def _eligible_subs(now, days=8, per_day=10, oldest_days_ago=12):
+    """Submission timestamps that clear the HF gate (>=50 accepted subs across
+    >=8 distinct UTC days), all landing BEFORE `now - oldest_days_ago + days`, so a
+    miner's recent decisive wins are post-eligibility. days*per_day submissions."""
+    subs = []
+    for d in range(days):
+        day0 = now - (oldest_days_ago - d) * 86400
+        for k in range(per_day):
+            subs.append(int((day0 + k * 60) * 1000))
+    return subs
+
+
+class TestHFEligibleFrom:
+    """The HF warmup replacement: 50 accepted submissions across 8 distinct UTC
+    trading days. Pure and deterministic in the submission timestamps."""
+    DAY = 86_400_000
+
+    def test_under_50_submissions_is_ineligible(self):
+        subs = [i * self.DAY for i in range(8) for _ in range(6)]   # 48 across 8 days
+        assert hf.hf_eligible_from(subs) is None
+
+    def test_50_submissions_but_one_day_is_ineligible(self):
+        subs = [1_000_000 + i * 250 for i in range(60)]            # 60, all one UTC day
+        assert hf.hf_eligible_from(subs) is None
+
+    def test_50_across_8_days_is_eligible(self):
+        subs = [d * self.DAY + k * 60_000 for d in range(8) for k in range(10)]  # 80/8d
+        got = hf.hf_eligible_from(subs)
+        assert got is not None
+
+    def test_eligible_from_is_the_later_threshold(self):
+        # 8 days are reached on day 7 (the 8th distinct day), but the 50th
+        # submission only lands on day 9 — eligibility is the LATER of the two.
+        subs = [d * self.DAY for d in range(8)]                    # 8 subs, 8 days (day 0..7)
+        subs += [8 * self.DAY + k * 60_000 for k in range(20)]     # day 8: subs 9..28
+        subs += [9 * self.DAY + k * 60_000 for k in range(30)]     # day 9: subs 29..58 -> 50th here
+        got = hf.hf_eligible_from(subs)
+        assert got is not None
+        assert int(got * 1000) // self.DAY == 9                    # tipped on day 9 (50th sub)
+
+    def test_eight_idle_days_do_not_qualify(self):
+        # the LF failure mode this fixes: time elapsed, but only a handful of trades
+        subs = [0, 1 * self.DAY, 8 * self.DAY]                     # 3 subs over 8 days
+        assert hf.hf_eligible_from(subs) is None
+
+
 class TestHFEarningGate:
     """The go-live safety property: jumping from LF to HF grants NO head start,
-    and a first win can never take the pool."""
+    and a first win can never take the pool. Every miner here is made ELIGIBLE
+    (past the 50-sub / 8-day gate) so these tests isolate the edge/decisive gate."""
     NOW = 1_800_000_000.0
+
+    def _subs(self):
+        return {'A': _eligible_subs(self.NOW)}
 
     def test_first_hf_win_earns_nothing(self):
         w = hf.hf_compute_weights({'A': [(self.NOW - 1800, True, False)]},
-                                  {'A': self.NOW - 20 * 86400}, {'A': 10}, self.NOW)
+                                  {'A': self.NOW - 20 * 86400}, {'A': 10}, self.NOW, self._subs())
         assert w.get(10, 0.0) == 0.0          # < 8 decisive -> not qualified
         assert w.get(0, 0.0) > 0.0            # burns instead
 
     def test_seven_decisive_still_earns_nothing(self):
         d = [(self.NOW - (7 - i) * 3600, True, False) for i in range(7)]
-        w = hf.hf_compute_weights({'A': d}, {'A': self.NOW - 20 * 86400}, {'A': 10}, self.NOW)
+        w = hf.hf_compute_weights({'A': d}, {'A': self.NOW - 20 * 86400}, {'A': 10}, self.NOW, self._subs())
         assert w.get(10, 0.0) == 0.0
 
     def test_eight_decisive_passing_rate_qualifies(self):
         d = [(self.NOW - (8 - i) * 3600, True, False) for i in range(8)]
-        w = hf.hf_compute_weights({'A': d}, {'A': self.NOW - 20 * 86400}, {'A': 10}, self.NOW)
+        w = hf.hf_compute_weights({'A': d}, {'A': self.NOW - 20 * 86400}, {'A': 10}, self.NOW, self._subs())
         assert w.get(10, 0.0) > 0.0
 
     def test_eight_decisive_failing_rate_does_not_qualify(self):
         d = [(self.NOW - (8 - i) * 3600, i < 3, False) for i in range(8)]   # 3/8
-        w = hf.hf_compute_weights({'A': d}, {'A': self.NOW - 20 * 86400}, {'A': 10}, self.NOW)
+        w = hf.hf_compute_weights({'A': d}, {'A': self.NOW - 20 * 86400}, {'A': 10}, self.NOW, self._subs())
         assert w.get(10, 0.0) == 0.0
 
     def test_lf_standing_does_not_carry_into_hf(self):
         # decisive_by_hk is HF-ONLY; a huge LF record is irrelevant here
         w = hf.hf_compute_weights({'A': [(self.NOW - 1800, True, False)]},
-                                  {'A': self.NOW - 200 * 86400}, {'A': 10}, self.NOW)
+                                  {'A': self.NOW - 200 * 86400}, {'A': 10}, self.NOW, self._subs())
         assert w.get(10, 0.0) == 0.0
 
     def test_hf_uses_hf_decay_not_lf(self):
         from sn89_signals import config
         d = [(self.NOW - (8 - i) * 3600 - 3 * 86400, True, False) for i in range(8)]
-        w = hf.hf_compute_weights({'A': d}, {'A': self.NOW - 40 * 86400}, {'A': 10}, self.NOW)
+        w = hf.hf_compute_weights({'A': d}, {'A': self.NOW - 40 * 86400}, {'A': 10}, self.NOW, self._subs())
         # 3d-old wins are fully decayed under HF's 48h window -> no real pool share.
         # A once-qualified miner keeps only the probation DUST floor (no-cliff), not
         # a pro-rata share, so the weight is at most dust.
@@ -906,9 +956,56 @@ class TestHFEarningGate:
 
     def test_config_never_leaks_after_the_call(self):
         from sn89_signals import config
-        keys = ('EMISSION_DECAY_S', 'WIN_CAP', 'MINER_EMISSION_CAP',
+        keys = ('EMISSION_DECAY_S', 'WIN_CAP', 'MINER_EMISSION_CAP', 'IMMUNITY_S',
                 'HIT_RATE_WINDOW_TRADES', 'SCORE_WINDOW_S')
         before = {k: getattr(config, k) for k in keys}
         hf.hf_compute_weights({'A': [(self.NOW - 1800, True, False)]},
-                              {'A': self.NOW - 20 * 86400}, {'A': 10}, self.NOW)
+                              {'A': self.NOW - 20 * 86400}, {'A': 10}, self.NOW, self._subs())
         assert before == {k: getattr(config, k) for k in keys}
+
+
+class TestHFEligibilityGateEndToEnd:
+    """The eligibility gate in hf_compute_weights: a miner with a great decisive
+    record earns NOTHING until it has 50 accepted submissions across 8 UTC days."""
+    NOW = 1_800_000_000.0
+
+    def _winning_decisive(self):
+        # 12 wins over the last 12h — trivially passes the edge gate IF eligible
+        return [(self.NOW - (12 - i) * 3600, True, False) for i in range(12)]
+
+    def test_ineligible_few_days_earns_nothing(self):
+        # 60 submissions but all inside 3 UTC days -> fails the 8-day rule
+        subs = {'A': [int((self.NOW - 3 * 86400 + d * 86400 + k * 60) * 1000)
+                      for d in range(3) for k in range(20)]}
+        w = hf.hf_compute_weights({'A': self._winning_decisive()},
+                                  {'A': self.NOW - 3 * 86400}, {'A': 10}, self.NOW, subs)
+        assert w.get(10, 0.0) == 0.0
+        assert w.get(0, 0.0) > 0.0
+
+    def test_ineligible_too_few_submissions_earns_nothing(self):
+        # spread over 8 days but only 40 submissions -> fails the 50 rule
+        subs = {'A': _eligible_subs(self.NOW, days=8, per_day=5)}      # 40
+        assert hf.hf_eligible_from(subs['A']) is None
+        w = hf.hf_compute_weights({'A': self._winning_decisive()},
+                                  {'A': self.NOW - 20 * 86400}, {'A': 10}, self.NOW, subs)
+        assert w.get(10, 0.0) == 0.0
+
+    def test_eligible_earns(self):
+        subs = {'A': _eligible_subs(self.NOW)}                          # 80 over 8 days
+        w = hf.hf_compute_weights({'A': self._winning_decisive()},
+                                  {'A': self.NOW - 20 * 86400}, {'A': 10}, self.NOW, subs)
+        assert w.get(10, 0.0) > 0.0
+
+    def test_wins_before_eligibility_earn_no_real_share(self):
+        # eligibility only reached ~now (subs packed into the last 8 days ending
+        # now), while the wins are OLDER than that instant -> they are warmup and
+        # produce zero QUALIFIED wins, so no pro-rata pool share. The miner is
+        # still qualified-caliber and just past warmup, so it keeps the probation
+        # DUST floor (no-cliff) — that dust is intended, a real share is not.
+        from sn89_signals import config
+        subs = {'A': _eligible_subs(self.NOW, oldest_days_ago=8)}       # newest sub ~now
+        elig = hf.hf_eligible_from(subs['A'])
+        old_wins = [(elig - (12 - i) * 3600, True, False) for i in range(12)]  # all before elig
+        w = hf.hf_compute_weights({'A': old_wins},
+                                  {'A': self.NOW - 20 * 86400}, {'A': 10}, self.NOW, subs)
+        assert w.get(10, 0.0) <= config.DUST_WEIGHT

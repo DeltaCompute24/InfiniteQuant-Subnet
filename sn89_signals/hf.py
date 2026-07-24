@@ -510,6 +510,44 @@ HF_HIT_RATE_WINDOW_TRADES = int(os.getenv("SN89_HF_HIT_RATE_WINDOW_TRADES", "200
 HF_MINER_EMISSION_CAP = float(os.getenv("SN89_HF_MINER_EMISSION_CAP",
                                         str(config.MINER_EMISSION_CAP)))
 
+# ── HF eligibility gate (CONSENSUS) — replaces the LF elapsed-time warmup ──────
+# LF warmup is pure elapsed time: first_seen + IMMUNITY_S (8 days), regardless of
+# how much the miner actually traded. At HF's 30/day cadence that gate is far too
+# weak — a miner could clear the 8-decisive Wilson gate in a few HOURS of spamming
+# one day and qualify. HF instead requires a real track record before ANY win
+# earns (Whit, 2026-07-24):
+#
+#   >= HF_QUALIFY_MIN_SUBMISSIONS accepted submissions (wash/void included — the
+#     count is of participation, not of decisive outcomes), AND
+#   submissions on >= HF_QUALIFY_MIN_TRADING_DAYS DISTINCT UTC days.
+#
+# "Trading days" is the new concept: a day counts iff the miner had >= 1 accepted
+# submission that UTC day. Eight distinct trading days can't be faked by one day of
+# volume, and — unlike LF — eight IDLE calendar days no longer qualify anyone. The
+# Wilson LB >= 0.50 edge gate (HF_QUALIFY_LB_FLOOR) still applies on top, at each
+# win, over the recent decisive window. Wins before the miner becomes eligible are
+# warmup and never earn; wins after do.
+HF_QUALIFY_MIN_SUBMISSIONS = int(os.getenv("SN89_HF_QUALIFY_MIN_SUBMISSIONS", "50"))
+HF_QUALIFY_MIN_TRADING_DAYS = int(os.getenv("SN89_HF_QUALIFY_MIN_TRADING_DAYS", "8"))
+
+
+def hf_eligible_from(sub_ts_ms) -> float | None:
+    """The unix time (seconds) at which a hotkey first satisfies BOTH HF volume
+    gates: >= HF_QUALIFY_MIN_SUBMISSIONS accepted submissions AND submissions on
+    >= HF_QUALIFY_MIN_TRADING_DAYS distinct UTC days. None until both hold.
+
+    PURE / deterministic in the submission timestamps, so every validator replaying
+    the published windows reaches the same eligibility instant. Both counters are
+    monotonic in time, so the tipping submission is well-defined: it is the one that
+    makes the later-satisfied of the two thresholds true.
+    """
+    days = set()
+    for i, t_ms in enumerate(sorted(int(t) for t in sub_ts_ms), start=1):
+        days.add(int(t_ms) // 86_400_000)          # UTC day index
+        if i >= HF_QUALIFY_MIN_SUBMISSIONS and len(days) >= HF_QUALIFY_MIN_TRADING_DAYS:
+            return t_ms / 1000.0
+    return None
+
 MECID_1 = 1
 
 # ── self-hosted miner submission ─────────────────────────────────────────────
@@ -522,14 +560,21 @@ HF_RECEIPT_PUBKEY = os.getenv(
 
 
 def hf_compute_weights(decisive_by_hk: dict, first_seen_by_hk: dict,
-                       uid_by_hk: dict, now: float) -> dict:
+                       uid_by_hk: dict, now: float, subs_by_hk: dict) -> dict:
     """{uid: normalized_weight} for mecid 1, from HF-ONLY graded outcomes.
 
-    Reuses the SAME battle-tested gate and tally as mecid 0 (scoring.qualified_wins,
-    scoring.compute_weights, scoring._qualifies) so the two mechanisms behave
-    identically — a win qualifies only if the miner had >= QUALIFY_MIN_DECISIVE (8)
-    decisive outcomes with a passing Wilson bound AT THAT WIN. The ONLY differences
-    are the HF window constants (48h decay, 200 cap) and the HF burn cap.
+    Reuses the SAME battle-tested tally as mecid 0 (scoring.qualified_wins,
+    scoring.compute_weights, scoring._qualifies) — a win still qualifies only if the
+    miner had a passing Wilson bound over its recent decisive window at that win.
+    HF differs in the window constants (48h decay, 200 cap), the burn cap, and — the
+    load-bearing one — the WARMUP gate: LF warmup is 8 elapsed days from first_seen;
+    HF replaces it with hf_eligible_from() (>= HF_QUALIFY_MIN_SUBMISSIONS accepted
+    submissions across >= HF_QUALIFY_MIN_TRADING_DAYS distinct UTC days). A miner not
+    yet eligible earns nothing; once eligible, wins from that instant on can earn.
+
+    `subs_by_hk` maps hotkey -> list of accepted-submission timestamps (ms), the
+    thing eligibility is computed from — the FULL accepted set (wash/void included),
+    not just decisive outcomes.
 
     What is deliberately NOT run here (unlike mecid 0): copy detection, referrals,
     and elimination re-derivation. Signed real-time submissions have no timelock-copy
@@ -537,8 +582,7 @@ def hf_compute_weights(decisive_by_hk: dict, first_seen_by_hk: dict,
     and decays to zero (the no-cliff design) rather than being eliminated.
 
     CRITICAL — decisive_by_hk must contain ONLY HF outcomes. A miner qualified on
-    mecid 0 is NOT qualified here: their HF decisive count starts at zero, so their
-    first HF win cannot qualify (1 < 8). Verified by test.
+    mecid 0 is NOT qualified here: their HF decisive count starts at zero.
 
     Constant overrides are scoped with try/finally and NEVER applied at import time,
     because hf.py is imported by the ingest — a module-level mutation of config would
@@ -547,7 +591,7 @@ def hf_compute_weights(decisive_by_hk: dict, first_seen_by_hk: dict,
     from . import scoring
 
     saved = {k: getattr(config, k) for k in (
-        "EMISSION_DECAY_S", "WIN_CAP", "SCORE_WINDOW_S",
+        "EMISSION_DECAY_S", "WIN_CAP", "SCORE_WINDOW_S", "IMMUNITY_S",
         "HIT_RATE_WINDOW_TRADES", "HIT_RATE_WINDOW_TRADES_V2", "MINER_EMISSION_CAP")}
     try:
         config.EMISSION_DECAY_S = HF_EMISSION_DECAY_S
@@ -557,20 +601,27 @@ def hf_compute_weights(decisive_by_hk: dict, first_seen_by_hk: dict,
         config.HIT_RATE_WINDOW_TRADES = HF_HIT_RATE_WINDOW_TRADES
         config.HIT_RATE_WINDOW_TRADES_V2 = HF_HIT_RATE_WINDOW_TRADES
         config.MINER_EMISSION_CAP = HF_MINER_EMISSION_CAP
+        # The HF warmup is the eligibility INSTANT, not an elapsed span. Zero the
+        # LF immunity clock and hand each miner its eligible_from as first_seen, so
+        # warmup_end (= first_seen + IMMUNITY_S) collapses to exactly that instant
+        # in scoring.score_inputs, scoring.qualified_wins and compute_weights'
+        # immune/probation checks. All three then treat pre-eligibility wins as
+        # warmup — one definition, three call sites, no drift.
+        config.IMMUNITY_S = 0
 
         states = []
         for hk, decisive in decisive_by_hk.items():
             uid = uid_by_hk.get(hk)
             if uid is None:
                 continue
-            fs = first_seen_by_hk.get(hk)
-            if fs is None:
-                continue
+            eligible = hf_eligible_from(subs_by_hk.get(hk, []))
+            if eligible is None:
+                continue                         # < 50 subs or < 8 trading days → no weight
             rep_won, rep_dec, won_all, _won_orig, _copies, tw = scoring.score_inputs(
-                decisive, fs, now)
-            qwins = scoring.qualified_wins(decisive, fs, habitual=False)
+                decisive, eligible, now)
+            qwins = scoring.qualified_wins(decisive, eligible, habitual=False)
             states.append(scoring.MinerState(
-                hotkey=hk, uid=uid, first_seen_unix=fs,
+                hotkey=hk, uid=uid, first_seen_unix=eligible,
                 rep_wins=rep_won, rep_decisive=rep_dec, trailing_wins=won_all,
                 qwins=qwins))
         return scoring.compute_weights(states, now)

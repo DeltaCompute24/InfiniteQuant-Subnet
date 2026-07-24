@@ -208,18 +208,29 @@ def sync_and_grade(base: str, cache_dir: str, now: float) -> None:
 
 
 def _history(cache_dir: str):
+    """(decisive_by_hk, first_seen_by_hk, submissions_by_hk).
+
+    submissions_by_hk carries EVERY resolved submission's t0_ms (won/lost/wash/
+    void) — the HF eligibility gate counts accepted participation, not just
+    decisive outcomes. Resolved-only (not the ephemeral `pending` table) so the
+    set is deterministic from the published windows and every validator computes
+    the same eligibility instant; a call's horizon is at most 2h, so the lag is
+    immaterial to an 8-trading-day gate.
+    """
     db = _db(cache_dir)
     dec: dict = {}
     fs: dict = {}
+    subs: dict = {}
     for hk, t0_ms, status in db.execute("SELECT hk, t0_ms, status FROM grades"):
         t0 = t0_ms / 1000.0
         fs[hk] = min(fs.get(hk, t0), t0)
+        subs.setdefault(hk, []).append(int(t0_ms))
         if status in ("won", "lost"):
             dec.setdefault(hk, []).append((t0, status == "won", False))
     db.close()
     for v in dec.values():
         v.sort(key=lambda x: x[0])
-    return dec, fs
+    return dec, fs, subs
 
 
 def mecid1_weights(uid_by_hk: dict, now: float | None = None,
@@ -230,5 +241,5 @@ def mecid1_weights(uid_by_hk: dict, now: float | None = None,
     base = base or hf.HF_PUBLIC_BASE
     cache_dir = cache_dir or os.path.expanduser("~/.sn89/hf-grade")
     sync_and_grade(base, cache_dir, now)
-    dec, fs = _history(cache_dir)
-    return hf.hf_compute_weights(dec, fs, uid_by_hk, now)
+    dec, fs, subs = _history(cache_dir)
+    return hf.hf_compute_weights(dec, fs, uid_by_hk, now, subs)
