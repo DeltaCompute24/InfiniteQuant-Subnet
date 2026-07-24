@@ -1013,3 +1013,58 @@ class TestHFEligibilityGateEndToEnd:
         w = hf.hf_compute_weights({'A': old_wins},
                                   {'A': self.NOW - 20 * 86400}, {'A': 10}, self.NOW, subs)
         assert w.get(10, 0.0) <= config.DUST_WEIGHT
+
+
+class TestTouchTicksLF:
+    """LF touch grading (config.grading_rule_as_of=='touch_ticks', ≥MIN_TOUCH_TICKS).
+    Grades off the tick mid `p`; a lone reverting wick never scores."""
+    def _sig(self, direction="LONG", tp=62, sl=62):
+        from sn89_signals.schema import Signal
+        return Signal(trade_pair="XAUUSD", direction=direction, tp_bps=tp, sl_bps=sl,
+                      ts_miner=0, hotkey="5F" + "x" * 46)
+
+    def _ticks(self, prices, t0_ms, step=250):
+        return [{"a": "XAUUSD", "t": t0_ms + (i + 1) * step, "p": p} for i, p in enumerate(prices)]
+
+    T0 = 1784941200_000        # 2026-07-25T01:00:00Z — after the touch_ticks cutover
+    DONE = 1784941200_000 + 13 * 3600_000   # past the 12h forex/metals horizon
+
+    def test_rule_is_touch_ticks_at_this_t0(self):
+        from sn89_signals import config
+        assert config.grading_rule_as_of(self.T0 / 1000.0) == "touch_ticks"
+
+    def test_lone_wick_does_not_win(self):     # Mike-class 1-tick pierce → wash
+        from sn89_signals import grader
+        g = grader.grade(self._sig(), self.T0, self.DONE, entry_price=100.0,
+                         ticks=self._ticks([100.70, 100.50, 100.50, 100.40], self.T0))
+        assert g.status == grader.WASHED
+
+    def test_two_touches_win(self):            # genuine touch (≥2 ticks) → WON
+        from sn89_signals import grader
+        g = grader.grade(self._sig(), self.T0, self.T0 + 1_000_000, entry_price=100.0,
+                         ticks=self._ticks([100.70, 100.71], self.T0))
+        assert g.status == grader.WON and g.outcome_bps == 62
+
+    def test_near_miss_washes(self):           # Jeremiah-class: peak below TP → wash
+        from sn89_signals import grader
+        g = grader.grade(self._sig(), self.T0, self.DONE, entry_price=100.0,
+                         ticks=self._ticks([100.60, 100.61, 100.55], self.T0))   # TP=100.62
+        assert g.status == grader.WASHED
+
+    def test_two_sl_touches_lose(self):
+        from sn89_signals import grader
+        g = grader.grade(self._sig(), self.T0, self.T0 + 1_000_000, entry_price=100.0,
+                         ticks=self._ticks([99.30, 99.29], self.T0))             # SL=99.38
+        assert g.status == grader.LOST and g.outcome_bps == -62
+
+    def test_sl_wick_then_genuine_tp_wins(self):   # 1 SL wick rejected, 2 TP ticks win
+        from sn89_signals import grader
+        g = grader.grade(self._sig(), self.T0, self.T0 + 1_000_000, entry_price=100.0,
+                         ticks=self._ticks([99.30, 100.0, 100.70, 100.71], self.T0))
+        assert g.status == grader.WON
+
+    def test_no_touch_before_horizon_is_pending(self):
+        from sn89_signals import grader
+        g = grader.grade(self._sig(), self.T0, self.T0 + 5_000, entry_price=100.0,
+                         ticks=self._ticks([100.50, 100.51], self.T0))
+        assert g.status == grader.PENDING

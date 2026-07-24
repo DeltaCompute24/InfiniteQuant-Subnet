@@ -192,6 +192,13 @@ FOREX_ROLLOVER_UTC = ((20, 55), (21, 20))   # [20:55, 21:20)
 # an env var) so master == the live validator's rule (single-validator replay contract).
 TOUCH_TICKS_FROM = int(os.getenv("SN89_TOUCH_TICKS_FROM", "1784937600"))
 
+# Minimum ticks that must TOUCH a level before it scores under touch_ticks (Whit
+# 2026-07-24). A lone tick that pierces TP/SL and reverts is a wick, not a fill
+# anyone could capture — requiring ≥2 touches rejects it while a genuine touch
+# (which lingers for many ticks) still scores. Grades off the tick's mid price
+# `p` — the same series the trader's card shows as "mark", so card == grade.
+MIN_TOUCH_TICKS = int(os.getenv("SN89_MIN_TOUCH_TICKS", "2"))
+
 
 def grading_rule_as_of(t0_unix: float) -> str:
     """Which hit rule governs a call committed at t0."""
