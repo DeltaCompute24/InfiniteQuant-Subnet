@@ -336,23 +336,28 @@ class TestGrading:
         return [{"a": "BTCUSD", "t": t0 + i * step, "p": p} for i, p in enumerate(prices)]
 
     def test_long_take_profit(self):
-        t = self._ticks([100.0, 100.1, 100.5])          # +50 bps at the last tick
+        t = self._ticks([100.0, 100.1, 100.5, 100.6])   # two ticks past TP (≥2 to score)
         r = hf.grade("BTCUSD", "LONG", 100.0, 19, 19, 1_000_000, 1800, t)
-        assert r["status"] == "won" and r["exit"] == 100.5
+        assert r["status"] == "won" and r["exit"] == 100.6
 
     def test_long_stop_loss(self):
-        t = self._ticks([100.0, 99.9, 99.5])
+        t = self._ticks([100.0, 99.9, 99.5, 99.4])       # two ticks past SL
         r = hf.grade("BTCUSD", "LONG", 100.0, 19, 19, 1_000_000, 1800, t)
         assert r["status"] == "lost"
 
     def test_short_take_profit_is_the_mirror(self):
-        t = self._ticks([100.0, 99.5])
+        t = self._ticks([100.0, 99.5, 99.4])
         r = hf.grade("BTCUSD", "SHORT", 100.0, 19, 19, 1_000_000, 1800, t)
         assert r["status"] == "won"
 
-    def test_first_touch_wins(self):
-        # stop first, then a profit spike — must be a loss
-        t = self._ticks([100.0, 99.5, 101.0])
+    def test_lone_wick_does_not_win(self):
+        # one tick past TP then reverts — not enough to score (≥2 guard)
+        t = self._ticks([100.0, 100.5, 100.0, 100.0])
+        assert hf.grade("BTCUSD", "LONG", 100.0, 19, 19, 1_000_000, 1800, t)["status"] == "wash"
+
+    def test_stop_before_target_when_both_reach_two(self):
+        # SL touched twice before TP does → loss (conservative, gated by ≥2)
+        t = self._ticks([100.0, 99.5, 99.4, 101.0, 101.1])
         assert hf.grade("BTCUSD", "LONG", 100.0, 19, 19, 1_000_000, 1800, t)["status"] == "lost"
 
     def test_nothing_touched_is_a_wash(self):
@@ -430,9 +435,9 @@ class TestTicksForEntryWindow:
     def test_a_real_crypto_call_now_grades_instead_of_voiding(self, tmp_path):
         from sn89_signals import hf, hf_grade
         t0 = 2_000_000_250
-        # entry just before t0, then a +25bps move to TP for a LONG
+        # entry just before t0, then a +30bps move that TOUCHES TP on ≥2 ticks
         entry_px = 100.0
-        ticks = [(t0 - 130, entry_px), (t0 + 300, 100.30)]
+        ticks = [(t0 - 130, entry_px), (t0 + 300, 100.30), (t0 + 550, 100.31)]
         base = self._publish(tmp_path, "BTCUSD", ticks)
         got = hf_grade._ticks_for(base, str(tmp_path / "cache"), "BTCUSD",
                                   t0, t0 + 1800_000)
@@ -461,7 +466,8 @@ class TestRuleParityAcrossMechanisms:
             for px in (99.5, 99.8, 99.98, 100.0, 100.02, 100.2, 100.5):
                 direct = grader.touch_hit(px, up > 0, tp, sl)
                 viahf = hf.grade("BTCUSD", direction, entry, tp_bps, sl_bps, 0, 1800,
-                                 [{"a": "BTCUSD", "t": 1000, "p": px}])["status"]
+                                 [{"a": "BTCUSD", "t": 1000, "p": px},
+                                  {"a": "BTCUSD", "t": 2000, "p": px}])["status"]
                 assert (direct or "wash") == viahf, (direction, px, direct, viahf)
 
     def test_grading_rule_is_as_of_versioned_and_armed(self):

@@ -690,12 +690,13 @@ def verify_anchor(onchain: str, root_hex: str, tick_root_hex: str,
 # ── grading (CONSENSUS) ──────────────────────────────────────────────────────
 def grade(receipt_pair: str, direction: str, entry: float, tp_bps: float,
           sl_bps: float, t0_ms: int, horizon_s: int, ticks_sorted: list) -> dict:
-    """First touch wins; nothing touched by the horizon is a WASH.
+    """A level scores after config.MIN_TOUCH_TICKS ticks TOUCH it; nothing touched
+    by the horizon is a WASH.
 
-    Delegates to grader.touch_hit — the SAME function mechanism 0 uses once
-    config.TOUCH_TICKS_FROM is armed. The two mechanisms differ only in bands,
-    horizon, and which price series they are handed; the hit rule is one function
-    in one place, so they can never drift apart.
+    Delegates to grader.touch_hit — the SAME function mechanism 0 uses. The two
+    mechanisms differ only in bands, horizon, and which price series they are
+    handed; the per-tick hit rule and the ≥MIN_TOUCH_TICKS wick guard are one
+    place, so they can never drift apart. A lone reverting tick never scores.
     """
     from .grader import touch_hit          # THE shared rule — see grader.touch_hit
 
@@ -705,6 +706,11 @@ def grade(receipt_pair: str, direction: str, entry: float, tp_bps: float,
     tp = entry * (1 + up * tp_bps / 10000.0)
     sl = entry * (1 - up * sl_bps / 10000.0)
     t_end = int(t0_ms) + int(horizon_s) * 1000
+    # ≥2 wick guard, unconditional: HF is already tick-native with no material grade
+    # history (no qualified HF miners yet), so no as-of is needed — a lone reverting
+    # tick simply stops scoring. LF adopts the same guard at its touch_ticks cutover.
+    need = config.MIN_TOUCH_TICKS
+    won_ct = lost_ct = 0
     for t in ticks_sorted:
         tm = int(t["t"])
         if tm <= int(t0_ms):
@@ -713,6 +719,12 @@ def grade(receipt_pair: str, direction: str, entry: float, tp_bps: float,
             break
         px = float(t["p"])
         r = touch_hit(px, up > 0, tp, sl)
-        if r:
-            return {"status": r, "exit": px, "exit_ms": tm}
+        if r == "lost":
+            lost_ct += 1
+            if lost_ct >= need:
+                return {"status": "lost", "exit": px, "exit_ms": tm}
+        elif r == "won":
+            won_ct += 1
+            if won_ct >= need:
+                return {"status": "won", "exit": px, "exit_ms": tm}
     return {"status": "wash", "exit": None, "exit_ms": t_end}
