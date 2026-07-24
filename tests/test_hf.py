@@ -96,7 +96,7 @@ class TestPairLock:
         assert hf.is_pair_locked(idx, self.HK, "XAUUSD", hf.MECID,
                                  self.T + hf.PAIR_LOCK_MS - 1)
 
-    def test_lock_expires_exactly_at_168h_rolling(self):
+    def test_lock_expires_exactly_at_the_rolling_window(self):
         idx = hf.build_lock_index([(self.HK, "XAUUSD", hf.MECH_LF, self.T)])
         assert not hf.is_pair_locked(idx, self.HK, "XAUUSD", hf.MECID,
                                      self.T + hf.PAIR_LOCK_MS)
@@ -551,10 +551,14 @@ class TestLFSidePairLock:
         return GradedRow(hotkey=self.HK, trade_pair=pair, direction="LONG",
                          t0_unix=self.T if t is None else t, status="won")
 
-    def test_disabled_by_default(self):
+    def test_armed_2026_07_24(self):
+        # Was 0 (unenforced) from the day the rule was announced until 2026-07-24,
+        # so the lock ran on the HF side only. Arming is a consensus change: it
+        # belongs in the committed default, not in an env var on our validator.
         from sn89_signals import config
-        assert config.PAIR_LOCK_LF_FROM == 0
-        assert not config.pair_lock_lf_enforced_as_of(9e9)
+        assert config.PAIR_LOCK_LF_FROM == 1784865600      # 2026-07-24T04:00:00Z
+        assert config.pair_lock_lf_enforced_as_of(1784865600)
+        assert not config.pair_lock_lf_enforced_as_of(1784865599)
 
     def test_none_locks_means_no_check_not_no_locks(self):
         from sn89_signals import scoring, config
@@ -607,6 +611,71 @@ class TestLFSidePairLock:
     def test_hf_log_reader_raises_when_the_source_is_missing(self):
         with pytest.raises(hf.HFLockFeedError):
             hf.load_hf_locks("/nonexistent/hf-logs", 0)
+
+
+class TestPublishedLockFeed:
+    """The LF side's feed. It resolves from the PUBLISHED windows, because an LF
+    void has to be reproducible by anyone replaying the journal — our local
+    ingest dir is neither published nor even the same layout."""
+    HK = "5F" + "a" * 46
+    W = 1_800_000_040_000 // 180_000 * 180_000
+
+    def _base(self, tmp_path, windows: dict) -> str:
+        import json as _j
+        (tmp_path / "index.json").write_text(_j.dumps({"windows": list(windows)}))
+        for w, entries in windows.items():
+            d = tmp_path / str(w)
+            d.mkdir()
+            d.joinpath("receipts.jsonl").write_text(
+                "\n".join(_j.dumps(e) for e in entries))
+        return tmp_path.as_uri()
+
+    def _entry(self, pair="XAUUSD", ts=None, hk=None):
+        return {"submit": {"hk": hk or self.HK, "seq": 1,
+                           "payload": {"trade_pair": pair, "direction": "LONG"}},
+                "receipt": {"grid_t0_ms": ts if ts is not None else self.W + 1000}}
+
+    def test_rows_are_tagged_to_hf_and_timestamped_at_the_grid_point(self, tmp_path):
+        from sn89_signals import hf_grade
+        base = self._base(tmp_path, {self.W: [self._entry()]})
+        rows = hf_grade.load_hf_lock_rows(base, 0)
+        assert len(rows) == 1
+        hk, pair, mecid, ts = rows[0]
+        # grid_t0_ms, never t_recv_us: the receive clock is ours alone and no
+        # third party can replay it.
+        assert (hk, pair, mecid, ts) == (self.HK, "XAUUSD", hf.MECID, self.W + 1000)
+
+    def test_it_locks_the_lf_side(self, tmp_path):
+        from sn89_signals import hf_grade
+        base = self._base(tmp_path, {self.W: [self._entry()]})
+        idx = hf.build_lock_index(hf_grade.load_hf_lock_rows(base, 0))
+        assert hf.is_pair_locked(idx, self.HK, "XAUUSD", hf.MECH_LF,
+                                 self.W + 2000)
+        assert not hf.is_pair_locked(idx, self.HK, "BTCUSD", hf.MECH_LF,
+                                     self.W + 2000)
+
+    def test_unreachable_index_raises_rather_than_reporting_no_locks(self, tmp_path):
+        from sn89_signals import hf_grade
+        with pytest.raises(hf.HFLockFeedError):
+            hf_grade.load_hf_lock_rows((tmp_path / "nope").as_uri(), 0)
+
+    def test_indexed_but_unfetchable_window_raises(self, tmp_path):
+        # Fail CLOSED. Under-reading a window inside the horizon would silently
+        # under-enforce, which is indistinguishable from nobody having traded.
+        import json as _j
+        from sn89_signals import hf_grade
+        (tmp_path / "index.json").write_text(_j.dumps({"windows": [self.W]}))
+        with pytest.raises(hf.HFLockFeedError):
+            hf_grade.load_hf_lock_rows(tmp_path.as_uri(), 0)
+
+    def test_windows_below_the_horizon_are_skipped_not_fetched(self, tmp_path):
+        # An unfetchable window OUTSIDE the horizon must not raise — nothing in
+        # it could still be locking anything, so the feed stays O(lock window).
+        import json as _j
+        from sn89_signals import hf_grade
+        old = self.W - 10 * hf.PAIR_LOCK_MS
+        (tmp_path / "index.json").write_text(_j.dumps({"windows": [old]}))
+        assert hf_grade.load_hf_lock_rows(tmp_path.as_uri(), self.W) == []
 
 
 

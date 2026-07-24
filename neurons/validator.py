@@ -29,10 +29,14 @@ import bittensor as bt
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from sn89_signals import hf_grade, bucket, chain, config, crypto, replay, scoring
+from sn89_signals import hf, hf_grade, bucket, chain, config, crypto, replay, scoring
 from sn89_signals.grader import PENDING, grade
 from sn89_signals.schema import Signal, ValidationError, validate
 from timelock import Timelock
+
+# §9.1 LF-side pair-lock feed cache. Far below the reveal delay, so a verdict is
+# never decided on a feed that could have moved since the call being judged.
+HF_LOCK_REFRESH_S = int(os.getenv("SN89_HF_LOCK_REFRESH_S", "60"))
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS signals (
@@ -102,6 +106,8 @@ class Validator:
         self._last_weights_block = 0          # last SUCCESSFUL commit (TEMPO cadence)
         self._last_weights_attempt_block = 0  # last attempt (failed-retry backoff)
         self._last_scanned_block = 0   # recent-overwrite scan cursor (audit #5)
+        self._hf_locks: dict = {}      # §9.1 LF-side pair lock (published HF logs)
+        self._hf_locks_at = 0.0
 
     def _migrate(self):
         """Additive column migration for DBs created before commit_block/t0_ms."""
@@ -389,7 +395,48 @@ class Validator:
         return sig
 
     # ── 3. grade ─────────────────────────────────────────────────────────────
+    def _hf_lock_index(self, now: float) -> dict:
+        """§9.1 pair lock, LF side — HF submissions inside the rolling horizon.
+
+        Built from the PUBLISHED windows, never from our local ingest dir, so an
+        LF void is reproducible by anyone replaying the journal.
+
+        Cached for HF_LOCK_REFRESH_S. Staleness cannot change a verdict: an LF
+        call is judged at its own t0, at least a reveal delay in the past, while
+        the freshest HF submit this could miss is under a minute old.
+
+        Propagates HFLockFeedError — the caller must not turn a dead feed into an
+        empty index. That equivalence is what left this rule unenforced.
+        """
+        if time.time() - self._hf_locks_at <= HF_LOCK_REFRESH_S:
+            return self._hf_locks
+        rows = hf_grade.load_hf_lock_rows(hf.HF_PUBLIC_BASE,
+                                          int(now * 1000) - hf.PAIR_LOCK_MS)
+        self._hf_locks = hf.build_lock_index(rows)
+        self._hf_locks_at = time.time()
+        return self._hf_locks
+
     def grade_revealed(self):
+        # ── §9.1 cross-mechanism pair lock, LF side ──────────────────────────
+        # The pair is only knowable once revealed, so this cannot run at ingest
+        # the way the HF side does; the spec puts it here and the only available
+        # action is a void. apply_validity_filters judges each row at its OWN
+        # t0 against config.pair_lock_lf_enforced_as_of, so arming today cannot
+        # reach back and void calls committed while the rule was unenforced.
+        hf_locks = None
+        if config.PAIR_LOCK_LF_FROM:
+            try:
+                hf_locks = self._hf_lock_index(time.time())
+            except hf.HFLockFeedError as e:
+                # Do NOT fall through with hf_locks=None: that is indistinguishable
+                # from "no HF calls exist" and would grade the whole journal with
+                # the lock silently off. Skip the cycle instead — grading is
+                # idempotent and re-runs from scratch every cycle, so nothing is
+                # lost by deferring, and a persistent failure stays loud.
+                print(f"  ! HF lock feed unreadable — grade cycle SKIPPED so the "
+                      f"pair lock is never silently off: {e}")
+                return
+
         # deterministic validity pass over everything revealed/graded
         rows = []
         for commit_hex, hk, t0, pt, status in self.db.execute(
@@ -401,7 +448,8 @@ class Validator:
                 hotkey=hk, trade_pair=s.trade_pair, direction=s.direction,
                 t0_unix=t0, status="ok" if status in ("revealed", "pending") else status,
                 horizon_h=config.horizon_h_for(s.trade_pair, t0))))
-        filtered = scoring.apply_validity_filters([r for _, _, r in rows])
+        filtered = scoring.apply_validity_filters([r for _, _, r in rows],
+                                                  hf_locks=hf_locks)
         for (commit_hex, s, _), fr in zip(rows, filtered):
             if fr.status == "void":
                 self._void(commit_hex, fr.void_reason or "validity", strike=False)

@@ -13,7 +13,7 @@ The HF category differs from mechanism 0 in four ways and only four:
      time, and T0 on mech 0 is the commit block's own timestamp.
   2. BANDS + HORIZON — sized from measured excursion so a correct short call resolves
      instead of washing on the clock (HF_BANDS_HISTORY).
-  3. LIMITS — 30/day, 250 ms min gap, and a rolling 168 h cross-mechanism pair lock.
+  3. LIMITS — 30/day, 250 ms min gap, and a rolling 24 h cross-mechanism pair lock.
   4. SCORING SCOPE — HF outcomes tally into their own MinerState and their own weight
      vector (mecid 1). Mechanism 0's scoring is untouched.
 
@@ -183,12 +183,16 @@ def build_lock_index(rows) -> dict:
 
 
 def load_hf_locks(log_dir: str, since_ms: int) -> list:
-    """HF receipts as lock rows, read from the PUBLISHED window logs.
+    """HF receipts as lock rows, read from a LOCAL ingest log dir (flat <w>.jsonl).
 
-    The mirror of load_mech0_locks, and the LF side's only legitimate source: it
-    must resolve from anchored public data so a third party replaying the journal
-    reaches the same verdict we did. Reading our live ingest state instead would
-    make LF voids unverifiable.
+    NOT the LF side's feed, despite what this docstring claimed until 2026-07-24.
+    It reads our own ingest state, which no third party can replay, and its flat
+    glob does not even match the published layout (<w>/receipts.jsonl), so it
+    returns nothing when pointed at the public dir. An LF void resolved from here
+    would be unverifiable — and silently empty.
+
+    The LF side uses `hf_grade.load_hf_lock_rows(base, since_ms)`, which fetches
+    the published, Merkle-anchored windows. This stays for local tooling.
 
     Returns (hotkey, pair, MECID, ts_ms).
     """

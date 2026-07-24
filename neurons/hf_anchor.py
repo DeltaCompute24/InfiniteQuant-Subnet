@@ -40,6 +40,7 @@ NETUID = int(os.getenv("SN89_NETUID", "89"))
 NETWORK = os.getenv("SN89_NETWORK", "finney")
 ANCHOR_WALLET = os.getenv("SN89_HF_ANCHOR_WALLET", "")     # name; empty = preview
 ANCHOR_HOTKEY = os.getenv("SN89_HF_ANCHOR_HOTKEY", "default")
+COMMIT_MAX_TRIES = int(os.getenv("SN89_HF_ANCHOR_MAX_TRIES", "5"))
 PUBLIC_DIR = os.getenv("SN89_HF_PUBLIC_DIR", "")           # webhook-served; empty = no publish
 
 
@@ -63,6 +64,7 @@ class Anchorer:
     def __init__(self):
         self.sub = None
         self.wallet = None
+        self._fails: dict = {}
         if ANCHOR_WALLET:
             import bittensor as bt
             self.sub = bt.Subtensor(NETWORK)
@@ -135,12 +137,25 @@ class Anchorer:
             if r is None:
                 continue
             self._publish(w)
-            self._commit(w, r)
+            committed = self._commit(w, r)
+            # Only retire the window once it is actually anchored. Marking on a
+            # failed commit leaves a permanently unanchored window, which per
+            # spec §6 invalidates that window's HF weights — and does it
+            # silently. Bounded so a hard-failing window cannot spin forever
+            # against the per-epoch commitment-space budget.
+            if self.wallet and not committed:
+                self._fails[w] = self._fails.get(w, 0) + 1
+                if self._fails[w] < COMMIT_MAX_TRIES:
+                    _log(f"window {w}: commit failed "
+                         f"({self._fails[w]}/{COMMIT_MAX_TRIES}), will retry")
+                    continue
+                _log(f"!! window {w}: GIVING UP after {COMMIT_MAX_TRIES} "
+                     f"commit attempts — window retired UNANCHORED")
             _mark(w)
             n += 1
             _log(f"window {w}: n={r['n']} ticks={r['tick_n']} "
                  f"wroot={r['window_root'][:16]}… "
-                 f"{'ANCHORED' if self.wallet else 'sealed(preview)'}")
+                 f"{'ANCHORED' if (self.wallet and committed) else ('UNANCHORED' if self.wallet else 'sealed(preview)')}")
         return n
 
     def run(self):

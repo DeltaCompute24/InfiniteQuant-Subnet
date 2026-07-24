@@ -43,6 +43,60 @@ def _index(base: str) -> list[int]:
         return []
 
 
+def load_hf_lock_rows(base: str, since_ms: int) -> list:
+    """HF submissions as cross-mechanism lock rows, from the PUBLIC window logs.
+
+    The LF half of the §9.1 pair lock (`validator.reveal`) resolves through here.
+    It must read the PUBLISHED logs, not our live ingest state: an LF void has to
+    be reproducible by anyone replaying the journal, and only the published,
+    Merkle-anchored windows are available to them.
+
+    Returns rows in `hf.build_lock_index` shape: (hotkey, PAIR, hf.MECID, ts_ms),
+    timestamped at `grid_t0_ms` — the same deterministic grid point the call is
+    priced and graded at, never `t_recv_us`, which no third party can replay.
+
+    RAISES `hf.HFLockFeedError` rather than returning a short list. An empty feed
+    is indistinguishable from "nobody submitted", so a swallowed fetch error
+    silently disables the lock and re-opens the double-pay — which is exactly how
+    the LF side sat unenforced while the bot told users it was locked. The caller
+    must treat a raise as "cannot decide yet" and leave the call sealed.
+    """
+    idx = _fetch_text(base.rstrip("/") + "/index.json")
+    if idx is None:
+        raise hf.HFLockFeedError(f"index.json unreachable at {base}")
+    try:
+        windows = sorted(int(w) for w in json.loads(idx).get("windows", []))
+    except Exception as e:  # noqa: BLE001
+        raise hf.HFLockFeedError(f"index.json unparseable: {e}") from e
+
+    rows = []
+    for w in windows:
+        # A window that closed before the lock horizon can hold nothing that could
+        # still be locking anything. Skipping it keeps this O(24h) forever.
+        if w + WINDOW_MS < since_ms:
+            continue
+        txt = _fetch_text(f"{base.rstrip('/')}/{w}/receipts.jsonl")
+        if txt is None:
+            # Inside the horizon and indexed, but not fetchable. Unlike grading —
+            # where a late window is normal and simply retries — this one decides
+            # whether a call is voided, so under-reading it would silently
+            # under-enforce. Fail closed and let the caller retry.
+            raise hf.HFLockFeedError(f"window {w} indexed but not fetchable")
+        for line in txt.splitlines():
+            if not line.strip():
+                continue
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            sub, rcpt = e.get("submit") or {}, e.get("receipt") or {}
+            pair = (sub.get("payload") or {}).get("trade_pair")
+            hk, ts = sub.get("hk"), rcpt.get("grid_t0_ms")
+            if hk and pair and ts and int(ts) >= since_ms:
+                rows.append((hk, str(pair).upper(), hf.MECID, int(ts)))
+    return rows
+
+
 def _db(cache_dir: str) -> sqlite3.Connection:
     os.makedirs(cache_dir, exist_ok=True)
     c = sqlite3.connect(os.path.join(cache_dir, "hf_grades.db"), timeout=30)

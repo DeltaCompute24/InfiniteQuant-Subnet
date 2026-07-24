@@ -243,7 +243,17 @@ HIT_RATE_WINDOW_TRADES_V2_FROM = int(
 #
 # 0 = not enforced. Arm only once HF receipts are actually being published, or
 # every LF call would be judged against an empty lock set and nothing would void.
-PAIR_LOCK_LF_FROM = int(os.getenv("SN89_PAIR_LOCK_LF_FROM", "0"))
+#
+# ARMED 2026-07-24T04:00:00Z. The precondition above is met: HF windows publish to
+# HF_PUBLIC_BASE and, since 03:30 UTC that day, anchor on chain. Until this was
+# armed the lock ran on ONE side — hf_ingest refused an HF submit on a pair
+# recently used on LF, while an LF call on a pair just used on HF graded and paid
+# normally, which is the double-pay the rule exists to stop, in the direction the
+# bot told users was closed. The default lives here rather than in the unit's
+# environment on purpose: an env-only arming would make the live validator
+# enforce a rule master does not, and on a single-validator subnet master IS the
+# replay contract.
+PAIR_LOCK_LF_FROM = int(os.getenv("SN89_PAIR_LOCK_LF_FROM", "1784865600"))
 
 
 def pair_lock_lf_enforced_as_of(t0_unix: float) -> bool:
