@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """SN89 HF ingest — sub-second submission binding for mechanism 1. OWNER ONLY.
 
-STAGED, NOT RUNNING. No systemd unit is installed and mechanism 1 earns zero
-emission (`MechanismEmissionSplit[89] = [65535, 0]`).
+LIVE on mainnet 89 since 2026-07-23 17:28 UTC (`iq-sn89-hf-ingest.service`), and
+mechanism 1 takes ~50% of emission (`MechanismEmissionSplit[89] = [32768, 32767]`).
+This docstring used to say "STAGED, NOT RUNNING … mechanism 1 earns zero" — it was
+stale for a day while the thing was live and earning.
 
     miner --WSS--> verify sr25519 (~50us) --> stamp t_recv --> COUNTERSIGNED RECEIPT
                                                            --> window log --> Merkle anchor
@@ -42,6 +44,18 @@ LOG_DIR = Path(os.getenv("SN89_HF_LOG_DIR", "/var/lib/sn89-hf"))
 ENABLED = os.getenv("SN89_HF_ENABLED") == "1"      # refuses to run without this
 VALIDATOR_DB = os.getenv("SN89_DB_PATH", "/root/.sn89/validator-main.db")
 LOCK_REFRESH_S = int(os.getenv("SN89_HF_LOCK_REFRESH_S", "60"))
+NETUID = int(os.getenv("SN89_NETUID", "89"))
+NETWORK = os.getenv("SN89_NETWORK", "finney")
+# Ingest verified the miner's SIGNATURE but never that the hotkey exists on the
+# subnet, so any generated keypair could take a countersigned receipt, land in a
+# Merkle-anchored window and appear on the PUBLIC leaderboard. Four of the six
+# "traders" on the HF board on 2026-07-24 were exactly that — unregistered on 89
+# and with no coldkey owner on any subnet (our own bring-up probes, seq 7 and
+# seq 99 on a single submission each). They could never earn, because mecid-1
+# weights are keyed by UID, but they consumed board space and the public record,
+# and the same door was open to anyone.
+REQUIRE_REGISTERED = os.getenv("SN89_HF_REQUIRE_REGISTERED", "1") == "1"
+REG_REFRESH_S = int(os.getenv("SN89_HF_REG_REFRESH_S", "300"))
 
 _state: dict = {"seq": {}, "sent": {}, "windows": {}}
 
@@ -58,8 +72,42 @@ class Ingest:
         self.windows: dict[int, list] = {}          # window start ms -> receipts
         self.lock_index: dict = {}                  # (hk, pair, mecid) -> ts ms
         self._locks_loaded_at = 0.0
+        self.registered: set = set()                # hotkeys with a UID on NETUID
+        self._reg_loaded_at = 0.0
         LOG_DIR.mkdir(parents=True, exist_ok=True)
         self.refresh_mech0_locks()
+        if REQUIRE_REGISTERED and not self.refresh_registered():
+            # Starting ungated would silently reopen the hole this gate closes,
+            # and an ungated ingest is indistinguishable from a working one until
+            # someone reads the leaderboard. Refuse to run instead.
+            raise SystemExit(
+                "hf-ingest: could not load the registered-hotkey set at startup "
+                "and SN89_HF_REQUIRE_REGISTERED=1 — refusing to run ungated")
+
+    def refresh_registered(self) -> int:
+        """Hotkeys holding a UID on the subnet. BLOCKING — never call on the hot
+        path; the anchor loop refreshes it in a thread.
+
+        Keeps the last known good set on failure rather than emptying it: an RPC
+        blip must not reject every real miner's sub-second submission. An EMPTY
+        result is treated as failure for the same reason — "metagraph returned
+        nothing" and "nobody is registered" are the same bytes, and this file has
+        already been bitten once by that equivalence.
+        """
+        try:
+            import bittensor as bt
+            hks = set(bt.Subtensor(NETWORK).metagraph(NETUID).hotkeys)
+        except Exception as e:      # noqa: BLE001
+            _log(f"!! REGISTERED-SET REFRESH FAILED — keeping last known "
+                 f"({len(self.registered)} hotkeys): {e}")
+            return 0
+        if not hks:
+            _log("!! metagraph returned an EMPTY hotkey set — keeping last known "
+                 f"({len(self.registered)} hotkeys)")
+            return 0
+        self.registered = hks
+        self._reg_loaded_at = time.time()
+        return len(hks)
 
     def refresh_mech0_locks(self) -> int:
         """Pull mechanism-0 submissions into the lock index.
@@ -118,13 +166,21 @@ class Ingest:
         except Exception:
             return reject("bad_hotkey")
 
-        # 2. replay / equivocation — seq is strictly increasing per hotkey
+        # 2. registration — a hotkey with no UID cannot receive mecid-1 weight, so
+        # accepting it only pollutes the anchored log and the public board. Checked
+        # AFTER authenticity so the refusal is bound to a hotkey that really signed
+        # it, and it is a SIGNED rejection like every other, so a miner who just
+        # registered can tell "not on the subnet yet" from "dropped".
+        if REQUIRE_REGISTERED and hk not in self.registered:
+            return reject("not_registered")
+
+        # 3. replay / equivocation — seq is strictly increasing per hotkey
         if seq <= self.last_seq.get(hk, -1):
             return reject("stale_seq")
         if abs(t_recv_ms - ts_miner) > hf.MAX_CLOCK_SKEW_MS:
             return reject("clock_skew")
 
-        # 3. consensus validity — board, band, horizon, asset class
+        # 4. consensus validity — board, band, horizon, asset class
         t0 = t_recv_ms / 1000.0
         try:
             hf.validate_submission(payload, t0)
@@ -132,12 +188,12 @@ class Ingest:
         except hf.HFRejected as e:
             return reject(str(e))
 
-        # 4. the cross-mechanism pair lock
+        # 5. the cross-mechanism pair lock
         pair = str(payload["trade_pair"]).upper()  # noqa: E501
         if hf.is_pair_locked(self.lock_index, hk, pair, hf.MECID, t_recv_ms):
             return reject("pair_locked_other_mechanism")
 
-        # 5. accept — stamp, receipt, log
+        # 6. accept — stamp, receipt, log
         ph = hf.payload_hash(sb)
         grid = hf.grid_t0_ms(t_recv_ms, pair, t0)      # per-class grid: crypto 250ms, fx/metals 1s
         rcpt = self.sign_receipt(hk, seq, ph, t_recv_us, grid)
@@ -172,6 +228,10 @@ class Ingest:
         while True:
             if time.time() - self._locks_loaded_at > LOCK_REFRESH_S:
                 self.refresh_mech0_locks()
+            # metagraph() blocks for seconds; off-loop or it stalls the whole
+            # sub-second accept path on every refresh.
+            if REQUIRE_REGISTERED and time.time() - self._reg_loaded_at > REG_REFRESH_S:
+                await asyncio.to_thread(self.refresh_registered)
             now = int(time.time() * 1000)
             cur = hf.window_start_ms(now)
             for w in [x for x in self.windows if x < cur]:

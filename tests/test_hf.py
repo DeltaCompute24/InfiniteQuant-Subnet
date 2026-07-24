@@ -613,6 +613,106 @@ class TestLFSidePairLock:
             hf.load_hf_locks("/nonexistent/hf-logs", 0)
 
 
+class TestRegistrationGate:
+    """Ingest verified the SIGNATURE but never that the hotkey exists on the
+    subnet, so any generated keypair could take a receipt, land in an anchored
+    window and show on the public leaderboard. Four of the six HF "traders" on
+    2026-07-24 were exactly that."""
+
+    def _ingest(self, registered):
+        """An Ingest without touching the network or the validator DB — the real
+        __init__ loads the metagraph and the mech-0 locks."""
+        import importlib
+        from bittensor_wallet import Keypair
+        hi = importlib.import_module("neurons.hf_ingest")
+        ing = object.__new__(hi.Ingest)
+        ing.kp = Keypair.create_from_uri("//IngestTestKey")
+        ing.last_seq, ing.sent_ms, ing.windows = {}, {}, {}
+        ing.lock_index, ing._locks_loaded_at = {}, 9e18
+        ing.registered, ing._reg_loaded_at = set(registered), 9e18
+        return hi, ing
+
+    def _frame(self, kp, seq=1, pair="BTCUSD"):
+        import time as _t
+        # Off the governed board as-of now, not hardcoded — a band change must
+        # not turn this into a band-validity test by accident.
+        ts = int(_t.time() * 1000)
+        tp, sl, hor, ac = hf.hf_bands_as_of(ts / 1000.0)[pair]
+        payload = {"trade_pair": pair, "direction": "LONG", "asset_class": ac,
+                   "tp_bps": tp, "sl_bps": sl, "horizon_s": hor}
+        sb = hf.submit_signing_bytes(kp.ss58_address, seq, "n" * 32, payload, ts)
+        return {"v": 1, "kind": "hf.submit", "hk": kp.ss58_address, "seq": seq,
+                "nonce": "n" * 32, "ts_miner": ts, "payload": payload,
+                "sig": kp.sign(sb).hex()}
+
+    def test_unregistered_hotkey_is_refused(self):
+        from bittensor_wallet import Keypair
+        miner = Keypair.create_from_uri("//UnregisteredMiner")
+        hi, ing = self._ingest(registered=set())
+        out = ing.handle(self._frame(miner))
+        assert out["kind"] == "hf.reject"
+        assert out["reason"] == "not_registered"
+
+    def test_the_refusal_is_signed(self):
+        # "refused" must stay distinguishable from "dropped" — a miner who just
+        # registered has to be able to tell which one happened to them.
+        from bittensor_wallet import Keypair
+        miner = Keypair.create_from_uri("//UnregisteredMiner2")
+        hi, ing = self._ingest(registered=set())
+        out = ing.handle(self._frame(miner))
+        rb = hf.receipt_signing_bytes(miner.ss58_address, 1,
+                                      "REJECT:not_registered",
+                                      out["t_recv_us"], 0, out["ing"])
+        assert ing.kp.verify(rb, bytes.fromhex(out["sig_owner"]))
+
+    def test_registered_hotkey_still_accepted(self):
+        from bittensor_wallet import Keypair
+        miner = Keypair.create_from_uri("//RegisteredMiner")
+        hi, ing = self._ingest(registered={miner.ss58_address})
+        out = ing.handle(self._frame(miner))
+        assert out["kind"] == "hf.receipt", out.get("reason")
+
+    def test_forgery_is_caught_before_registration(self):
+        # Order matters: a refusal must be bound to a hotkey that really signed
+        # the frame, so authenticity is checked first.
+        from bittensor_wallet import Keypair
+        real = Keypair.create_from_uri("//RegisteredMiner")
+        forger = Keypair.create_from_uri("//Forger")
+        f = self._frame(forger)
+        f["hk"] = real.ss58_address              # claim someone else's hotkey
+        hi, ing = self._ingest(registered={real.ss58_address})
+        assert ing.handle(f)["reason"] == "bad_signature"
+
+    def test_an_empty_metagraph_never_empties_the_set(self, monkeypatch):
+        # "metagraph returned nothing" and "nobody is registered" are the same
+        # bytes. Treating them alike would reject every real miner's sub-second
+        # submission on an RPC hiccup.
+        import bittensor as bt
+        _, ing = self._ingest(registered={"5Fkeep"})
+
+        class _EmptyMg:
+            hotkeys: list = []
+
+        class _Sub:
+            def __init__(self, *a, **k): pass
+            def metagraph(self, *a, **k): return _EmptyMg()
+
+        monkeypatch.setattr(bt, "Subtensor", _Sub)
+        assert ing.refresh_registered() == 0
+        assert ing.registered == {"5Fkeep"}
+
+    def test_a_failed_refresh_never_empties_the_set(self, monkeypatch):
+        import bittensor as bt
+        _, ing = self._ingest(registered={"5Fkeep"})
+
+        def _boom(*a, **k):
+            raise RuntimeError("substrate unreachable")
+
+        monkeypatch.setattr(bt, "Subtensor", _boom)
+        assert ing.refresh_registered() == 0
+        assert ing.registered == {"5Fkeep"}
+
+
 class TestPublishedLockFeed:
     """The LF side's feed. It resolves from the PUBLISHED windows, because an LF
     void has to be reproducible by anyone replaying the journal — our local
