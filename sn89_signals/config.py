@@ -318,6 +318,15 @@ WIN_RATE_TIERS = (
     (0.60, 1.2),   # SHARP
     (0.55, 1.0),   # QUALIFIED
 )
+# Continuous tier ramp cutover (Whit 2026-07-24). A win earned at t0 >= this unix
+# is valued on a CONTINUOUS linear interpolation THROUGH the WIN_RATE_TIERS anchors
+# rather than the discrete band — removing the tier cliff (shrunk 69.9% pays 1.2×
+# and 70.0% pays 2.0× today; the ramp fills the gap so a maturing high-raw miner
+# earns between SHARP and WOLF instead of being pinned to SHARP). At an exact anchor
+# the ramp EQUALS the discrete tier, so WOLF/SHARP boundaries are unchanged. AS-OF
+# gated: every already-banked win keeps its original discrete stamp and the public
+# journal replays byte-identical before the cutover. = 2026-07-25T00:00:00Z.
+CONTINUOUS_TIER_FROM = 1784937600
 IMMUNITY_S = 8 * 24 * 3600          # from first commit observed for the hotkey
 DUST_WEIGHT = 1e-4                  # normalized floor during immunity
 # Probation grace: a QUALIFIED miner that currently earns zero emission keeps the

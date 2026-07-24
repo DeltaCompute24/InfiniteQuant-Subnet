@@ -717,10 +717,35 @@ def is_qualified_legacy(rep_wins: int, rep_decisive: int) -> bool:
             and (rep_wins / rep_decisive) >= config.QUALIFY_MIN_HIT)
 
 
-def tier_multiplier(rep_wins: int, rep_decisive: int) -> float:
+def _tier_ramp(r: float) -> float:
+    """Continuous per-win multiplier: linear interpolation THROUGH the
+    WIN_RATE_TIERS anchors (no cliff between bands), floored at the base tier and
+    capped at the top tier. At an exact anchor it equals the discrete tier — only
+    the gaps between bands fill in. Deterministic (only +,-,*,/ and sorted)."""
+    asc = sorted(config.WIN_RATE_TIERS, key=lambda x: x[0])   # base -> top
+    base_th, base_m = asc[0]
+    top_th, top_m = asc[-1]
+    if r <= base_th:
+        return base_m
+    if r >= top_th:
+        return top_m
+    for (a_th, a_m), (b_th, b_m) in zip(asc, asc[1:]):
+        if a_th <= r < b_th:
+            return a_m + (r - a_th) / (b_th - a_th) * (b_m - a_m)
+    return top_m
+
+
+def tier_multiplier(rep_wins: int, rep_decisive: int, t0_unix: float | None = None) -> float:
     """Per-win tier from config.WIN_RATE_TIERS applied to the SHRUNK hit-rate, so a
-    thin-sample hot streak can't grab a high tier. Returns 0.0 below the lowest tier."""
+    thin-sample hot streak can't grab a high tier. Returns 0.0 below the lowest tier.
+
+    AS-OF: a win at t0_unix >= config.CONTINUOUS_TIER_FROM is valued on the
+    CONTINUOUS ramp (_tier_ramp); before the cutover, and whenever t0_unix is None,
+    the original discrete banding is used — so replay of pre-cutover wins is
+    byte-identical and only new wins get the smoother curve."""
     r = shrunk_hit_rate(rep_wins, rep_decisive)
+    if t0_unix is not None and t0_unix >= config.CONTINUOUS_TIER_FROM:
+        return _tier_ramp(r)
     for threshold, mult in config.WIN_RATE_TIERS:
         if r >= threshold:
             return mult
@@ -767,7 +792,7 @@ def qualified_wins(decisive: list[tuple[float, bool, bool]], first_seen_unix: fl
         rw = sum(1 for _, w2, _ in window if w2)
         rd = len(window)
         if _qualifies(rw, rd):
-            out.append((t0, max(1.0, tier_multiplier(rw, rd))))
+            out.append((t0, max(1.0, tier_multiplier(rw, rd, t0))))
     return out
 
 

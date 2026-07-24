@@ -211,3 +211,32 @@ class TestDeterminism:
         assert sum(w.values()) == pytest.approx(1.0)
         # uid1 (WOLF tier × 12 wins) outweighs uid2 (SHARP tier × 9 wins)
         assert w[1] > w[2] > 0.0
+
+
+# ── continuous tier ramp (as-of CONTINUOUS_TIER_FROM) — Whit 2026-07-24 ──────────
+def test_tier_ramp_is_asof_and_anchor_preserving():
+    from sn89_signals import scoring, config
+    CUT = config.CONTINUOUS_TIER_FROM
+    # A maturing high-raw miner: 15/19 -> shrunk 67.7% (between SHARP 60 and WOLF 70)
+    w, n = 15, 19
+    shrunk = scoring.shrunk_hit_rate(w, n)
+    assert 0.60 < shrunk < 0.70
+    # pre-cutover / no t0 -> discrete SHARP 1.2x (byte-identical replay)
+    assert scoring.tier_multiplier(w, n) == 1.2
+    assert scoring.tier_multiplier(w, n, CUT - 1) == 1.2
+    # post-cutover -> continuous, strictly between SHARP and WOLF
+    m = scoring.tier_multiplier(w, n, CUT)
+    assert 1.2 < m < 2.0
+    # exact anchors are UNCHANGED across the cutover (no boundary jump)
+    for th, expect in config.WIN_RATE_TIERS:            # 0.70->2.0, 0.60->1.2, 0.55->1.0
+        assert scoring._tier_ramp(th) == expect
+    # ramp is monotonic non-decreasing in the shrunk rate
+    prev = 0.0
+    x = 0.50
+    while x <= 0.75:
+        cur = scoring._tier_ramp(x)
+        assert cur >= prev - 1e-12
+        prev = cur
+        x += 0.01
+    # floor: below base tier the ramp is the base multiplier (qualified_wins maxes 1.0)
+    assert scoring._tier_ramp(0.40) == 1.0
