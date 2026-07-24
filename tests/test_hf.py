@@ -464,10 +464,14 @@ class TestRuleParityAcrossMechanisms:
                                  [{"a": "BTCUSD", "t": 1000, "p": px}])["status"]
                 assert (direct or "wash") == viahf, (direction, px, direct, viahf)
 
-    def test_grading_rule_is_as_of_versioned_and_defaults_off(self):
+    def test_grading_rule_is_as_of_versioned_and_armed(self):
         from sn89_signals import config
-        assert config.grading_rule_as_of(0) == "close_1m"
-        assert config.grading_rule_as_of(9e9) == "close_1m"   # unarmed until scheduled
+        # ARMED 2026-07-24: LF unifies onto touch_ticks at the committed cutover.
+        assert config.TOUCH_TICKS_FROM == 1784937600          # 2026-07-25T00:00:00Z
+        assert config.grading_rule_as_of(0) == "close_1m"     # all pre-cutover history stays close_1m
+        assert config.grading_rule_as_of(config.TOUCH_TICKS_FROM - 1) == "close_1m"
+        assert config.grading_rule_as_of(config.TOUCH_TICKS_FROM) == "touch_ticks"
+        assert config.grading_rule_as_of(9e9) == "touch_ticks"
 
     def test_arming_never_reaches_back_before_its_effective_date(self):
         from sn89_signals import config

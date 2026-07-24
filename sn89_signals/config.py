@@ -184,8 +184,13 @@ FOREX_ROLLOVER_UTC = ((20, 55), (21, 20))   # [20:55, 21:20)
 #
 # NEVER retroactive: resolved as-of the call's own t0, exactly like the bands, so
 # arming it can never re-grade a call that already scored.
-# 0 = not scheduled. Set to the HF launch timestamp to arm it.
-TOUCH_TICKS_FROM = int(os.getenv("SN89_TOUCH_TICKS_FROM", "0"))
+# ARMED 2026-07-24 (Whit): LF moves from close_1m to touch_ticks, unifying it with
+# HF on one hit rule (a call wins when a real quoted tick TOUCHES TP; the tick feed
+# already excludes the bad prints close_1m was a prosthetic for). Forward-only
+# cutover 2026-07-25T00:00:00Z so no in-flight call changes rule mid-flight; a call
+# committed before the cutover grades entirely under close_1m. Committed default (not
+# an env var) so master == the live validator's rule (single-validator replay contract).
+TOUCH_TICKS_FROM = int(os.getenv("SN89_TOUCH_TICKS_FROM", "1784937600"))
 
 
 def grading_rule_as_of(t0_unix: float) -> str:
