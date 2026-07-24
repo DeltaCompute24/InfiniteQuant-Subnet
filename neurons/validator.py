@@ -38,6 +38,13 @@ from timelock import Timelock
 # never decided on a feed that could have moved since the call being judged.
 HF_LOCK_REFRESH_S = int(os.getenv("SN89_HF_LOCK_REFRESH_S", "60"))
 
+# HF grading was coupled to the weight cycle (mecid1_weights → sync_and_grade),
+# which only runs once a TEMPO (~72 min), so a resolved HF call sat pending for
+# over an hour. mecid-0 already grades every poll and only SETS weights per tempo;
+# HF now does the same. Throttled because sync_and_grade fetches published windows
+# over the network — a few min of staleness in a warmup board is fine.
+HF_GRADE_EVERY_S = int(os.getenv("SN89_HF_GRADE_EVERY_S", "120"))
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS signals (
   commit_hex   TEXT PRIMARY KEY,
@@ -108,6 +115,7 @@ class Validator:
         self._last_scanned_block = 0   # recent-overwrite scan cursor (audit #5)
         self._hf_locks: dict = {}      # §9.1 LF-side pair lock (published HF logs)
         self._hf_locks_at = 0.0
+        self._hf_graded_at = 0.0       # last HF sync_and_grade (decoupled from weights)
 
     def _migrate(self):
         """Additive column migration for DBs created before commit_block/t0_ms."""
@@ -416,6 +424,21 @@ class Validator:
         self._hf_locks_at = time.time()
         return self._hf_locks
 
+    def grade_hf(self):
+        """Resolve HF (mecid-1) calls whose horizon has elapsed, decoupled from
+        the weight cycle. Fills the same grade cache mecid1_weights reads, so the
+        next weight commit is computed off an already-current board rather than
+        having to grade a TEMPO's worth of backlog in one shot. Best-effort:
+        never let an HF grading hiccup disturb the mecid-0 loop."""
+        if time.time() - self._hf_graded_at < HF_GRADE_EVERY_S:
+            return
+        self._hf_graded_at = time.time()
+        try:
+            cache_dir = os.path.expanduser("~/.sn89/hf-grade")
+            hf_grade.sync_and_grade(hf.HF_PUBLIC_BASE, cache_dir, time.time())
+        except Exception as e:  # noqa: BLE001 — HF must never break mecid-0
+            print(f"  ! HF grade skipped (mecid-0 unaffected): {e}")
+
     def grade_revealed(self):
         # ── §9.1 cross-mechanism pair lock, LF side ──────────────────────────
         # The pair is only knowable once revealed, so this cannot run at ingest
@@ -695,6 +718,7 @@ class Validator:
                 self.reveal()
                 self.forfeit_unrevealed()
                 self.grade_revealed()
+                self.grade_hf()
                 self.maybe_set_weights()
             except KeyboardInterrupt:
                 raise

@@ -382,6 +382,65 @@ class TestGrading:
         assert hf.grade("BTCUSD", "LONG", None, 19, 19, 0, 1800, [])["status"] == "void"
 
 
+class TestTicksForEntryWindow:
+    """The crypto-void bug: _ticks_for filtered to t>=t0, dropping the tick just
+    BEFORE t0 that price_at needs for the entry. Crypto ticks (~250ms, non-zero
+    ms) almost never land exactly on the 250ms grid, so every crypto call voided
+    while forex/gold (ms=000, 1s grid) found an on-grid entry."""
+    from sn89_signals import hf_grade as _hfg
+    WIN = _hfg.WINDOW_MS
+
+    def _publish(self, tmp_path, pair, ticks):
+        import json as _j
+        by_w = {}
+        for t, p in ticks:
+            w = (t // self.WIN) * self.WIN
+            by_w.setdefault(w, []).append({"a": pair, "t": t, "p": p})
+        for w, rows in by_w.items():
+            d = tmp_path / str(w)
+            d.mkdir(exist_ok=True)
+            d.joinpath("ticks.jsonl").write_text(
+                "\n".join(_j.dumps(r) for r in rows))
+        return tmp_path.as_uri()
+
+    def test_entry_tick_just_before_t0_is_kept(self, tmp_path):
+        from sn89_signals import hf, hf_grade
+        # grid point at :750; ticks at :529 and :779 straddle it. The entry is the
+        # :529 tick — under the old t>=t0 filter it was dropped and this voided.
+        t0 = 1_000_000_750
+        ticks = [(t0 - 221, 64715.98), (t0 + 29, 64716.10), (t0 + 279, 64717.0)]
+        base = self._publish(tmp_path, "BTCUSD", ticks)
+        got = hf_grade._ticks_for(base, str(tmp_path / "cache"), "BTCUSD",
+                                  t0, t0 + 900_000)
+        entry = hf.price_at(got, t0)
+        assert entry == 64715.98, f"entry should be the pre-t0 tick, got {entry}"
+
+    def test_entry_at_window_start_pulls_the_previous_window(self, tmp_path):
+        from sn89_signals import hf, hf_grade
+        # t0 only 10ms into its window — the entry tick lives in the PREVIOUS
+        # window, which the extra leading window must fetch.
+        w = 3 * self.WIN
+        t0 = w + 10
+        ticks = [(w - 100, 50.0), (t0 + 40, 51.0)]
+        base = self._publish(tmp_path, "ETHUSD", ticks)
+        got = hf_grade._ticks_for(base, str(tmp_path / "cache"), "ETHUSD",
+                                  t0, t0 + 900_000)
+        assert hf.price_at(got, t0) == 50.0
+
+    def test_a_real_crypto_call_now_grades_instead_of_voiding(self, tmp_path):
+        from sn89_signals import hf, hf_grade
+        t0 = 2_000_000_250
+        # entry just before t0, then a +25bps move to TP for a LONG
+        entry_px = 100.0
+        ticks = [(t0 - 130, entry_px), (t0 + 300, 100.30)]
+        base = self._publish(tmp_path, "BTCUSD", ticks)
+        got = hf_grade._ticks_for(base, str(tmp_path / "cache"), "BTCUSD",
+                                  t0, t0 + 1800_000)
+        entry = hf.price_at(got, t0)
+        assert entry == entry_px
+        assert hf.grade("BTCUSD", "LONG", entry, 19, 19, t0, 1800, got)["status"] == "won"
+
+
 class TestRuleParityAcrossMechanisms:
     """The hit rule must be ONE function. If these drift, a gold call on mech 0 and
     the identical gold call on mech 1 resolve by different physics in the same week."""

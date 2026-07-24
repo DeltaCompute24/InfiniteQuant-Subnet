@@ -110,11 +110,22 @@ def _db(cache_dir: str) -> sqlite3.Connection:
 
 
 def _ticks_for(base: str, tick_dir: str, pair: str, t0_ms: int, end_ms: int) -> list:
-    """Ticks for `pair` over [t0_ms, end_ms], fetching each covering window once and
-    caching it on disk (the horizon of a 2h call spans ~40 windows)."""
+    """Ticks for `pair` covering the ENTRY at t0 and the walk to end_ms.
+
+    Starts ONE window before t0's window and keeps every tick from there through
+    end_ms. price_at needs the last tick AT OR BEFORE t0 for the entry, and a
+    crypto tick (~250 ms apart, non-zero ms) almost never lands exactly on the
+    250 ms grid point, so the entry tick is the one just BEFORE t0. The old bound
+    `t0_ms <= t` dropped it and returned entry=None → every crypto call voided,
+    while forex/gold survived only because their quotes carry ms=000 and align to
+    the 1 s grid. The extra leading window guarantees a pre-t0 tick even when t0
+    sits at the very start of its own window. grade() ignores ticks at or before
+    t0 for the TP/SL walk, so carrying them is harmless.
+
+    Each window is fetched once and cached on disk (a 2 h call spans ~40)."""
     os.makedirs(tick_dir, exist_ok=True)
     out = []
-    w = (t0_ms // WINDOW_MS) * WINDOW_MS
+    w = (t0_ms // WINDOW_MS - 1) * WINDOW_MS
     while w <= end_ms:
         local = os.path.join(tick_dir, f"{w}.ticks.jsonl")
         if not os.path.exists(local):
@@ -128,7 +139,7 @@ def _ticks_for(base: str, tick_dir: str, pair: str, t0_ms: int, end_ms: int) -> 
             with open(local, encoding="utf-8") as fh:
                 for line in fh:
                     d = json.loads(line)
-                    if d.get("a") == pair and t0_ms <= int(d["t"]) <= end_ms:
+                    if d.get("a") == pair and int(d["t"]) <= end_ms:
                         out.append(d)
         except (OSError, ValueError):
             pass
