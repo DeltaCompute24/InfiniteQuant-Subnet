@@ -65,6 +65,12 @@ def _log(m: str) -> None:
 
 
 class Ingest:
+    # Class-level defaults so an Ingest built via object.__new__ (the test helpers
+    # skip __init__ to avoid touching the network and the validator DB) still has
+    # these before _conn()/_drop_conn()/prune() can be reached.
+    _subtensor = None
+    _pruned_at = 0.0
+
     def __init__(self, receipt_kp: Keypair):
         self.kp = receipt_kp
         self.last_seq: dict[str, int] = {}          # hotkey -> last accepted seq
@@ -74,6 +80,8 @@ class Ingest:
         self._locks_loaded_at = 0.0
         self.registered: set = set()                # hotkeys with a UID on NETUID
         self._reg_loaded_at = 0.0
+        self._subtensor = None                      # reused across refreshes — see _conn()
+        self._pruned_at = 0.0
         LOG_DIR.mkdir(parents=True, exist_ok=True)
         self.refresh_mech0_locks()
         if REQUIRE_REGISTERED and not self.refresh_registered():
@@ -95,9 +103,11 @@ class Ingest:
         already been bitten once by that equivalence.
         """
         try:
-            import bittensor as bt
-            hks = set(bt.Subtensor(NETWORK).metagraph(NETUID).hotkeys)
+            hks = set(self._conn().metagraph(NETUID).hotkeys)
         except Exception as e:      # noqa: BLE001
+            # Drop the handle so a wedged connection cannot poison every future
+            # refresh; _conn() rebuilds it on the next pass.
+            self._drop_conn()
             _log(f"!! REGISTERED-SET REFRESH FAILED — keeping last known "
                  f"({len(self.registered)} hotkeys): {e}")
             return 0
@@ -108,6 +118,57 @@ class Ingest:
         self.registered = hks
         self._reg_loaded_at = time.time()
         return len(hks)
+
+    # ── connection reuse ─────────────────────────────────────────────────────
+    # MEMORY: constructing a new bt.Subtensor per refresh leaks ~25 MB EACH TIME and
+    # is NOT reclaimed by gc.collect() or by calling .close() — measured 2026-07-25
+    # on this box (4 fresh instances: 123→148→173→202 MB; 4 reuses: 123→126 MB).
+    # At REG_REFRESH_S=300 that is ~300 MB/h, which is exactly the ~290 MB/h that
+    # took this process to 9.87 GB in 34h and made the kernel OOM-kill the SN89
+    # hosted-miner multiplexer 10 times in 3 days. Hold ONE handle and reuse it.
+    def _conn(self):
+        if self._subtensor is None:
+            import bittensor as bt
+            self._subtensor = bt.Subtensor(NETWORK)
+        return self._subtensor
+
+    def _drop_conn(self) -> None:
+        st, self._subtensor = self._subtensor, None
+        try:
+            if st is not None:
+                st.close()
+        except Exception:           # noqa: BLE001
+            pass
+
+    def prune(self) -> None:
+        """Bound the two per-hotkey structures that otherwise grow forever.
+
+        sent_ms  — check_rate() only reads submissions from the CURRENT UTC day
+                   (daily cap) plus the single most recent timestamp (min gap), so
+                   anything older than 48h is dead weight. Unpruned this grew one
+                   int per accepted submission per hotkey, forever.
+        lock_index — is_pair_locked() only looks back PAIR_LOCK_MS (24h), and
+                   refresh_mech0_locks() re-adds live rows every LOCK_REFRESH_S, so
+                   entries older than the lock window can never fire again.
+        """
+        now_ms = int(time.time() * 1000)
+        keep_ms = now_ms - 48 * 3600 * 1000
+        dropped = 0
+        for hk, lst in list(self.sent_ms.items()):
+            kept = [t for t in lst if int(t) >= keep_ms]
+            dropped += len(lst) - len(kept)
+            if kept:
+                self.sent_ms[hk] = kept
+            else:
+                del self.sent_ms[hk]
+        lock_cut = now_ms - hf.PAIR_LOCK_MS
+        stale = [k for k, ts in self.lock_index.items() if int(ts) < lock_cut]
+        for k in stale:
+            del self.lock_index[k]
+        if dropped or stale:
+            _log(f"prune: sent_ms -{dropped} ts, lock_index -{len(stale)} keys "
+                 f"(now {len(self.sent_ms)} hk / {len(self.lock_index)} locks)")
+        self._pruned_at = time.time()
 
     def refresh_mech0_locks(self) -> int:
         """Pull mechanism-0 submissions into the lock index.
@@ -228,6 +289,8 @@ class Ingest:
         while True:
             if time.time() - self._locks_loaded_at > LOCK_REFRESH_S:
                 self.refresh_mech0_locks()
+            if time.time() - self._pruned_at > 300:
+                self.prune()
             # metagraph() blocks for seconds; off-loop or it stalls the whole
             # sub-second accept path on every refresh.
             if REQUIRE_REGISTERED and time.time() - self._reg_loaded_at > REG_REFRESH_S:
