@@ -42,6 +42,12 @@ ANCHOR_WALLET = os.getenv("SN89_HF_ANCHOR_WALLET", "")     # name; empty = previ
 ANCHOR_HOTKEY = os.getenv("SN89_HF_ANCHOR_HOTKEY", "default")
 COMMIT_MAX_TRIES = int(os.getenv("SN89_HF_ANCHOR_MAX_TRIES", "5"))
 PUBLIC_DIR = os.getenv("SN89_HF_PUBLIC_DIR", "")           # webhook-served; empty = no publish
+# How far behind `now` a TICK-ONLY window must sit before we publish it. The tick
+# recorder and the ingest seal the same window independently and within seconds of
+# each other, so with no margin a sweep can land between them, publish the window
+# as receipt-less, mark it done, and strand real receipts.
+TICK_SETTLE_WINDOWS = int(os.getenv("SN89_HF_TICK_SETTLE_WINDOWS", "2"))
+WINDOW_MS = hf.ANCHOR_WINDOW_S * 1000
 
 
 def _log(m: str) -> None:
@@ -78,9 +84,15 @@ class Anchorer:
     def _roots(self, w: int):
         rlog = LOG_DIR / f"{w}.jsonl"
         tlog = TICK_DIR / f"{w}.ticks.jsonl"
-        if not rlog.exists():
+        if not rlog.exists() and not tlog.exists():
             return None
-        receipts = [json.loads(l)["receipt"] for l in rlog.open() if l.strip()]
+        # A window with no receipts is a QUIET window, not a missing one — its
+        # receipt root is the all-zero root, exactly as seal_window() documents.
+        # Returning None here (the old behaviour) made sweep() skip it, so it was
+        # never published, and the tick log it carries is the LF grading substrate
+        # once config.TOUCH_TICKS_FROM arms the touch_ticks rule.
+        receipts = ([json.loads(l)["receipt"] for l in rlog.open() if l.strip()]
+                    if rlog.exists() else [])
         ticks = [json.loads(l) for l in tlog.open()] if tlog.exists() else []
         root = hf.merkle_root([hf.leaf(hf.receipt_signing_bytes(
             r["hk"], r["seq"], r["ph"], r["t_recv_us"], r["grid_t0_ms"], r["ing"]))
@@ -107,10 +119,20 @@ class Anchorer:
         for src, out in pairs:
             if src.exists():
                 shutil.copyfile(src, out)
-                try:
-                    out.chmod(0o644)
-                except OSError:
-                    pass
+            elif out.name == "receipts.jsonl":
+                # A quiet window has ZERO receipts, which is not the same thing as
+                # an unfetchable one. hf_grade.lock_index fails CLOSED on a 404 —
+                # correctly, since under-reading it would silently un-enforce the
+                # cross-mechanism pair lock — so publishing a window without this
+                # file stalls every grade cycle. Write it empty: it parses to zero
+                # receipts and keeps "quiet" distinguishable from "missing".
+                out.write_text("")
+            else:
+                continue
+            try:
+                out.chmod(0o644)
+            except OSError:
+                pass
         try:
             dst.chmod(0o755)
         except OSError:
@@ -128,22 +150,36 @@ class Anchorer:
 
     def sweep(self) -> int:
         done = _done()
-        # windows the ingest has sealed (a *.jsonl that is not the state file)
-        sealed = sorted(int(p.stem) for p in LOG_DIR.glob("*.jsonl")
-                        if p.stem.isdigit() and p.stem not in done)
+        # Windows to process = receipt logs the ingest sealed UNION tick logs the
+        # recorder sealed. Enumerating only receipt logs (the old behaviour) tied
+        # the public tick feed to HF traffic: with no HF submissions no window was
+        # published, and mechanism-0 grading — which reads its ticks from that same
+        # feed once config.TOUCH_TICKS_FROM arms the touch_ticks substrate — simply
+        # stopped, with every call stuck PENDING on a NULL entry_price and no error.
+        # PUBLICATION is now decoupled from receipts. The ON-CHAIN ANCHOR is not:
+        # committing every quiet window would spend ~480 commitments/day of the
+        # per-epoch budget on all-zero receipt roots, and a window with no receipts
+        # carries no HF weight for a missing anchor to invalidate.
+        cutoff = int(time.time() * 1000) - TICK_SETTLE_WINDOWS * WINDOW_MS
+        cand = {int(p.stem) for p in LOG_DIR.glob("*.jsonl") if p.stem.isdigit()}
+        for tp in TICK_DIR.glob("*.ticks.jsonl"):
+            stem = tp.name.split(".", 1)[0]
+            if stem.isdigit() and int(stem) <= cutoff:
+                cand.add(int(stem))
+        sealed = sorted(w for w in cand if str(w) not in done)
         n = 0
         for w in sealed:
             r = self._roots(w)
             if r is None:
                 continue
             self._publish(w)
-            committed = self._commit(w, r)
+            committed = self._commit(w, r) if r["n"] else False
             # Only retire the window once it is actually anchored. Marking on a
             # failed commit leaves a permanently unanchored window, which per
             # spec §6 invalidates that window's HF weights — and does it
             # silently. Bounded so a hard-failing window cannot spin forever
             # against the per-epoch commitment-space budget.
-            if self.wallet and not committed:
+            if self.wallet and r["n"] and not committed:
                 self._fails[w] = self._fails.get(w, 0) + 1
                 if self._fails[w] < COMMIT_MAX_TRIES:
                     _log(f"window {w}: commit failed "
@@ -155,7 +191,7 @@ class Anchorer:
             n += 1
             _log(f"window {w}: n={r['n']} ticks={r['tick_n']} "
                  f"wroot={r['window_root'][:16]}… "
-                 f"{'ANCHORED' if (self.wallet and committed) else ('UNANCHORED' if self.wallet else 'sealed(preview)')}")
+                 f"{'ANCHORED' if (self.wallet and committed) else ('quiet(published)' if not r['n'] else ('UNANCHORED' if self.wallet else 'sealed(preview)'))}")
         return n
 
     def run(self):

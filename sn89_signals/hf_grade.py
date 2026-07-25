@@ -33,6 +33,49 @@ def _fetch_text(url: str, timeout: float = 15.0) -> str | None:
         return None
 
 
+def _receipt_cache_dir() -> str:
+    return os.getenv("SN89_HF_RECEIPT_CACHE",
+                     os.path.join(os.path.expanduser("~/.sn89/hf-grade"), "receipts"))
+
+
+def _cached_receipts(base: str, w: int) -> str | None:
+    """receipts.jsonl for one window, fetched once and kept on disk.
+
+    A published window is SEALED — the anchor retires it and never rewrites it —
+    so refetching it is pure waste. It matters because load_hf_lock_rows walks
+    every window in the 24 h lock horizon (480 of them at a 3-minute window), and
+    it is rebuilt every HF_LOCK_REFRESH_S; without this the rebuild takes longer
+    than the refresh interval and the validator loop does nothing but refetch.
+    A MISS is never cached — that is the fail-closed signal the caller needs.
+
+    Keyed by (base, window), never window alone: window ids are just wall-clock
+    grid points, so two different feeds — another validator's base, or a test's
+    tmp dir — collide on them, and a cache hit from the wrong feed would satisfy
+    a fetch that must fail closed."""
+    import hashlib
+    d = os.path.join(_receipt_cache_dir(),
+                     hashlib.blake2b(base.rstrip("/").encode(),
+                                     digest_size=8).hexdigest())
+    os.makedirs(d, exist_ok=True)
+    local = os.path.join(d, f"{w}.receipts.jsonl")
+    try:
+        with open(local, encoding="utf-8") as fh:
+            return fh.read()
+    except OSError:
+        pass
+    txt = _fetch_text(f"{base.rstrip('/')}/{w}/receipts.jsonl")
+    if txt is None:
+        return None
+    tmp = local + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(txt)
+        os.replace(tmp, local)
+    except OSError:
+        pass                                # cache is an optimisation, not a source
+    return txt
+
+
 def _index(base: str) -> list[int]:
     txt = _fetch_text(base.rstrip("/") + "/index.json")
     if not txt:
@@ -75,7 +118,7 @@ def load_hf_lock_rows(base: str, since_ms: int) -> list:
         # still be locking anything. Skipping it keeps this O(24h) forever.
         if w + WINDOW_MS < since_ms:
             continue
-        txt = _fetch_text(f"{base.rstrip('/')}/{w}/receipts.jsonl")
+        txt = _cached_receipts(base, w)
         if txt is None:
             # Inside the horizon and indexed, but not fetchable. Unlike grading —
             # where a late window is normal and simply retries — this one decides
