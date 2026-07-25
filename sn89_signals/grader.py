@@ -1,15 +1,23 @@
 """Walk-forward touch grading.
 
-Grading semantics:
-  * a bracket level (TP/SL) is HIT when a 1-minute candle's CLOSE crosses it —
-    the price that actually persisted to the end of the minute, NOT the intrabar
-    high/low wick. This mirrors the SN8/PTN fill standard: a fill is priced off
-    the traded/quoted price at a point in time, never a candle's extreme. A
-    momentary wick that reverts by the close cannot move the close, so a level
-    merely pierced for a tick does not score. Deciding on the close needs only
-    the 1-minute aggregates — no secondary (1-second) feed and no
-    availability-dependent fallback, so the grade is fully reproducible from the
-    same minute bars every replay.
+TWO HIT SUBSTRATES. Which one governs a call is chosen from its COMMIT TIME by
+config.grading_rule_as_of(t0) and is never applied retroactively:
+
+  * touch_ticks  (t0 >= config.TOUCH_TICKS_FROM = 2026-07-25T00:00:00Z) — CURRENT.
+    A level scores once config.MIN_TOUCH_TICKS (default 2) ticks TOUCH it. Ticks
+    come from the anchored public HF windows, so the grade is still replayable by
+    anyone: the tick series is published and Merkle-anchored, not a private feed.
+    Requiring >=2 ticks is what keeps a single stray print from scoring a level.
+
+  * close_1m  (t0 < TOUCH_TICKS_FROM) — LEGACY, retained so historical calls
+    regrade identically. A bracket level is HIT only when a 1-minute candle's
+    CLOSE crosses it — the price that persisted to the end of the minute, not the
+    intrabar high/low wick. That mirrored the SN8/PTN fill standard and needed
+    only 1-minute aggregates, so it was reproducible without a sub-minute feed.
+
+  ⚠ Do not read the close_1m paragraph as describing today's behaviour. It was the
+  whole of this docstring until 2026-07-25 and is the reason a reader (and an
+  agent) can conclude SN89 grades on minute closes. It does not.
   * bars are bad-tick sanitized first (polygon.sanitize_minute_bars): a spike
     wick beyond the candle body and both neighbours by >tolerance (1% crypto,
     0.25% forex/metals/equities) is clamped unless a second feed (Hyperliquid,
