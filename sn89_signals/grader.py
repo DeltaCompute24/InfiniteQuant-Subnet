@@ -29,6 +29,7 @@ no bars, which the touch loop already tolerates).
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 from . import config, polygon
