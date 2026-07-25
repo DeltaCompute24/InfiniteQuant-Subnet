@@ -69,6 +69,8 @@ try:
         "mecid_emission_split": mecid_split,      # [mecid0, mecid1] u16, or None
         "lf_emission_frac": round(lf_frac, 6),    # mecid-0's share of the miner pool
         "lf_pool_tao_day": round(total_miner_pool * lf_frac, 4),  # what LF miners split
+        "hf_emission_frac": round(1.0 - lf_frac, 6),             # mecid-1's share
+        "hf_pool_tao_day": round(total_miner_pool * (1.0 - lf_frac), 4),  # what HF miners split
     }
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(POOL_OUT), suffix=".tmp")
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
