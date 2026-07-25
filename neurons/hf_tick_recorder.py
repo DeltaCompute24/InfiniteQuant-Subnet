@@ -14,7 +14,8 @@ exactly the resolution the feed actually provides and never invents sub-second
 structure: Polygon's forex/metals quotes timestamp to the second, so gold lands on a
 1 s grid honestly rather than being smeared onto a 250 ms one by our receive clock.
 
-Each 60 s window produces:
+Each window is `hf.ANCHOR_WINDOW_S` long — 180 s, not the 60 s this docstring
+claimed until 2026-07-25. Read the constant, never this line. Each window produces:
     <dir>/<w>.ticks.jsonl   one line per (asset, src_ts), ordered by (t, asset)
     <dir>/<w>.ticks.json    {w, n, tick_root, sig} — signed, and the tick_root goes
                             into the window's on-chain anchor alongside the receipt
