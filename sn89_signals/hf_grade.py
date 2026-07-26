@@ -23,6 +23,27 @@ from . import config, hf
 WINDOW_MS = 180_000
 _UA = {"User-Agent": "sn89-validator/1.0"}
 
+# Bump to force every validator to re-derive its grades from the published feed on
+# upgrade. A grading bug fixed in code is only half a fix: the wrong grades are
+# already written and `grades` is never revisited, so without this the corrected
+# rule applies to future calls only and the two halves of the board disagree
+# forever. v2: the incomplete-tick-series wash bug below.
+GRADER_VERSION = 2
+
+# A window is published shortly AFTER it closes, so a call whose horizon has only
+# just elapsed is graded against a series that is still arriving. Wait this long
+# past the horizon before grading. Measured on the 07-24..07-26 corpus: 42 of 307
+# calls (13.7%) were graded on an incomplete series, 41 of them recorded as `wash`
+# when the tick record shows they were decisive.
+GRADE_SETTLE_S = int(os.getenv("SN89_HF_GRADE_SETTLE_S", "900"))
+
+# ...but an EMPTY window is never sealed (anchor_loop only seals windows that got a
+# receipt), so a permanent gap is indistinguishable from a slow publish and would
+# wedge the call in `pending` forever. After this long past the horizon, grade on
+# whatever the feed ever published. Every validator crosses the deadline against
+# the same (by then final) published set, so they still converge.
+GRADE_ABANDON_S = int(os.getenv("SN89_HF_GRADE_ABANDON_S", "21600"))
+
 
 def _fetch_text(url: str, timeout: float = 15.0) -> str | None:
     try:
@@ -149,11 +170,39 @@ def _db(cache_dir: str) -> sqlite3.Connection:
               "direction TEXT, end_ms INTEGER)")
     c.execute("CREATE TABLE IF NOT EXISTS grades ("
               "key TEXT PRIMARY KEY, hk TEXT, t0_ms INTEGER, pair TEXT, status TEXT)")
+    c.execute("CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT)")
+    row = c.execute("SELECT v FROM meta WHERE k='grader_version'").fetchone()
+    have = int(row[0]) if row else 0
+    if have != GRADER_VERSION:
+        # Drop everything DERIVED and let it rebuild from the published windows.
+        # The tick cache is untouched — it is the raw feed, not a derivation.
+        c.execute("DELETE FROM grades")
+        c.execute("DELETE FROM pending")
+        c.execute("DELETE FROM windows_seen")
+        c.execute("INSERT OR REPLACE INTO meta VALUES ('grader_version',?)",
+                  (str(GRADER_VERSION),))
+        c.commit()
     return c
 
 
-def _ticks_for(base: str, tick_dir: str, pair: str, t0_ms: int, end_ms: int) -> list:
-    """Ticks for `pair` covering the ENTRY at t0 and the walk to end_ms.
+def _ticks_for(base: str, tick_dir: str, pair: str,
+               t0_ms: int, end_ms: int) -> tuple[list, list]:
+    """(ticks, missing_windows) for `pair` covering the ENTRY at t0 and the walk
+    to end_ms.
+
+    `missing_windows` is the whole point of the second return value. This used to
+    swallow an unfetchable window and hand grade() whatever it happened to have —
+    and since a short series simply never touches a level, the call resolved
+    `wash`. `wash` is indistinguishable from "the market did nothing", so the
+    defect was invisible: on the 2026-07-24..26 corpus 42 of 307 calls (13.7%)
+    were graded against an incomplete series, 41 of them recorded `wash` when the
+    tick record shows they were decisive. Every one of them spanned a window this
+    function could not fetch. It is a CONSENSUS defect as much as an accuracy one:
+    two validators reading the feed at different moments saw different series and
+    wrote different grades for the same call.
+
+    A gap is reported, never interpreted — the caller decides whether to wait for
+    the window or accept that it will never arrive.
 
     Starts ONE window before t0's window and keeps every tick from there through
     end_ms. price_at needs the last tick AT OR BEFORE t0 for the entry, and a
@@ -167,7 +216,7 @@ def _ticks_for(base: str, tick_dir: str, pair: str, t0_ms: int, end_ms: int) -> 
 
     Each window is fetched once and cached on disk (a 2 h call spans ~40)."""
     os.makedirs(tick_dir, exist_ok=True)
-    out = []
+    out, missing = [], []
     w = (t0_ms // WINDOW_MS - 1) * WINDOW_MS
     while w <= end_ms:
         local = os.path.join(tick_dir, f"{w}.ticks.jsonl")
@@ -178,17 +227,25 @@ def _ticks_for(base: str, tick_dir: str, pair: str, t0_ms: int, end_ms: int) -> 
                 with open(tmp, "w", encoding="utf-8") as fh:
                     fh.write(txt)
                 os.replace(tmp, local)
+        rows = []
         try:
             with open(local, encoding="utf-8") as fh:
                 for line in fh:
+                    if not line.strip():
+                        continue
                     d = json.loads(line)
                     if d.get("a") == pair and int(d["t"]) <= end_ms:
-                        out.append(d)
-        except (OSError, ValueError):
-            pass
+                        rows.append(d)
+        except (OSError, ValueError, KeyError):
+            # unreachable OR truncated/corrupt — either way this window's prices
+            # are not in hand, and a partial parse is exactly the silent
+            # short-series that produced the bogus washes. Report, drop, retry.
+            missing.append(w)
+        else:
+            out.extend(rows)
         w += WINDOW_MS
     out.sort(key=lambda d: int(d["t"]))
-    return out
+    return out, missing
 
 
 def sync_and_grade(base: str, cache_dir: str, now: float) -> None:
@@ -231,16 +288,24 @@ def sync_and_grade(base: str, cache_dir: str, now: float) -> None:
         db.execute("INSERT OR IGNORE INTO windows_seen VALUES (?)", (w,))
     db.commit()
 
-    # grade everything now resolved
+    # Grade everything now resolved AND settled. The settle delay is not politeness
+    # — the window covering the last second of a horizon publishes after that
+    # second, so grading at end_ms exactly is grading a series that is still
+    # arriving.
     due = db.execute("SELECT key, hk, t0_ms, pair, direction, end_ms FROM pending "
-                     "WHERE end_ms <= ?", (now_ms,)).fetchall()
+                     "WHERE end_ms <= ?", (now_ms - GRADE_SETTLE_S * 1000,)).fetchall()
     for key, hk, t0_ms, pair, direction, end_ms in due:
         board = hf.hf_bands_as_of(t0_ms / 1000.0)
         if not board or pair not in board:
             db.execute("DELETE FROM pending WHERE key=?", (key,))
             continue
         tp, sl, horizon_s, _ = board[pair]
-        ticks = _ticks_for(base, tick_dir, pair, int(t0_ms), int(end_ms))
+        ticks, missing = _ticks_for(base, tick_dir, pair, int(t0_ms), int(end_ms))
+        if missing and now_ms < int(end_ms) + GRADE_ABANDON_S * 1000:
+            # Prices we do not hold. Leave the call in `pending` and retry next
+            # tempo rather than grading a hole as `wash` — a grade is written once
+            # and never revisited, so guessing here is permanent.
+            continue
         entry = hf.price_at(ticks, int(t0_ms))
         g = hf.grade(pair, direction, entry, tp, sl, int(t0_ms), horizon_s, ticks)
         db.execute("INSERT OR REPLACE INTO grades VALUES (?,?,?,?,?)",

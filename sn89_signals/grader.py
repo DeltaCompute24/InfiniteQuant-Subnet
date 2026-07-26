@@ -90,10 +90,14 @@ def _grade_touch_ticks(sig: Signal, t0_ms: int, now_ms: int, horizon_ms: int,
     t0 (mirrors HF), so card price == graded price. `ticks` injectable for tests;
     fetched from the anchored public windows otherwise."""
     scan_to = min(now_ms, horizon_ms)
+    missing: list = []
+    abandon_ms = None
     if ticks is None:
         from . import hf, hf_grade   # lazy: avoid an import cycle at module load
         tick_dir = os.path.join(os.path.expanduser("~/.sn89/hf-grade"), "ticks")
-        ticks = hf_grade._ticks_for(hf.HF_PUBLIC_BASE, tick_dir, sig.trade_pair, t0_ms, scan_to)
+        ticks, missing = hf_grade._ticks_for(hf.HF_PUBLIC_BASE, tick_dir,
+                                             sig.trade_pair, t0_ms, scan_to)
+        abandon_ms = horizon_ms + hf_grade.GRADE_ABANDON_S * 1000
     if entry_price is None:
         pre = [t for t in ticks if int(t["t"]) <= t0_ms]
         entry_price = float(pre[-1]["p"]) if pre else None
@@ -122,6 +126,14 @@ def _grade_touch_ticks(sig: Signal, t0_ms: int, now_ms: int, horizon_ms: int,
             if tp_ct >= need:
                 return Grade(WON, sig.tp_bps, "tp_touch", tm, entry_price)
     if now_ms >= horizon_ms:
+        if missing and abandon_ms is not None and now_ms < abandon_ms:
+            # A touch found on a short series is still a real touch — a hole can
+            # hide a level, never invent one — so WON/LOST above stand. WASHED is
+            # the one conclusion a hole can fabricate: "nothing was touched" is
+            # indistinguishable from "we are missing the prices". Stay PENDING and
+            # retry until the window publishes (or until the abandon deadline, so
+            # a permanently unsealed window cannot wedge the call forever).
+            return Grade(PENDING, None, None, None, entry_price)
         bps = ((last_p - entry_price) / entry_price) * 10_000 * sign if last_p is not None else None
         return Grade(WASHED, bps, "horizon_expired", horizon_ms, entry_price)
     return Grade(PENDING, None, None, None, entry_price)

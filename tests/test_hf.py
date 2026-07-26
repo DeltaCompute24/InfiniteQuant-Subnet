@@ -415,8 +415,8 @@ class TestTicksForEntryWindow:
         t0 = 1_000_000_750
         ticks = [(t0 - 221, 64715.98), (t0 + 29, 64716.10), (t0 + 279, 64717.0)]
         base = self._publish(tmp_path, "BTCUSD", ticks)
-        got = hf_grade._ticks_for(base, str(tmp_path / "cache"), "BTCUSD",
-                                  t0, t0 + 900_000)
+        got, _missing = hf_grade._ticks_for(base, str(tmp_path / "cache"), "BTCUSD",
+                                            t0, t0 + 900_000)
         entry = hf.price_at(got, t0)
         assert entry == 64715.98, f"entry should be the pre-t0 tick, got {entry}"
 
@@ -428,8 +428,8 @@ class TestTicksForEntryWindow:
         t0 = w + 10
         ticks = [(w - 100, 50.0), (t0 + 40, 51.0)]
         base = self._publish(tmp_path, "ETHUSD", ticks)
-        got = hf_grade._ticks_for(base, str(tmp_path / "cache"), "ETHUSD",
-                                  t0, t0 + 900_000)
+        got, _missing = hf_grade._ticks_for(base, str(tmp_path / "cache"), "ETHUSD",
+                                            t0, t0 + 900_000)
         assert hf.price_at(got, t0) == 50.0
 
     def test_a_real_crypto_call_now_grades_instead_of_voiding(self, tmp_path):
@@ -439,11 +439,144 @@ class TestTicksForEntryWindow:
         entry_px = 100.0
         ticks = [(t0 - 130, entry_px), (t0 + 300, 100.30), (t0 + 550, 100.31)]
         base = self._publish(tmp_path, "BTCUSD", ticks)
-        got = hf_grade._ticks_for(base, str(tmp_path / "cache"), "BTCUSD",
-                                  t0, t0 + 1800_000)
+        got, _missing = hf_grade._ticks_for(base, str(tmp_path / "cache"), "BTCUSD",
+                                            t0, t0 + 1800_000)
         entry = hf.price_at(got, t0)
         assert entry == entry_px
         assert hf.grade("BTCUSD", "LONG", entry, 19, 19, t0, 1800, got)["status"] == "won"
+
+
+class TestIncompleteTickSeriesNeverGrades:
+    """The wash bug: an unfetchable window was swallowed, grade() walked a short
+    series, touched nothing, and wrote `wash` — permanently. Measured on the
+    2026-07-24..26 corpus: 42 of 307 calls (13.7%) graded against an incomplete
+    series, 41 of them recorded `wash` when the ticks show they were decisive.
+    `wash` is what a quiet market also looks like, which is why it stayed silent."""
+
+    from sn89_signals import hf_grade as _hfg
+    WIN = _hfg.WINDOW_MS
+    # window-aligned AND after HF_LAUNCH_FROM, or hf_bands_as_of returns None and
+    # the call is dropped before grading ever happens
+    T0 = ((_hfg.hf.HF_LAUNCH_FROM * 1000) // WIN + 100) * WIN
+    HORIZON_S = 1800
+    END = T0 + HORIZON_S * 1000
+
+    def _publish(self, tmp_path, pair, ticks, *, hole=None, index=True):
+        """Publish ticks + receipts + index; `hole` is a window id to withhold."""
+        import json as _j
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        by_w = {}
+        for t, p in ticks:
+            by_w.setdefault((t // self.WIN) * self.WIN, []).append(
+                {"a": pair, "t": t, "p": p})
+        spanned = list(range(self.T0 - self.WIN, self.END + self.WIN, self.WIN))
+        for w in spanned:
+            d = tmp_path / str(w)
+            d.mkdir(exist_ok=True)
+            if w != hole:
+                d.joinpath("ticks.jsonl").write_text(
+                    "\n".join(_j.dumps(r) for r in by_w.get(w, [])))
+            d.joinpath("receipts.jsonl").write_text(
+                _j.dumps({"submit": {"hk": "5Fhk", "seq": 1,
+                                     "payload": {"trade_pair": pair, "direction": "LONG"}},
+                          "receipt": {"grid_t0_ms": self.T0}})
+                if w == self.T0 else "")
+        if index:
+            tmp_path.joinpath("index.json").write_text(
+                _j.dumps({"windows": [str(w) for w in spanned]}))
+        return tmp_path.as_uri()
+
+    def _ticks(self):
+        # entry, then a decisive +30bps TP touch late in the horizon
+        return ([(self.T0 - 100, 100.0)]
+                + [(self.T0 + i * 1000, 100.0) for i in range(1, 1500)]
+                + [(self.END - 2000, 100.30), (self.END - 1000, 100.31)])
+
+    def _grades(self, cache):
+        import sqlite3
+        c = sqlite3.connect(str(cache / "hf_grades.db"))
+        try:
+            return dict(c.execute("SELECT key, status FROM grades"))
+        finally:
+            c.close()
+
+    def _pending(self, cache):
+        import sqlite3
+        c = sqlite3.connect(str(cache / "hf_grades.db"))
+        try:
+            return [r[0] for r in c.execute("SELECT key FROM pending")]
+        finally:
+            c.close()
+
+    def test_ticks_for_reports_the_unfetchable_window(self, tmp_path):
+        from sn89_signals import hf_grade
+        hole = self.T0 + 5 * self.WIN
+        base = self._publish(tmp_path / "feed", "BTCUSD", self._ticks(), hole=hole)
+        _got, missing = hf_grade._ticks_for(base, str(tmp_path / "cache"), "BTCUSD",
+                                            self.T0, self.END)
+        assert missing == [hole], f"the hole must be reported, got {missing}"
+
+    def test_a_hole_defers_instead_of_writing_wash(self, tmp_path):
+        from sn89_signals import hf_grade
+        cache = tmp_path / "cache"
+        base = self._publish(tmp_path / "feed", "BTCUSD", self._ticks(),
+                             hole=self.T0 + 5 * self.WIN)
+        now = (self.END + hf_grade.GRADE_SETTLE_S * 1000 + 1) / 1000.0
+        hf_grade.sync_and_grade(base, str(cache), now)
+        assert self._grades(cache) == {}, "a hole must not be graded"
+        assert self._pending(cache) == ["5Fhk:1"], "the call must stay pending"
+
+    def test_the_call_grades_correctly_once_the_window_arrives(self, tmp_path):
+        from sn89_signals import hf_grade
+        cache = tmp_path / "cache"
+        feed = tmp_path / "feed"
+        hole = self.T0 + 5 * self.WIN
+        base = self._publish(feed, "BTCUSD", self._ticks(), hole=hole)
+        now = (self.END + hf_grade.GRADE_SETTLE_S * 1000 + 1) / 1000.0
+        hf_grade.sync_and_grade(base, str(cache), now)
+        assert self._grades(cache) == {}
+        self._publish(feed, "BTCUSD", self._ticks())        # window publishes late
+        hf_grade.sync_and_grade(base, str(cache), now + 180)
+        assert self._grades(cache) == {"5Fhk:1": "won"}, "a complete series is decisive"
+        assert self._pending(cache) == []
+
+    def test_a_permanent_hole_is_abandoned_rather_than_wedged_forever(self, tmp_path):
+        from sn89_signals import hf_grade
+        cache = tmp_path / "cache"
+        base = self._publish(tmp_path / "feed", "BTCUSD", self._ticks(),
+                             hole=self.T0 + 5 * self.WIN)
+        past = (self.END + hf_grade.GRADE_ABANDON_S * 1000 + 1) / 1000.0
+        hf_grade.sync_and_grade(base, str(cache), past)
+        assert self._pending(cache) == [], "must not block weights forever"
+        assert set(self._grades(cache)) == {"5Fhk:1"}
+
+    def test_grading_waits_for_the_settle_delay(self, tmp_path):
+        """The window covering the last second of a horizon publishes AFTER that
+        second, so grading at end_ms exactly grades a series still arriving."""
+        from sn89_signals import hf_grade
+        cache = tmp_path / "cache"
+        base = self._publish(tmp_path / "feed", "BTCUSD", self._ticks())
+        hf_grade.sync_and_grade(base, str(cache), (self.END + 1) / 1000.0)
+        assert self._grades(cache) == {}, "graded before the feed could settle"
+        hf_grade.sync_and_grade(
+            base, str(cache), (self.END + hf_grade.GRADE_SETTLE_S * 1000 + 1) / 1000.0)
+        assert self._grades(cache) == {"5Fhk:1": "won"}
+
+    def test_a_grader_version_bump_rebuilds_every_grade(self, tmp_path):
+        """A fixed rule that leaves the old wrong grades in place is half a fix —
+        `grades` is written once and never revisited."""
+        import sqlite3
+        from sn89_signals import hf_grade
+        cache = tmp_path / "cache"
+        base = self._publish(tmp_path / "feed", "BTCUSD", self._ticks())
+        now = (self.END + hf_grade.GRADE_SETTLE_S * 1000 + 1) / 1000.0
+        hf_grade.sync_and_grade(base, str(cache), now)
+        c = sqlite3.connect(str(cache / "hf_grades.db"))
+        c.execute("UPDATE grades SET status='wash'")          # the stale bad grade
+        c.execute("UPDATE meta SET v='1' WHERE k='grader_version'")
+        c.commit(); c.close()
+        hf_grade.sync_and_grade(base, str(cache), now)
+        assert self._grades(cache) == {"5Fhk:1": "won"}, "stale grades must re-derive"
 
 
 class TestRuleParityAcrossMechanisms:
@@ -1074,3 +1207,36 @@ class TestTouchTicksLF:
         g = grader.grade(self._sig(), self.T0, self.T0 + 5_000, entry_price=100.0,
                          ticks=self._ticks([100.50, 100.51], self.T0))
         assert g.status == grader.PENDING
+
+    def test_a_tick_hole_defers_the_wash_but_not_a_real_touch(self, tmp_path, monkeypatch):
+        """LF shares the HF tick corpus, so it shared the bug: an unfetchable
+        window made a signal that touched nothing on a SHORT series look like a
+        clean wash. A touch we did observe still stands — a hole can hide a level,
+        never invent one."""
+        from sn89_signals import grader, hf_grade
+
+        def feed(prices, missing):
+            # the entry tick AT t0 must be present or grade() short-circuits on
+            # "no entry price yet" and never reaches the wash branch under test
+            ticks = [{"a": "XAUUSD", "t": self.T0, "p": 100.0}] + self._ticks(prices, self.T0)
+            return lambda *a, **k: (ticks, missing)
+
+        monkeypatch.setattr(hf_grade, "_ticks_for", feed([100.50, 100.51], [self.T0]))
+        assert grader.grade(self._sig(), self.T0, self.DONE).status == grader.PENDING, \
+            "a hole must not resolve as a wash"
+
+        # the same hole, but the series DID show two TP touches — still decisive
+        monkeypatch.setattr(hf_grade, "_ticks_for", feed([100.70, 100.71], [self.T0]))
+        assert grader.grade(self._sig(), self.T0, self.DONE).status == grader.WON
+
+        # and once the window publishes, the wash resolves normally
+        monkeypatch.setattr(hf_grade, "_ticks_for", feed([100.50, 100.51], []))
+        assert grader.grade(self._sig(), self.T0, self.DONE).status == grader.WASHED
+
+    def test_a_permanent_tick_hole_still_washes_eventually(self, monkeypatch):
+        from sn89_signals import grader, hf_grade
+        ticks = [{"a": "XAUUSD", "t": self.T0, "p": 100.0}] + self._ticks(
+            [100.50, 100.51], self.T0)
+        monkeypatch.setattr(hf_grade, "_ticks_for", lambda *a, **k: (ticks, [self.T0]))
+        past = self.DONE + hf_grade.GRADE_ABANDON_S * 1000 + 1
+        assert grader.grade(self._sig(), self.T0, past).status == grader.WASHED
