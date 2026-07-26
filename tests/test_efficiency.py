@@ -19,7 +19,7 @@ def _graded(n_wash, n_dec, t_end=T0, span=30 * DAY):
 @pytest.fixture(autouse=True)
 def _armed(monkeypatch):
     monkeypatch.setattr(config, "EFFICIENCY_FROM", int(T0 - 365 * DAY))
-    monkeypatch.setattr(config, "EFFICIENCY_BASELINE_WASH", 0.46)
+    monkeypatch.setattr(config, "EFFICIENCY_PRIOR_WASH", 0.40)
 
 
 class TestEfficiencyMultiplier:
@@ -31,51 +31,64 @@ class TestEfficiencyMultiplier:
         monkeypatch.setattr(config, "EFFICIENCY_FROM", int(T0 + DAY))
         assert scoring.efficiency_multiplier(_graded(40, 10), T0) == 1.0
 
-    def test_thin_sample_is_neutral(self):
-        # below EFFICIENCY_MIN_N we cannot separate skill from luck, so do not tax it
-        g = _graded(config.EFFICIENCY_MIN_N - 1, 0)
-        assert scoring.efficiency_multiplier(g, T0) == 1.0
+    def test_zero_washes_approaches_the_top_of_the_scale(self):
+        """Asymptotic, not exact: the prior always retains some weight, so a clean
+        record converges on 1.0 from below as evidence accumulates."""
+        few = scoring.efficiency_multiplier(_graded(0, 40), T0)
+        many = scoring.efficiency_multiplier(_graded(0, 400), T0)
+        assert few < many < 1.0
+        assert many > 0.95
 
-    def test_baseline_wash_is_neutral(self):
-        m = scoring.efficiency_multiplier(_graded(46, 54), T0)
-        assert m == pytest.approx(1.0, abs=0.01)
+    def test_nothing_ever_exceeds_1x(self):
+        """Pure penalty: efficiency is never a bonus on top of the tier."""
+        for w, d in ((0, 400), (0, 40), (1, 400), (5, 200)):
+            assert scoring.efficiency_multiplier(_graded(w, d), T0) <= 1.0
 
-    def test_excess_wash_is_penalised(self):
-        assert scoring.efficiency_multiplier(_graded(80, 20), T0) < 0.95
+    def test_more_washes_always_costs_more(self):
+        prev = 1.1
+        for w in (0, 10, 25, 40, 55, 70):
+            m = scoring.efficiency_multiplier(_graded(w, 100 - w), T0)
+            assert m < prev, f"not monotone at {w}% wash"
+            prev = m
+        assert prev > config.EFFICIENCY_MIN, "floor must not bind across the field"
 
-    def test_low_wash_is_rewarded(self):
-        assert scoring.efficiency_multiplier(_graded(20, 80), T0) > 1.0
+    def test_a_fresh_hotkey_starts_at_the_prior_not_at_perfect(self):
+        """Otherwise churning hotkeys would launder a wash record."""
+        fresh = scoring.efficiency_multiplier([], T0)
+        expected = 1.0 - config.EFFICIENCY_SLOPE * config.EFFICIENCY_PRIOR_WASH
+        assert fresh == pytest.approx(expected, abs=1e-9)
+        assert fresh < scoring.efficiency_multiplier(_graded(0, 400), T0)
 
-    def test_clamped_both_ways(self):
-        assert scoring.efficiency_multiplier(_graded(200, 0), T0) == config.EFFICIENCY_MIN
-        assert scoring.efficiency_multiplier(_graded(0, 200), T0) == config.EFFICIENCY_MAX
+    def test_floored(self):
+        assert scoring.efficiency_multiplier(_graded(400, 0), T0) == config.EFFICIENCY_MIN
 
-    def test_shrinkage_makes_small_samples_milder(self):
-        """Same 55% wash rate: 20 calls must be penalised LESS than 200.
-        Chosen to sit off the EFFICIENCY_MIN clamp, which both saturate at 100%."""
-        small = scoring.efficiency_multiplier(_graded(11, 9), T0)
-        large = scoring.efficiency_multiplier(_graded(110, 90), T0)
+    def test_shrinkage_pulls_thin_samples_toward_the_prior(self):
+        """A 70%-wash miner with 20 calls must be judged more gently than one with
+        200 — the thin sample is mostly prior, not evidence."""
+        small = scoring.efficiency_multiplier(_graded(14, 6), T0)
+        large = scoring.efficiency_multiplier(_graded(140, 60), T0)
+        assert large > config.EFFICIENCY_MIN
         assert small > large
         assert config.EFFICIENCY_MIN < large < 1.0
 
     def test_the_floor_binds_only_for_the_worst(self):
-        """~1 SD of excess wash (9pp) must NOT already saturate the penalty --
-        otherwise the multiplier stops discriminating across most of the field."""
-        one_sd = scoring.efficiency_multiplier(_graded(55, 45), T0)   # +9pp excess
-        assert one_sd > config.EFFICIENCY_MIN
+        """A typical miner must not already be pinned to the floor, or the
+        multiplier stops discriminating across the field."""
+        assert scoring.efficiency_multiplier(_graded(46, 54), T0) > config.EFFICIENCY_MIN
 
     def test_only_the_reputation_window_counts(self):
-        """Ancient washes must not follow a miner forever."""
-        old = [(T0 - config.HIT_RATE_WINDOW_S - DAY - i, True) for i in range(100)]
+        """Washes age out on the same 60-day clock as the W/L history."""
         recent = _graded(5, 45, span=DAY)
-        assert scoring.efficiency_multiplier(old + recent, T0) > 1.0
+        old = [(T0 - config.HIT_RATE_WINDOW_S - DAY - i, True) for i in range(100)]
+        assert (scoring.efficiency_multiplier(old + recent, T0)
+                == scoring.efficiency_multiplier(recent, T0))
 
     def test_as_of_not_retroactive(self):
-        """Judged at the WIN's t0, so later washes cannot devalue a banked win."""
+        """Judged at the WIN's t0, so washes AFTER it cannot devalue a banked win."""
         early = _graded(2, 40, t_end=T0 - 10 * DAY, span=20 * DAY)
-        later_washes = [(T0 - i, True) for i in range(60)]
-        at_win = scoring.efficiency_multiplier(early + later_washes, T0 - 10 * DAY)
-        assert at_win > 1.0
+        later = [(T0 - i, True) for i in range(60)]
+        assert (scoring.efficiency_multiplier(early + later, T0 - 10 * DAY)
+                == scoring.efficiency_multiplier(early, T0 - 10 * DAY))
 
 
 class TestQualifiedWinsIntegration:
@@ -128,5 +141,5 @@ def test_efficiency_range_stays_inside_the_tier_range():
     become profitable and the contest would invert."""
     tier_span = max(m for _, m in config.WIN_RATE_TIERS) / min(
         m for _, m in config.WIN_RATE_TIERS)
-    eff_span = config.EFFICIENCY_MAX / config.EFFICIENCY_MIN
+    eff_span = 1.0 / config.EFFICIENCY_MIN
     assert eff_span < tier_span

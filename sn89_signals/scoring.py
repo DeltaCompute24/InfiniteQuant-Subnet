@@ -753,35 +753,47 @@ def tier_multiplier(rep_wins: int, rep_decisive: int, t0_unix: float | None = No
 
 
 def efficiency_multiplier(graded: list[tuple[float, bool]], t0_unix: float) -> float:
-    """Wash-efficiency factor for a win at t0, in [EFFICIENCY_MIN, EFFICIENCY_MAX].
+    """Wash-efficiency factor for a win at t0, in [EFFICIENCY_MIN, 1.0].
 
     `graded` is the miner's FULL resolved history as [(t0_unix, is_wash)] — wins,
     losses and washes. The tier reads only decisive outcomes, so washes are
     invisible to it; this is the term that prices them.
 
-    AS-OF and PURE: judged on the same trailing reputation window the tier uses,
-    ending at THIS win's t0, so a banked win keeps the value it was given and the
-    public journal replays byte-identical. Returns 1.0 before EFFICIENCY_FROM.
+        shrunk = (washes + K * PRIOR_WASH) / (n + K)
+        eff    = clamp(1 - SLOPE * shrunk, EFFICIENCY_MIN, 1.0)
 
-    Excess is measured against config.EFFICIENCY_BASELINE_WASH — a published
-    constant, not the live field average, so an old win cannot be revalued by what
-    the field does later. It is NOT asset-adjusted: holding wash equal across
-    assets is the bands' job, and adjusting here would mask a miscalibrated board.
+    Anchored at PERFECTION: zero washes pays the full 1.0 and nothing pays more.
+    There is no bonus tier, so a miner can never earn above their tier for being
+    efficient — only lose for being wasteful. Anchoring on the field average
+    instead would make the rule relative to whoever else happens to be mining, and
+    would pay a bonus to miners who avoid washes by being decisively WRONG.
 
-    Shrunk toward 1.0 by n/(n+K) because only ~55% of the observed spread in wash
-    rate is real; the rest is sampling noise, and taxing noise is taxing luck.
+    Thin samples shrink toward PRIOR_WASH rather than toward zero, so a fresh
+    hotkey starts where an average miner sits instead of looking perfect — without
+    that, churning hotkeys would launder a wash record.
+
+    AS-OF and PURE: judged on the trailing reputation window ending at THIS win's
+    t0 — the same 60-day clock the W/L history ages out on — so a banked win keeps
+    the value it was given and the public journal replays byte-identical. Returns
+    1.0 before EFFICIENCY_FROM: this is a new rule and it prices only what a miner
+    does after it is armed.
     """
     if not config.EFFICIENCY_FROM or t0_unix < config.EFFICIENCY_FROM:
         return 1.0
-    lo = t0_unix - config.HIT_RATE_WINDOW_S
+    # Floored at EFFICIENCY_FROM, not just the reputation window. Wash rate is only
+    # comparable across miners once the BOARD equalises structural wash per asset,
+    # so history graded under the previous board must not be scored here — for the
+    # 60 days after arming, a window reaching back past the cutover would still be
+    # mostly old-board data and would pay gold callers for asset choice (XAUUSD
+    # produced 14% structural wash against crypto's ~40%). It also makes the rule
+    # genuinely forward-only: nothing a miner did before arming can cost it.
+    lo = max(t0_unix - config.HIT_RATE_WINDOW_S, float(config.EFFICIENCY_FROM))
     window = [w for t, w in graded if lo <= t <= t0_unix]
     n = len(window)
-    if n < config.EFFICIENCY_MIN_N:
-        return 1.0                      # too thin to distinguish skill from luck
-    excess = (sum(1 for w in window if w) / n) - config.EFFICIENCY_BASELINE_WASH
-    shrunk = excess * (n / (n + config.EFFICIENCY_PRIOR_K))
-    return max(config.EFFICIENCY_MIN,
-               min(config.EFFICIENCY_MAX, 1.0 - config.EFFICIENCY_SLOPE * shrunk))
+    k = config.EFFICIENCY_PRIOR_K
+    shrunk = ((sum(1 for w in window if w) + k * config.EFFICIENCY_PRIOR_WASH)
+              / (n + k))
+    return max(config.EFFICIENCY_MIN, min(1.0, 1.0 - config.EFFICIENCY_SLOPE * shrunk))
 
 
 def _qualifies(rep_wins: int, rep_decisive: int) -> bool:
