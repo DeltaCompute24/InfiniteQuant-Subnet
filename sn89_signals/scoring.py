@@ -752,6 +752,38 @@ def tier_multiplier(rep_wins: int, rep_decisive: int, t0_unix: float | None = No
     return 0.0
 
 
+def efficiency_multiplier(graded: list[tuple[float, bool]], t0_unix: float) -> float:
+    """Wash-efficiency factor for a win at t0, in [EFFICIENCY_MIN, EFFICIENCY_MAX].
+
+    `graded` is the miner's FULL resolved history as [(t0_unix, is_wash)] — wins,
+    losses and washes. The tier reads only decisive outcomes, so washes are
+    invisible to it; this is the term that prices them.
+
+    AS-OF and PURE: judged on the same trailing reputation window the tier uses,
+    ending at THIS win's t0, so a banked win keeps the value it was given and the
+    public journal replays byte-identical. Returns 1.0 before EFFICIENCY_FROM.
+
+    Excess is measured against config.EFFICIENCY_BASELINE_WASH — a published
+    constant, not the live field average, so an old win cannot be revalued by what
+    the field does later. It is NOT asset-adjusted: holding wash equal across
+    assets is the bands' job, and adjusting here would mask a miscalibrated board.
+
+    Shrunk toward 1.0 by n/(n+K) because only ~55% of the observed spread in wash
+    rate is real; the rest is sampling noise, and taxing noise is taxing luck.
+    """
+    if not config.EFFICIENCY_FROM or t0_unix < config.EFFICIENCY_FROM:
+        return 1.0
+    lo = t0_unix - config.HIT_RATE_WINDOW_S
+    window = [w for t, w in graded if lo <= t <= t0_unix]
+    n = len(window)
+    if n < config.EFFICIENCY_MIN_N:
+        return 1.0                      # too thin to distinguish skill from luck
+    excess = (sum(1 for w in window if w) / n) - config.EFFICIENCY_BASELINE_WASH
+    shrunk = excess * (n / (n + config.EFFICIENCY_PRIOR_K))
+    return max(config.EFFICIENCY_MIN,
+               min(config.EFFICIENCY_MAX, 1.0 - config.EFFICIENCY_SLOPE * shrunk))
+
+
 def _qualifies(rep_wins: int, rep_decisive: int) -> bool:
     """Dispatch the qualify gate on the CONFIDENCE_SCORING flag."""
     if config.CONFIDENCE_SCORING:
@@ -760,7 +792,9 @@ def _qualifies(rep_wins: int, rep_decisive: int) -> bool:
 
 
 def qualified_wins(decisive: list[tuple[float, bool, bool]], first_seen_unix: float,
-                   habitual: bool = False) -> list[tuple[float, float]]:
+                   habitual: bool = False,
+                   graded: list[tuple[float, bool]] | None = None
+                   ) -> list[tuple[float, float]]:
     """Post-warmup WINs the miner earned WHILE QUALIFIED, each tagged with the
     point-in-time tier weight (≥ 1.0). PURE / deterministic.
 
@@ -792,7 +826,11 @@ def qualified_wins(decisive: list[tuple[float, bool, bool]], first_seen_unix: fl
         rw = sum(1 for _, w2, _ in window if w2)
         rd = len(window)
         if _qualifies(rw, rd):
-            out.append((t0, max(1.0, tier_multiplier(rw, rd, t0))))
+            # Efficiency is applied OUTSIDE the max(1.0, ...) floor on purpose. Most
+            # of the field sits at exactly 1.00x, so folding it inside would clamp
+            # the penalty away for everyone it is meant to reach.
+            eff = efficiency_multiplier(graded, t0) if graded else 1.0
+            out.append((t0, max(1.0, tier_multiplier(rw, rd, t0)) * eff))
     return out
 
 

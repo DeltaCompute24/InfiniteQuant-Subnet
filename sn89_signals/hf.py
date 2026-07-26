@@ -560,7 +560,8 @@ HF_RECEIPT_PUBKEY = os.getenv(
 
 
 def hf_compute_weights(decisive_by_hk: dict, first_seen_by_hk: dict,
-                       uid_by_hk: dict, now: float, subs_by_hk: dict) -> dict:
+                       uid_by_hk: dict, now: float, subs_by_hk: dict,
+                       graded_by_hk: dict | None = None) -> dict:
     """{uid: normalized_weight} for mecid 1, from HF-ONLY graded outcomes.
 
     Reuses the SAME battle-tested tally as mecid 0 (scoring.qualified_wins,
@@ -619,7 +620,9 @@ def hf_compute_weights(decisive_by_hk: dict, first_seen_by_hk: dict,
                 continue                         # < 50 subs or < 8 trading days → no weight
             rep_won, rep_dec, won_all, _won_orig, _copies, tw = scoring.score_inputs(
                 decisive, eligible, now)
-            qwins = scoring.qualified_wins(decisive, eligible, habitual=False)
+            qwins = scoring.qualified_wins(
+                decisive, eligible, habitual=False,
+                graded=(graded_by_hk or {}).get(hk))
             states.append(scoring.MinerState(
                 hotkey=hk, uid=uid, first_seen_unix=eligible,
                 rep_wins=rep_won, rep_decisive=rep_dec, trailing_wins=won_all,

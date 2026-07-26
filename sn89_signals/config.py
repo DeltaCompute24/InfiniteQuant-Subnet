@@ -339,6 +339,45 @@ WIN_RATE_TIERS = (
 # gated: every already-banked win keeps its original discrete stamp and the public
 # journal replays byte-identical before the cutover. = 2026-07-25T00:00:00Z.
 CONTINUOUS_TIER_FROM = 1784937600
+
+# ── Efficiency (wash) multiplier — scoring.efficiency_multiplier ─────────────
+# The per-win VALUE is tier_multiplier x efficiency. The tier prices DIRECTION
+# (hit rate); efficiency prices whether the calls actually MOVED. A miner who is
+# right 70% of the time but fires mostly at setups that never travel the band is
+# consuming grading capacity and paying the field nothing, and until now that cost
+# it exactly zero.
+#
+# Measured on 2471 graded rows / 98 miners (2026-07-26): wash rate is a real miner
+# attribute, not luck — chi2/df 2.29, z=+6.0 against the field-constant null. It
+# survives asset-mix adjustment (z=+3.1), it is MORE reliable than hit rate
+# (54-55% of observed spread is real vs 45%), and it is ORTHOGONAL to hit rate
+# (r=-0.03), so it adds information rather than re-pricing the tier.
+#
+# NOT asset-adjusted, deliberately. Equalising wash across assets is the BANDS'
+# job (scripts/recalibrate_bands.py holds structural wash constant per asset);
+# adjusting here instead would hide a miscalibrated board and entrench it.
+# EFFICIENCY_BASELINE_WASH must therefore be recalibrated whenever the band target
+# moves, and this multiplier must NOT be armed while the board is still unequalised
+# — until then it would price asset choice, not skill.
+EFFICIENCY_FROM = int(os.getenv("SN89_EFFICIENCY_FROM", "0"))   # 0 = OFF (as-of gate)
+EFFICIENCY_BASELINE_WASH = float(os.getenv("SN89_EFFICIENCY_BASELINE_WASH", "0.46"))
+EFFICIENCY_PRIOR_K = int(os.getenv("SN89_EFFICIENCY_PRIOR_K", "40"))
+# n/(n+K)=0.55 at n=49, the median earner's sample — i.e. the estimate is shrunk by
+# exactly the fraction of it the overdispersion test says is real.
+EFFICIENCY_SLOPE = float(os.getenv("SN89_EFFICIENCY_SLOPE", "3.0"))
+# True SD of excess wash is 9.0pp, so +-1 SD moves value ~15%: material, but well
+# inside the tier's own 1.0->2.0 range.
+EFFICIENCY_MIN = float(os.getenv("SN89_EFFICIENCY_MIN", "0.75"))
+EFFICIENCY_MAX = float(os.getenv("SN89_EFFICIENCY_MAX", "1.05"))
+# INVARIANT — the efficiency range must stay NARROWER than the tier range. A wash
+# penalty rewards firing into high volatility, and at a small band relative to vol
+# the outcome is microstructure rather than opinion (measured: at effective scale
+# 0.8 the true skill SD is 0.0% and miners become indistinguishable). Keeping this
+# range small means a miner who trashes their hit rate to cut washes always loses
+# more on the tier than it gains here. Widen this past the tier and the incentive
+# inverts.
+EFFICIENCY_MIN_N = int(os.getenv("SN89_EFFICIENCY_MIN_N", "15"))  # graded calls
+
 IMMUNITY_S = 8 * 24 * 3600          # from first commit observed for the hotkey
 DUST_WEIGHT = 1e-4                  # normalized floor during immunity
 # Probation grace: a QUALIFIED miner that currently earns zero emission keeps the

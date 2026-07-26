@@ -111,8 +111,15 @@ def weights_from_journal(
                     and cw_last is not None
                     and (now - cw_last) <= config.COPY_PENALTY_TTL_S)
         tw = won_orig if habitual else won_all
-        # qualified post-warmup wins (point-in-time gate + tier) — sizes emission.
-        qwins = scoring.qualified_wins(decisive, m["first_seen_unix"], habitual)
+        # Full resolved history INCLUDING washes — the efficiency multiplier needs
+        # what the decisive list throws away. void/pending are excluded: a void was
+        # never a valid call, so counting it as a wash would penalise the miner for
+        # our own rejection.
+        graded = [(s["t0_unix"], s["status"] == "washed") for s in signals
+                  if s["hotkey"] == hk and s["status"] in ("won", "lost", "washed")]
+        # qualified post-warmup wins (point-in-time gate + tier x efficiency) — sizes emission.
+        qwins = scoring.qualified_wins(decisive, m["first_seen_unix"], habitual,
+                                       graded=graded)
         states.append(scoring.MinerState(
             hotkey=hk, uid=uid, first_seen_unix=m["first_seen_unix"],
             rep_wins=rep_won, rep_decisive=rep_dec, trailing_wins=tw, qwins=qwins))
