@@ -359,7 +359,12 @@ CONTINUOUS_TIER_FROM = 1784937600
 # EFFICIENCY_BASELINE_WASH must therefore be recalibrated whenever the band target
 # moves, and this multiplier must NOT be armed while the board is still unequalised
 # — until then it would price asset choice, not skill.
-EFFICIENCY_FROM = int(os.getenv("SN89_EFFICIENCY_FROM", "0"))   # 0 = OFF (as-of gate)
+# ARMED 2026-07-26T06:00:00Z, the instant the equal-wash board
+# (volnorm-equalwash40-20260726) took effect. CONSENSUS: this default is the
+# value, not the env — .env.main is gitignored, so an arming instant that lived
+# only there would leave every validator that pulls master computing weights
+# with the multiplier OFF. Same pattern as TOUCH_TICKS_FROM/CONTINUOUS_TIER_FROM.
+EFFICIENCY_FROM = int(os.getenv("SN89_EFFICIENCY_FROM", "1785045600"))
 
 # The scale is anchored at PERFECTION, not at the field average: zero washes is the
 # highest bar and pays the full 1.0. There is no bonus tier — a miner cannot earn
