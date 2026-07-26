@@ -556,5 +556,97 @@
     "tp_bps": 26
    }
   }
+ },
+ {
+  "version": "volnorm-equalwash40-20260726",
+  "effective_from_unix": 1785045600,
+  "note": "One-time vol recalibration to an EQUAL structural wash target of 40% on every asset, effective 2026-07-26T06:00:00Z. Structural wash = P(the path never travels the band, either way, inside the horizon) \u2014 a property of price alone, measured on 90d of 1m bars. The board was not in fact vol-normalised: z = band/sigma_horizon was 0.94-1.06 on crypto but 0.57-0.59 on metals, so XAUUSD resolved ~4x more easily than BTCUSD and a gold call banked decisive outcomes a crypto call could not. The 2026-07-11 pass narrowed gold 88->62, which moved it further off curve, not onto it. Crypto is already on curve and barely moves; the correction is almost entirely metals. Signals committed before effective_from grade on the prior entry (no regrade). Maintained monthly from here by scripts/recalibrate_bands.py.",
+  "bands": {
+   "BTCUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 105,
+    "tp_bps": 105
+   },
+   "ETHUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 138,
+    "tp_bps": 138
+   },
+   "SOLUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 159,
+    "tp_bps": 159
+   },
+   "XRPUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 140,
+    "tp_bps": 140
+   },
+   "XAUUSD": {
+    "asset_class": "forex-commodities",
+    "sl_bps": 96,
+    "tp_bps": 96
+   },
+   "XAGUSD": {
+    "asset_class": "forex-commodities",
+    "sl_bps": 195,
+    "tp_bps": 195
+   },
+   "EURUSD": {
+    "asset_class": "forex",
+    "sl_bps": 20,
+    "tp_bps": 20
+   },
+   "GBPUSD": {
+    "asset_class": "forex",
+    "sl_bps": 23,
+    "tp_bps": 23
+   },
+   "USDJPY": {
+    "asset_class": "forex",
+    "sl_bps": 14,
+    "tp_bps": 14
+   },
+   "USDCHF": {
+    "asset_class": "forex",
+    "sl_bps": 26,
+    "tp_bps": 26
+   },
+   "USDCAD": {
+    "asset_class": "forex",
+    "sl_bps": 20,
+    "tp_bps": 20
+   },
+   "AUDUSD": {
+    "asset_class": "forex",
+    "sl_bps": 28,
+    "tp_bps": 28
+   },
+   "NZDUSD": {
+    "asset_class": "forex",
+    "sl_bps": 36,
+    "tp_bps": 36
+   },
+   "NZDCHF": {
+    "asset_class": "forex",
+    "sl_bps": 40,
+    "tp_bps": 40
+   },
+   "AUDNZD": {
+    "asset_class": "forex",
+    "sl_bps": 26,
+    "tp_bps": 26
+   },
+   "GBPCAD": {
+    "asset_class": "forex",
+    "sl_bps": 25,
+    "tp_bps": 25
+   },
+   "NZDJPY": {
+    "asset_class": "forex",
+    "sl_bps": 33,
+    "tp_bps": 33
+   }
+  }
  }
 ]
