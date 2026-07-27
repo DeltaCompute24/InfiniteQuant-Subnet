@@ -83,6 +83,132 @@ class TestRateLimits:
         hf.check_rate(prior, 10 * DAY_MS + 250, hf.HF_LAUNCH_FROM)
 
 
+class TestOpenPositionGate:
+    """One open position per pair per hotkey, from HF_OPEN_GATE_FROM.
+
+    The rule that was declared (max_open_per_pair) and never applied: on
+    2026-07-27 a trader copy/pasted five SHORT BTCUSD calls a second apart and took
+    five receipts, because the 250 ms min gap was the only spacing check and the
+    pair lock only ever looked at the OTHER mechanism.
+
+    "Open" ends at the FIRST decisive touch, not at the horizon — re-entry is
+    allowed the moment the previous call resolves.
+    """
+    T = int(hf.HF_OPEN_GATE_FROM * 1000) + 3_600_000      # after the cutover
+    TP, SL, HOR = 19.0, 19.0, 1800                        # ±19 bps / 30 min shape
+    ENTRY = 100_000.0
+
+    def _ticks(self, *pairs):
+        return [{"t": t, "p": p} for t, p in pairs]
+
+    # ── the primitive ────────────────────────────────────────────────────────
+    def test_untouched_call_holds_the_pair_until_the_wash(self):
+        u = hf.open_until_ms("LONG", self.ENTRY, self.TP, self.SL, self.T, self.HOR,
+                             self._ticks((self.T + 1000, self.ENTRY)))
+        assert u == self.T + self.HOR * 1000
+
+    def test_call_stops_holding_the_pair_at_the_decisive_touch(self):
+        tp_px = self.ENTRY * (1 + self.TP / 10000.0)
+        u = hf.open_until_ms("LONG", self.ENTRY, self.TP, self.SL, self.T, self.HOR,
+                             self._ticks((self.T + 1000, tp_px),
+                                         (self.T + 2000, tp_px)))
+        assert u == self.T + 2000                     # the SECOND touch, not the first
+
+    def test_a_lone_reverting_tick_does_not_release_the_pair(self):
+        # MIN_TOUCH_TICKS is the same wick guard grade() applies. If the gate
+        # released on one tick it would free the pair for a call the board still
+        # scores as running.
+        tp_px = self.ENTRY * (1 + self.TP / 10000.0)
+        u = hf.open_until_ms("LONG", self.ENTRY, self.TP, self.SL, self.T, self.HOR,
+                             self._ticks((self.T + 1000, tp_px),
+                                         (self.T + 2000, self.ENTRY)))
+        assert u == self.T + self.HOR * 1000
+
+    def test_a_call_with_no_entry_price_holds_nothing(self):
+        assert hf.open_until_ms("LONG", None, self.TP, self.SL, self.T, self.HOR,
+                                []) == self.T
+
+    def test_truncated_series_reads_as_still_open(self):
+        # The live callers only hold ticks up to now. "Nothing touched yet" must
+        # read as open, never as an early wash.
+        u = hf.open_until_ms("LONG", self.ENTRY, self.TP, self.SL, self.T, self.HOR,
+                             self._ticks((self.T + 1000, self.ENTRY)))
+        assert u > self.T + 1000
+
+    # ── the gate ─────────────────────────────────────────────────────────────
+    def test_second_call_while_the_first_is_open_is_refused(self):
+        held = self.T + self.HOR * 1000
+        with pytest.raises(hf.HFRejected, match="pair_open_same_mechanism"):
+            hf.check_pair_open([held], self.T + 1000, self.T / 1000.0)
+
+    def test_re_entry_is_allowed_once_the_first_resolves(self):
+        held = self.T + 60_000                        # resolved 1 min in
+        hf.check_pair_open([held], self.T + 60_001, self.T / 1000.0)
+
+    def test_re_entry_is_allowed_after_the_wash(self):
+        held = self.T + self.HOR * 1000
+        hf.check_pair_open([held], held, self.T / 1000.0)
+
+    def test_the_five_paste_burst(self):
+        # The actual incident: one open call, then four pastes a second apart.
+        held = self.T + self.HOR * 1000
+        for i in range(1, 5):
+            with pytest.raises(hf.HFRejected):
+                hf.check_pair_open([held], self.T + i * 1000, self.T / 1000.0)
+
+    def test_a_void_predecessor_never_chains(self):
+        # A voided call holds nothing, so the caller must not pass it in. If it did,
+        # one refusal would lock the pair behind it for a whole horizon.
+        hf.check_pair_open([], self.T + 1000, self.T / 1000.0)
+
+    def test_the_gate_is_off_before_the_cutover(self):
+        # 4 was published from launch and never enforced. A replay of the old era
+        # must not retroactively void calls that were legal when they landed.
+        before = hf.HF_OPEN_GATE_FROM - 1
+        held = int(before * 1000) + self.HOR * 1000
+        hf.check_pair_open([held] * 9, int(before * 1000) + 1000, before)
+
+    def test_the_declared_limit_is_now_one(self):
+        assert hf.hf_rules_as_of(hf.HF_OPEN_GATE_FROM)[2] == 1
+        assert hf.hf_rules_as_of(hf.HF_OPEN_GATE_FROM - 1)[2] == 4
+
+    # ── the live twin ────────────────────────────────────────────────────────
+    def test_opencall_tracks_the_same_answer_as_open_until_ms(self):
+        tp_px = self.ENTRY * (1 + self.TP / 10000.0)
+        ticks = self._ticks((self.T + 1000, self.ENTRY), (self.T + 2000, tp_px),
+                            (self.T + 3000, tp_px), (self.T + 4000, tp_px))
+        c = hf.OpenCall("BTCUSD", "LONG", self.ENTRY, self.TP, self.SL,
+                        self.T, self.HOR)
+        for t in ticks:
+            c.on_tick(t["t"], t["p"])
+        assert c.open_until() == hf.open_until_ms(
+            "LONG", self.ENTRY, self.TP, self.SL, self.T, self.HOR, ticks)
+
+    def test_opencall_ignores_ticks_at_or_before_t0(self):
+        tp_px = self.ENTRY * (1 + self.TP / 10000.0)
+        c = hf.OpenCall("BTCUSD", "LONG", self.ENTRY, self.TP, self.SL,
+                        self.T, self.HOR)
+        c.on_tick(self.T, tp_px)
+        c.on_tick(self.T - 1000, tp_px)
+        assert c.open_until() == self.T + self.HOR * 1000
+
+    def test_opencall_ignores_ticks_past_the_horizon(self):
+        tp_px = self.ENTRY * (1 + self.TP / 10000.0)
+        c = hf.OpenCall("BTCUSD", "LONG", self.ENTRY, self.TP, self.SL,
+                        self.T, self.HOR)
+        c.on_tick(self.T + self.HOR * 1000 + 1, tp_px)
+        c.on_tick(self.T + self.HOR * 1000 + 2, tp_px)
+        assert c.open_until() == self.T + self.HOR * 1000
+
+    def test_opencall_short_side(self):
+        tp_px = self.ENTRY * (1 - self.TP / 10000.0)
+        c = hf.OpenCall("BTCUSD", "SHORT", self.ENTRY, self.TP, self.SL,
+                        self.T, self.HOR)
+        c.on_tick(self.T + 1000, tp_px)
+        c.on_tick(self.T + 2000, tp_px)
+        assert c.open_until() == self.T + 2000
+
+
 class TestPairLock:
     HK = "5F" + "a" * 46
     T = 1_800_000_000_000
@@ -105,8 +231,11 @@ class TestPairLock:
         idx = hf.build_lock_index([(self.HK, "BTCUSD", hf.MECID, self.T)])
         assert hf.is_pair_locked(idx, self.HK, "BTCUSD", hf.MECH_LF, self.T + 1)
 
-    def test_same_mechanism_repeat_is_not_locked(self):
-        # self-overlap stays legal WITHIN a mechanism — 30/day demands it
+    def test_same_mechanism_repeat_is_not_CROSS_locked(self):
+        # The cross-mechanism lock is exactly that — it says nothing about a repeat
+        # on the SAME board. The 24h rule must never bind a same-board re-entry, or
+        # a 30/day cadence is impossible. What DOES bind it is the open-position
+        # gate below (hf.check_pair_open), which is per-position, not per-day.
         idx = hf.build_lock_index([(self.HK, "BTCUSD", hf.MECID, self.T)])
         assert not hf.is_pair_locked(idx, self.HK, "BTCUSD", hf.MECID, self.T + 1)
 
@@ -832,6 +961,8 @@ class TestRegistrationGate:
         ing.last_seq, ing.sent_ms, ing.windows = {}, {}, {}
         ing.lock_index, ing._locks_loaded_at = {}, 9e18
         ing.registered, ing._reg_loaded_at = set(registered), 9e18
+        ing.open_calls, ing.last_px = {}, {}
+        ing._tick_ok_at = 0.0        # no tick feed -> the open gate fails open
         return hi, ing
 
     def _frame(self, kp, seq=1, pair="BTCUSD"):
@@ -884,6 +1015,61 @@ class TestRegistrationGate:
         f["hk"] = real.ss58_address              # claim someone else's hotkey
         hi, ing = self._ingest(registered={real.ss58_address})
         assert ing.handle(f)["reason"] == "bad_signature"
+
+    def _arm_open_gate(self, monkeypatch, ing, pair="BTCUSD", price=100_000.0):
+        """Enforce the gate regardless of wall clock, with a live tick feed.
+
+        HF_OPEN_GATE_FROM is a real future date, so an unpatched test would pass
+        today for the wrong reason and change behaviour the moment it lands.
+        """
+        import time as _t
+        monkeypatch.setattr(hf, "HF_OPEN_GATE_FROM", 0)
+        # min_gap 0: check_rate runs BEFORE the open gate, so at 250 ms a
+        # back-to-back pair of frames would refuse for the wrong reason.
+        monkeypatch.setattr(hf, "HF_RULES_HISTORY", ((0, 30, 0, 1),))
+        ing.last_px[pair] = (int(_t.time() * 1000), price)
+        ing._tick_ok_at = _t.time()
+
+    def test_a_second_call_on_an_open_pair_is_refused(self, monkeypatch):
+        from bittensor_wallet import Keypair
+        miner = Keypair.create_from_uri("//OpenGateMiner")
+        hi, ing = self._ingest(registered={miner.ss58_address})
+        self._arm_open_gate(monkeypatch, ing)
+        assert ing.handle(self._frame(miner, seq=1))["kind"] == "hf.receipt"
+        out = ing.handle(self._frame(miner, seq=2))
+        assert out["kind"] == "hf.reject"
+        assert out["reason"].startswith("pair_open_same_mechanism")
+
+    def test_another_pair_is_unaffected(self, monkeypatch):
+        from bittensor_wallet import Keypair
+        miner = Keypair.create_from_uri("//OpenGateMiner2")
+        hi, ing = self._ingest(registered={miner.ss58_address})
+        self._arm_open_gate(monkeypatch, ing)
+        self._arm_open_gate(monkeypatch, ing, pair="ETHUSD", price=4000.0)
+        assert ing.handle(self._frame(miner, seq=1))["kind"] == "hf.receipt"
+        out = ing.handle(self._frame(miner, seq=2, pair="ETHUSD"))
+        assert out["kind"] == "hf.receipt", out.get("reason")
+
+    def test_another_hotkey_is_unaffected(self, monkeypatch):
+        from bittensor_wallet import Keypair
+        a = Keypair.create_from_uri("//OpenGateA")
+        b = Keypair.create_from_uri("//OpenGateB")
+        hi, ing = self._ingest(registered={a.ss58_address, b.ss58_address})
+        self._arm_open_gate(monkeypatch, ing)
+        assert ing.handle(self._frame(a, seq=1))["kind"] == "hf.receipt"
+        assert ing.handle(self._frame(b, seq=1))["kind"] == "hf.receipt"
+
+    def test_the_gate_fails_open_when_the_tick_feed_is_stale(self, monkeypatch):
+        # No fresh ticks means no call can be SEEN to resolve, so enforcing would
+        # refuse legal re-entry for a whole horizon. A bad accept is voided by the
+        # grader; a bad refusal is a trade the trader never gets.
+        from bittensor_wallet import Keypair
+        miner = Keypair.create_from_uri("//OpenGateStale")
+        hi, ing = self._ingest(registered={miner.ss58_address})
+        self._arm_open_gate(monkeypatch, ing)
+        assert ing.handle(self._frame(miner, seq=1))["kind"] == "hf.receipt"
+        ing._tick_ok_at = 0.0                     # feed went away
+        assert ing.handle(self._frame(miner, seq=2))["kind"] == "hf.receipt"
 
     def test_an_empty_metagraph_never_empties_the_set(self, monkeypatch):
         # "metagraph returned nothing" and "nobody is registered" are the same

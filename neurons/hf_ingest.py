@@ -56,6 +56,16 @@ NETWORK = os.getenv("SN89_NETWORK", "finney")
 # and the same door was open to anyone.
 REQUIRE_REGISTERED = os.getenv("SN89_HF_REQUIRE_REGISTERED", "1") == "1"
 REG_REFRESH_S = int(os.getenv("SN89_HF_REG_REFRESH_S", "300"))
+# Tick bus — the SAME source `hf_tick_recorder` publishes from, polled here so the
+# open-position gate can tell a call that already resolved from one still running.
+# The recorder's files are up to a window (180 s) behind because it writes at seal,
+# and a gate reading those would refuse re-entry for minutes after a call resolved.
+TICKBUS = os.getenv("IQ_TICKBUS_URL", "http://127.0.0.1:18774")
+TICK_POLL_MS = int(os.getenv("SN89_HF_INGEST_TICK_POLL_MS", "250"))
+# With no fresh ticks an open call can never be seen to resolve, so the gate would
+# refuse legal re-entry for a whole horizon. Past this the gate FAILS OPEN: a bad
+# accept is voided by the grader, a bad refusal is a trade the trader never gets.
+TICK_STALE_MS = int(os.getenv("SN89_HF_INGEST_TICK_STALE_MS", "30000"))
 
 _state: dict = {"seq": {}, "sent": {}, "windows": {}}
 
@@ -70,6 +80,7 @@ class Ingest:
     # these before _conn()/_drop_conn()/prune() can be reached.
     _subtensor = None
     _pruned_at = 0.0
+    _tick_ok_at = 0.0
 
     def __init__(self, receipt_kp: Keypair):
         self.kp = receipt_kp
@@ -77,6 +88,14 @@ class Ingest:
         self.sent_ms: dict[str, list] = {}          # hotkey -> accepted submit times
         self.windows: dict[int, list] = {}          # window start ms -> receipts
         self.lock_index: dict = {}                  # (hk, pair, mecid) -> ts ms
+        # (hk, PAIR) -> [hf.OpenCall]. NOT rebuilt on restart, like sent_ms and
+        # last_seq before it: a bounce leaves the gate blind to calls opened before
+        # it, for at most one horizon. That direction is the safe one — it fails
+        # OPEN, and hf_grade voids anything that slips through off the published
+        # windows, which survive the restart.
+        self.open_calls: dict = {}
+        self.last_px: dict = {}                     # PAIR -> (src_ts_ms, price)
+        self._tick_ok_at = 0.0                      # last poll that returned data
         self._locks_loaded_at = 0.0
         self.registered: set = set()                # hotkeys with a UID on NETUID
         self._reg_loaded_at = 0.0
@@ -165,10 +184,87 @@ class Ingest:
         stale = [k for k, ts in self.lock_index.items() if int(ts) < lock_cut]
         for k in stale:
             del self.lock_index[k]
-        if dropped or stale:
-            _log(f"prune: sent_ms -{dropped} ts, lock_index -{len(stale)} keys "
-                 f"(now {len(self.sent_ms)} hk / {len(self.lock_index)} locks)")
+        # open_calls — a call that has resolved or run past its horizon can never
+        # hold its pair again, and the longest horizon on the board is 2h.
+        shut = 0
+        for k, lst in list(self.open_calls.items()):
+            kept = [c for c in lst if c.open_until() > now_ms]
+            shut += len(lst) - len(kept)
+            if kept:
+                self.open_calls[k] = kept
+            else:
+                del self.open_calls[k]
+        if dropped or stale or shut:
+            _log(f"prune: sent_ms -{dropped} ts, lock_index -{len(stale)} keys, "
+                 f"open_calls -{shut} (now {len(self.sent_ms)} hk / "
+                 f"{len(self.lock_index)} locks / {len(self.open_calls)} held pairs)")
         self._pruned_at = time.time()
+
+    # ── tick tail (feeds the open-position gate) ─────────────────────────────
+    def poll_ticks(self) -> int:
+        """One bus read; advance every open call on the pairs that moved.
+
+        Deduped on the feed's OWN src_ts exactly as `hf_tick_recorder` does, so a
+        repeated poll of an unchanged quote cannot double-count toward
+        MIN_TOUCH_TICKS and close a call the grader will score as open.
+        """
+        import urllib.request
+        try:
+            with urllib.request.urlopen(f"{TICKBUS}/ticks", timeout=2) as r:
+                ticks = json.loads(r.read()).get("ticks", {})
+        except Exception:               # noqa: BLE001
+            return 0                    # _tick_ok_at goes stale -> the gate fails open
+        n = 0
+        for pair, d in (ticks or {}).items():
+            if not d:
+                continue
+            src, price = int(d.get("ts") or 0), d.get("price")
+            if not src or price is None or d.get("stale"):
+                continue
+            if int(d.get("age_ms") or 0) > TICK_STALE_MS:
+                continue
+            pair = str(pair).upper()
+            prev = self.last_px.get(pair)
+            if prev and src <= prev[0]:
+                continue
+            self.last_px[pair] = (src, float(price))
+            n += 1
+            for (_hk, p), lst in self.open_calls.items():
+                if p == pair:
+                    for c in lst:
+                        c.on_tick(src, float(price))
+        if ticks:
+            self._tick_ok_at = time.time()
+        return n
+
+    async def tick_loop(self):
+        """Poll the bus and announce every transition in and out of stale.
+
+        The gate fails open on a stale feed, which is the right default and also a
+        completely silent one: a dead bus leaves the ingest accepting everything and
+        looking perfectly healthy. Log the edges so "the gate is off" is something
+        you can read in the journal instead of infer from the board.
+        """
+        fresh = None
+        while True:
+            try:
+                await asyncio.to_thread(self.poll_ticks)
+            except Exception as e:      # noqa: BLE001
+                _log(f"!! tick poll failed: {e}")
+            now_fresh = (time.time() - self._tick_ok_at) * 1000 <= TICK_STALE_MS
+            if now_fresh != fresh:
+                # Two independent switches, and saying only one of them is how a log
+                # line lies: a live feed does NOT mean the gate bites — it is also
+                # era-gated on HF_OPEN_GATE_FROM. Print both.
+                era = time.time() >= hf.HF_OPEN_GATE_FROM
+                _log(f"tick tail {'LIVE' if now_fresh else 'STALE'} · bus={TICKBUS} "
+                     f"· {len(self.last_px)} pairs priced · open-position gate "
+                     + ("ENFORCED" if (now_fresh and era) else
+                        "FAILING OPEN (tick feed stale)" if era else
+                        "not yet in force, from " + time.strftime(
+                            "%Y-%m-%dT%H:%M:%SZ", time.gmtime(hf.HF_OPEN_GATE_FROM))))
+                fresh = now_fresh
+            await asyncio.sleep(TICK_POLL_MS / 1000.0)
 
     def refresh_mech0_locks(self) -> int:
         """Pull mechanism-0 submissions into the lock index.
@@ -254,6 +350,20 @@ class Ingest:
         if hf.is_pair_locked(self.lock_index, hk, pair, hf.MECID, t_recv_ms):
             return reject("pair_locked_other_mechanism")
 
+        # 5b. the SAME-mechanism open-position gate. Refused here so the trader is
+        # told at submit time; the authority is hf_grade, which voids the same call
+        # off the published series. Advisory by construction: this reads a live tick
+        # tail and a replayer reads the sealed windows, so at the margin of a touch
+        # the two can disagree by a tick. FAIL OPEN when the tick feed is stale —
+        # the grader still voids a bad accept, but a bad refusal is a lost trade.
+        if (time.time() - self._tick_ok_at) * 1000 <= TICK_STALE_MS:
+            try:
+                hf.check_pair_open(
+                    [c.open_until() for c in self.open_calls.get((hk, pair), [])],
+                    t_recv_ms, t0)
+            except hf.HFRejected as e:
+                return reject(str(e))
+
         # 6. accept — stamp, receipt, log
         ph = hf.payload_hash(sb)
         grid = hf.grid_t0_ms(t_recv_ms, pair, t0)      # per-class grid: crypto 250ms, fx/metals 1s
@@ -262,6 +372,15 @@ class Ingest:
         self.last_seq[hk] = seq
         self.sent_ms.setdefault(hk, []).append(t_recv_ms)
         self.lock_index[(hk, pair, hf.MECID)] = t_recv_ms
+        # Start tracking the position this call opens. Entry is the last bus price,
+        # where the grader uses the last published tick at or before grid_t0_ms —
+        # near-identical and, again, only advisory. `grid` (not t_recv_ms) is t0 so
+        # the tracked window matches the receipt the grader will read.
+        px = self.last_px.get(pair)
+        _tp, _sl, _hor, _ = hf.hf_bands_as_of(t0)[pair]
+        self.open_calls.setdefault((hk, pair), []).append(
+            hf.OpenCall(pair, str(payload["direction"]), px[1] if px else None,
+                        _tp, _sl, grid, _hor))
         w = hf.window_start_ms(t_recv_ms)
         self.windows.setdefault(w, []).append({"submit": frame, "receipt": rcpt})
         return rcpt
@@ -314,7 +433,7 @@ async def serve(ing: Ingest):
 
     async with websockets.serve(handler, BIND, PORT, ping_interval=20):
         _log(f"listening on ws://{BIND}:{PORT} · ingest {ING_ID}")
-        await asyncio.gather(ing.anchor_loop())
+        await asyncio.gather(ing.anchor_loop(), ing.tick_loop())
 
 
 def main():

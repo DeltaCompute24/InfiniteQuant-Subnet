@@ -27,8 +27,10 @@ _UA = {"User-Agent": "sn89-validator/1.0"}
 # upgrade. A grading bug fixed in code is only half a fix: the wrong grades are
 # already written and `grades` is never revisited, so without this the corrected
 # rule applies to future calls only and the two halves of the board disagree
-# forever. v2: the incomplete-tick-series wash bug below.
-GRADER_VERSION = 2
+# forever. v2: the incomplete-tick-series wash bug below. v3: the same-mechanism
+# open-position gate (hf.check_pair_open) — it voids calls already written as graded,
+# so every validator must re-derive rather than apply it to new calls only.
+GRADER_VERSION = 3
 
 # A window is published shortly AFTER it closes, so a call whose horizon has only
 # just elapsed is graded against a series that is still arriving. Wait this long
@@ -169,7 +171,14 @@ def _db(cache_dir: str) -> sqlite3.Connection:
               "key TEXT PRIMARY KEY, hk TEXT, t0_ms INTEGER, pair TEXT, "
               "direction TEXT, end_ms INTEGER)")
     c.execute("CREATE TABLE IF NOT EXISTS grades ("
-              "key TEXT PRIMARY KEY, hk TEXT, t0_ms INTEGER, pair TEXT, status TEXT)")
+              "key TEXT PRIMARY KEY, hk TEXT, t0_ms INTEGER, pair TEXT, status TEXT, "
+              "open_until_ms INTEGER)")
+    # `open_until_ms` is v3. A GRADER_VERSION bump clears the ROWS but CREATE TABLE
+    # IF NOT EXISTS leaves an existing table's SHAPE alone, so an upgraded validator
+    # needs the column added explicitly or every insert below fails.
+    if not any(r[1] == "open_until_ms"
+               for r in c.execute("PRAGMA table_info(grades)")):
+        c.execute("ALTER TABLE grades ADD COLUMN open_until_ms INTEGER")
     c.execute("CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT)")
     row = c.execute("SELECT v FROM meta WHERE k='grader_version'").fetchone()
     have = int(row[0]) if row else 0
@@ -292,14 +301,30 @@ def sync_and_grade(base: str, cache_dir: str, now: float) -> None:
     # — the window covering the last second of a horizon publishes after that
     # second, so grading at end_ms exactly is grading a series that is still
     # arriving.
+    # ORDER BY end_ms is load-bearing, not tidiness: the open-position gate below
+    # asks whether an EARLIER call on the same pair was still open, which is only
+    # answerable once that earlier call is itself graded. Same pair -> same horizon,
+    # so earlier t0 means earlier end_ms, and this ordering settles predecessors
+    # first within a batch.
     due = db.execute("SELECT key, hk, t0_ms, pair, direction, end_ms FROM pending "
-                     "WHERE end_ms <= ?", (now_ms - GRADE_SETTLE_S * 1000,)).fetchall()
+                     "WHERE end_ms <= ? ORDER BY end_ms, t0_ms, key",
+                     (now_ms - GRADE_SETTLE_S * 1000,)).fetchall()
     for key, hk, t0_ms, pair, direction, end_ms in due:
         board = hf.hf_bands_as_of(t0_ms / 1000.0)
         if not board or pair not in board:
             db.execute("DELETE FROM pending WHERE key=?", (key,))
             continue
         tp, sl, horizon_s, _ = board[pair]
+        # ...and ordering alone is not enough: a predecessor stuck in `pending` on a
+        # tick gap is NOT in this batch, so grading its successor now would read an
+        # empty prior set and pass a call the gate should void. Wait for it. It
+        # either grades on a later tempo or is abandoned, and either way it lands
+        # before this one — its end_ms is smaller.
+        blocked = db.execute(
+            "SELECT 1 FROM pending WHERE hk=? AND pair=? AND t0_ms<? LIMIT 1",
+            (hk, pair, int(t0_ms))).fetchone()
+        if blocked:
+            continue
         ticks, missing = _ticks_for(base, tick_dir, pair, int(t0_ms), int(end_ms))
         if missing and now_ms < int(end_ms) + GRADE_ABANDON_S * 1000:
             # Prices we do not hold. Leave the call in `pending` and retry next
@@ -307,9 +332,29 @@ def sync_and_grade(base: str, cache_dir: str, now: float) -> None:
             # and never revisited, so guessing here is permanent.
             continue
         entry = hf.price_at(ticks, int(t0_ms))
+        # The same-mechanism open-position gate. A prior call still holding this pair
+        # at t0 voids this one — the trader stacked a second position on a view the
+        # board had not answered yet. Only NON-VOID predecessors hold the pair
+        # (open_until_ms is written as t0_ms for a void), so a refusal never chains.
+        prior_open = [r[0] for r in db.execute(
+            "SELECT open_until_ms FROM grades WHERE hk=? AND pair=? AND t0_ms<? "
+            "AND status!='void' AND open_until_ms IS NOT NULL",
+            (hk, pair, int(t0_ms)))]
+        try:
+            hf.check_pair_open(prior_open, int(t0_ms), t0_ms / 1000.0)
+        except hf.HFRejected:
+            db.execute("INSERT OR REPLACE INTO grades VALUES (?,?,?,?,?,?)",
+                       (key, hk, int(t0_ms), pair, "void", int(t0_ms)))
+            db.execute("DELETE FROM pending WHERE key=?", (key,))
+            continue
         g = hf.grade(pair, direction, entry, tp, sl, int(t0_ms), horizon_s, ticks)
-        db.execute("INSERT OR REPLACE INTO grades VALUES (?,?,?,?,?)",
-                   (key, hk, int(t0_ms), pair, g["status"]))
+        # grade()'s own exit_ms IS open_until_ms on a complete series — the touch for
+        # won/lost, t_end for wash — so take it rather than re-walking. Deriving the
+        # held-until from the grade makes the two impossible to drift apart, which is
+        # the failure that would void legal calls.
+        held = int(t0_ms) if g["status"] == "void" else int(g["exit_ms"])
+        db.execute("INSERT OR REPLACE INTO grades VALUES (?,?,?,?,?,?)",
+                   (key, hk, int(t0_ms), pair, g["status"], int(held)))
         db.execute("DELETE FROM pending WHERE key=?", (key,))
     db.commit()
     db.close()

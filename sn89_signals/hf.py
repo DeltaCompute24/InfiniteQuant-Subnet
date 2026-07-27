@@ -13,7 +13,10 @@ The HF category differs from mechanism 0 in four ways and only four:
      time, and T0 on mech 0 is the commit block's own timestamp.
   2. BANDS + HORIZON — sized from measured excursion so a correct short call resolves
      instead of washing on the clock (HF_BANDS_HISTORY).
-  3. LIMITS — 30/day, 250 ms min gap, and a rolling 24 h cross-mechanism pair lock.
+  3. LIMITS — 30/day, 250 ms min gap, a rolling 24 h cross-mechanism pair lock, and
+     ONE OPEN POSITION PER PAIR (HF_OPEN_GATE_FROM): no second call on a pair while
+     the previous one is still running. Open ends at the resolving touch, not at the
+     horizon, so re-entry is immediate once the call is decided.
   4. SCORING SCOPE — HF outcomes tally into their own MinerState and their own weight
      vector (mecid 1). Mechanism 0's scoring is untouched.
 
@@ -121,8 +124,25 @@ def hf_horizon_s(pair: str, t0_unix: float) -> int | None:
 
 # ── submission limits (CONSENSUS) ────────────────────────────────────────────
 # (effective_from_unix, max_per_utc_day, min_gap_ms, max_open_per_pair)
+#
+# max_open_per_pair was DECLARED from launch and NEVER ENFORCED: `check_rate`
+# discarded the field, `is_pair_locked` only ever looked at the OTHER mechanism, and
+# `tools/publish_mech_state.py` published "max_open_per_pair": 4 to the board — a
+# limit we advertised and did not apply. On 2026-07-27 a trader copy/pasted five
+# SHORT BTCUSD calls a second apart and got five receipts: nothing in the path
+# objected, because the only spacing gate is the 250 ms min gap.
+#
+# From HF_OPEN_GATE_FROM the limit is 1 and it is real (`check_pair_open`): a hotkey
+# may not submit on a pair while its own prior call on that pair is still OPEN.
+# "Open" is not a clock — it ends at the FIRST decisive touch or at the horizon wash,
+# whichever comes first (`open_until_ms`), so re-entry is allowed the moment the
+# previous call resolves. On a ±19 bps / 30 min band most calls resolve well inside
+# the horizon, which is why this is not simply "one call per pair per horizon".
+HF_OPEN_GATE_FROM = 1785189600          # 2026-07-27T22:00:00Z
+
 HF_RULES_HISTORY = (
     (0, 30, 250, 4),
+    (HF_OPEN_GATE_FROM, 30, 250, 1),
 )
 
 
@@ -469,6 +489,129 @@ def check_rate(prior_ts_ms: list, t_ms: int, t0_unix: float) -> None:
         raise HFRejected(f"daily_cap:{cap}")
     if prior_ts_ms and int(t_ms) - int(prior_ts_ms[-1]) < gap_ms:
         raise HFRejected(f"min_gap:{gap_ms}ms")
+
+
+# ── same-mechanism open-position gate (CONSENSUS) ────────────────────────────
+def open_until_ms(direction: str, entry, tp_bps: float, sl_bps: float,
+                  t0_ms: int, horizon_s: int, ticks_sorted: list) -> int:
+    """The ms at which this call STOPS holding its pair.
+
+    Earlier of the first decisive touch and the horizon wash. Deliberately the same
+    walk as `grade()` — same `touch_hit`, same `MIN_TOUCH_TICKS` wick guard, same
+    "ignore ticks at or before t0" bound — so a call can never be scored decisive at
+    one instant and counted open past it. If the two ever diverge, the gate voids
+    calls the board says were legal.
+
+    `ticks_sorted` may be TRUNCATED (the ingest and the bot only hold ticks up to
+    now). A truncated series simply has not touched anything yet, so the answer is
+    the horizon end, which is the correct conservative reading of "still open": the
+    caller compares against its own clock and a call cannot be past a horizon that
+    has not elapsed. Once the horizon HAS elapsed the series is complete and the
+    answer is final and identical for every replayer.
+
+    A call with no entry price voids and therefore holds nothing -> t0_ms.
+    """
+    from .grader import touch_hit          # THE shared rule — see grade()
+
+    t_end = int(t0_ms) + int(horizon_s) * 1000
+    if entry is None or float(entry) <= 0:
+        return int(t0_ms)
+    up = 1 if direction == "LONG" else -1
+    tp = float(entry) * (1 + up * tp_bps / 10000.0)
+    sl = float(entry) * (1 - up * sl_bps / 10000.0)
+    need = config.MIN_TOUCH_TICKS
+    won_ct = lost_ct = 0
+    for t in ticks_sorted:
+        tm = int(t["t"])
+        if tm <= int(t0_ms):
+            continue
+        if tm > t_end:
+            break
+        r = touch_hit(float(t["p"]), up > 0, tp, sl)
+        if r == "lost":
+            lost_ct += 1
+            if lost_ct >= need:
+                return tm
+        elif r == "won":
+            won_ct += 1
+            if won_ct >= need:
+                return tm
+    return t_end
+
+
+class OpenCall:
+    """Live, incremental twin of `open_until_ms` — same rule, fed tick by tick.
+
+    `open_until_ms` needs the whole series in hand, which the grader has and a
+    real-time caller does not: the ingest decides in under a millisecond and the
+    published tick windows are ~3 min behind (the recorder writes a window at SEAL).
+    So the live path carries one of these per open call and advances it off the tick
+    bus, holding two counters instead of a tick history.
+
+    It must stay behaviourally identical to `open_until_ms`: same `touch_hit`, same
+    `MIN_TOUCH_TICKS`, same exclusive-at-t0 / inclusive-at-t_end bounds. Divergence
+    here does not corrupt the board — the grader is the authority — but it makes the
+    ingest refuse calls the board will score, which is the worse direction.
+    """
+    __slots__ = ("pair", "direction", "t0_ms", "end_ms", "tp", "sl",
+                 "up", "won", "lost", "closed_ms")
+
+    def __init__(self, pair: str, direction: str, entry, tp_bps: float,
+                 sl_bps: float, t0_ms: int, horizon_s: int):
+        self.pair = str(pair).upper()
+        self.direction = direction
+        self.t0_ms = int(t0_ms)
+        self.end_ms = int(t0_ms) + int(horizon_s) * 1000
+        self.up = 1 if direction == "LONG" else -1
+        self.won = self.lost = 0
+        if entry is None or float(entry) <= 0:
+            # No entry price -> the call voids and never holds the pair.
+            self.tp = self.sl = 0.0
+            self.closed_ms = int(t0_ms)
+        else:
+            self.tp = float(entry) * (1 + self.up * tp_bps / 10000.0)
+            self.sl = float(entry) * (1 - self.up * sl_bps / 10000.0)
+            self.closed_ms = None
+
+    def on_tick(self, t_ms: int, price: float) -> None:
+        from .grader import touch_hit
+        if self.closed_ms is not None:
+            return
+        t_ms = int(t_ms)
+        if t_ms <= self.t0_ms or t_ms > self.end_ms:
+            return
+        r = touch_hit(float(price), self.up > 0, self.tp, self.sl)
+        if r == "lost":
+            self.lost += 1
+            if self.lost >= config.MIN_TOUCH_TICKS:
+                self.closed_ms = t_ms
+        elif r == "won":
+            self.won += 1
+            if self.won >= config.MIN_TOUCH_TICKS:
+                self.closed_ms = t_ms
+
+    def open_until(self) -> int:
+        """The ms this call stops holding its pair — the touch, or the wash."""
+        return self.end_ms if self.closed_ms is None else self.closed_ms
+
+
+def check_pair_open(prior_open_until_ms: list, t_ms: int, t0_unix: float) -> None:
+    """Refuse a submission whose pair the hotkey is already holding.
+
+    `prior_open_until_ms`: for each of THIS hotkey's earlier ACCEPTED, NON-VOID calls
+    on THIS pair, the value of `open_until_ms`. A voided call holds nothing, so it
+    must not appear here — otherwise the first refusal chains and locks the pair for
+    everything behind it.
+
+    No-op before HF_OPEN_GATE_FROM. The 4 declared at launch was never applied, and
+    a replay must not retroactively void calls that were legal when they landed.
+    """
+    if t0_unix < HF_OPEN_GATE_FROM:
+        return
+    _, _, openmax = hf_rules_as_of(t0_unix)
+    n = sum(1 for u in prior_open_until_ms if int(t_ms) < int(u))
+    if n >= openmax:
+        raise HFRejected(f"pair_open_same_mechanism:{openmax}")
 
 
 # ── scoring scope ────────────────────────────────────────────────────────────
