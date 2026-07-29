@@ -102,6 +102,27 @@ def _grade_touch_ticks(sig: Signal, t0_ms: int, now_ms: int, horizon_ms: int,
         pre = [t for t in ticks if int(t["t"]) <= t0_ms]
         entry_price = float(pre[-1]["p"]) if pre else None
     if entry_price is None:
+        # No tick at or before t0. Usually the window simply has not published
+        # yet, so waiting is right — but this used to return PENDING
+        # UNCONDITIONALLY, before the abandon deadline below, so a call whose
+        # entry can NEVER resolve had no deadline to free it and stayed pending
+        # forever. Seen live: XAUUSD t0 2026-07-28T21:09:12Z, 35 784 ticks in
+        # range and ZERO at or before t0 — t0 landed inside the 20:55-21:20 UTC
+        # FX rollover, where gold quotes thin out, and _ticks_for reaches only
+        # ONE window back, so no pre-t0 tick existed at any point.
+        #
+        # Past the SAME deadline the wash path uses, give up and record a
+        # non-decisive wash. A call we cannot price can never be a win or a loss,
+        # so this costs the miner nothing that a correct grade would have paid;
+        # `no_entry_price` records WHY rather than implying the market did
+        # nothing. Every validator crosses the deadline against the same (by then
+        # final) published set, so they still converge.
+        #
+        # Deliberately NOT fixed by widening the entry lookback: reaching further
+        # back through a rollover gap returns a price minutes stale, which is a
+        # worse entry than admitting we have none.
+        if abandon_ms is not None and now_ms >= abandon_ms:
+            return Grade(WASHED, None, "no_entry_price", horizon_ms, None)
         return Grade(PENDING, None, None, None, None)   # no tick at/before t0 yet
     sign = 1 if is_long else -1
     tp_price = entry_price * (1 + sign * sig.tp_bps / 10_000)
