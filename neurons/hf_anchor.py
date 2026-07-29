@@ -42,10 +42,16 @@ ANCHOR_WALLET = os.getenv("SN89_HF_ANCHOR_WALLET", "")     # name; empty = previ
 ANCHOR_HOTKEY = os.getenv("SN89_HF_ANCHOR_HOTKEY", "default")
 COMMIT_MAX_TRIES = int(os.getenv("SN89_HF_ANCHOR_MAX_TRIES", "5"))
 PUBLIC_DIR = os.getenv("SN89_HF_PUBLIC_DIR", "")           # webhook-served; empty = no publish
-# How far behind `now` a TICK-ONLY window must sit before we publish it. The tick
-# recorder and the ingest seal the same window independently and within seconds of
-# each other, so with no margin a sweep can land between them, publish the window
-# as receipt-less, mark it done, and strand real receipts.
+# How far behind `now` ANY window must sit before we root/publish/anchor it. The
+# tick recorder and the ingest seal the same window independently and within
+# seconds of each other, so with no margin a sweep can land between them and
+# retire the window half-written. This is SYMMETRIC and both directions have
+# happened:
+#   - tick-only sweep first  -> window published receipt-less, real receipts stranded
+#   - receipt sweep first    -> window published tick-less AND anchored on-chain with
+#                               tick_n=0, permanently mis-binding it (5 windows,
+#                               2026-07-26..29; see the incident note in sweep()).
+# The margin therefore gates the RECEIPT branch as well, not just the tick branch.
 TICK_SETTLE_WINDOWS = int(os.getenv("SN89_HF_TICK_SETTLE_WINDOWS", "2"))
 WINDOW_MS = hf.ANCHOR_WINDOW_S * 1000
 
@@ -161,7 +167,20 @@ class Anchorer:
         # per-epoch budget on all-zero receipt roots, and a window with no receipts
         # carries no HF weight for a missing anchor to invalidate.
         cutoff = int(time.time() * 1000) - TICK_SETTLE_WINDOWS * WINDOW_MS
-        cand = {int(p.stem) for p in LOG_DIR.glob("*.jsonl") if p.stem.isdigit()}
+        # ⚠ The cutoff gates BOTH branches. It used to gate only the tick branch,
+        # so a window whose receipts existed but whose tick log had not yet been
+        # written was swept immediately: _roots() computed tick_root over an EMPTY
+        # tick list, _publish() skipped the absent tick file, _commit() anchored
+        # tick_n=0 on chain, and _mark() retired it forever. Measured 2026-07-29:
+        # 5 of 2812 published windows had anchor.json + receipts.jsonl and NO tick
+        # file, all 5 anchored `ticks=0` while the recorder held 850-3201 real
+        # ticks. Because LF grading reads its prices from this feed, ONE such
+        # window stalled every LF call spanning it (13 calls) for the full 6h
+        # GRADE_ABANDON_S and then force-washed them. Only receipt-bearing windows
+        # were affected — quiet ones went through the tick branch, which was
+        # already gated.
+        cand = {int(p.stem) for p in LOG_DIR.glob("*.jsonl")
+                if p.stem.isdigit() and int(p.stem) <= cutoff}
         for tp in TICK_DIR.glob("*.ticks.jsonl"):
             stem = tp.name.split(".", 1)[0]
             if stem.isdigit() and int(stem) <= cutoff:
@@ -172,6 +191,14 @@ class Anchorer:
             r = self._roots(w)
             if r is None:
                 continue
+            if r["n"] and not r["tick_n"]:
+                # Past the settle margin this can no longer be a race — it means the
+                # tick recorder is not sealing. Anchoring an empty tick_root binds
+                # the window to prices that do not exist and cannot be undone, so
+                # say so loudly rather than retiring it quietly.
+                _log(f"!! window {w}: {r['n']} receipts but ZERO ticks past the "
+                     f"settle margin — check iq-sn89-hf-ticks. Anchoring an empty "
+                     f"tick_root permanently mis-binds this window.")
             self._publish(w)
             committed = self._commit(w, r) if r["n"] else False
             # Only retire the window once it is actually anchored. Marking on a
