@@ -271,10 +271,20 @@ def run(now: float | None = None) -> dict:
 
 def verify_propagation() -> int:
     """All user-facing copies must equal the consensus board. This is the check
-    that would have caught the BTC 103-vs-76 drift found 2026-07-26."""
+    that would have caught the BTC 103-vs-76 drift found 2026-07-26.
+
+    `data/seed/signals-bands.json` was checked here until 2026-07-30 and reported
+    16 drifts on every run, because it is NOT a copy of the board — it is the
+    EWMA-7d vol table `signals-vol-bands` rewrites every 15 min, and it is supposed
+    to differ. A permanently-red alarm is an ignored alarm, and this one hid a real
+    defect for as long as it ran: 22 strategy agents plus the Arabic landing page
+    were reading that seed as if it were the board (USDJPY 53 vs 14, XAUUSD 59 vs
+    96). Those consumers now read the board directly (IQ_BANDS_FILE), so the seed
+    is no longer a copy of anything and does not belong in this check. Anything
+    that adds a NEW copy of the board belongs here; a vol input does not.
+    """
     copies = {
         "board": BOARD_PATH,
-        "platform seed": Path("/opt/iq-platform/data/seed/signals-bands.json"),
         "dashboard": Path(
             "/opt/iq-platform/apps/dashboard-public/lib/signals-bands.json"),
     }
