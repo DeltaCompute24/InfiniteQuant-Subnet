@@ -25,6 +25,7 @@ volume gate on a volume category selects for stamina, not edge.
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -702,6 +703,43 @@ HF_RECEIPT_PUBKEY = os.getenv(
     "SN89_HF_RECEIPT_PUBKEY", "5FTc1VxLMabBGqzqHjy62cDuMmRLGdMohxyhkBAUBpzfstCz")
 
 
+@contextlib.contextmanager
+def hf_scoring_config():
+    """Run a block with `config` carrying the HF window/cap constants, restored on
+    exit. Scoped with try/finally and NEVER applied at import time, because hf.py
+    is imported by the ingest — a module-level mutation of config would corrupt LF
+    scoring in any process that imports both.
+
+    Anything that calls scoring.* on HF outcomes must go through this, not just
+    hf_compute_weights: the website's HF board reads the same tier ladder, wash
+    efficiency and per-win stamps, and computing those against the LF constants
+    would put a different Value× on the page than the one the vector was built
+    from. One definition, every call site.
+    """
+    saved = {k: getattr(config, k) for k in (
+        "EMISSION_DECAY_S", "WIN_CAP", "SCORE_WINDOW_S", "IMMUNITY_S",
+        "HIT_RATE_WINDOW_TRADES", "HIT_RATE_WINDOW_TRADES_V2", "MINER_EMISSION_CAP")}
+    try:
+        config.EMISSION_DECAY_S = HF_EMISSION_DECAY_S
+        config.WIN_CAP = HF_WIN_CAP
+        config.SCORE_WINDOW_S = HF_EMISSION_DECAY_S          # trailing_* (reporting) only
+        # make hit_rate_window_trades_as_of return the HF cap for every t0
+        config.HIT_RATE_WINDOW_TRADES = HF_HIT_RATE_WINDOW_TRADES
+        config.HIT_RATE_WINDOW_TRADES_V2 = HF_HIT_RATE_WINDOW_TRADES
+        config.MINER_EMISSION_CAP = HF_MINER_EMISSION_CAP
+        # The HF warmup is the eligibility INSTANT, not an elapsed span. Zero the
+        # LF immunity clock and hand each miner its eligible_from as first_seen, so
+        # warmup_end (= first_seen + IMMUNITY_S) collapses to exactly that instant
+        # in scoring.score_inputs, scoring.qualified_wins and compute_weights'
+        # immune/probation checks. All three then treat pre-eligibility wins as
+        # warmup — one definition, three call sites, no drift.
+        config.IMMUNITY_S = 0
+        yield
+    finally:
+        for k, v in saved.items():
+            setattr(config, k, v)
+
+
 def hf_compute_weights(decisive_by_hk: dict, first_seen_by_hk: dict,
                        uid_by_hk: dict, now: float, subs_by_hk: dict,
                        graded_by_hk: dict | None = None) -> dict:
@@ -734,25 +772,7 @@ def hf_compute_weights(decisive_by_hk: dict, first_seen_by_hk: dict,
     """
     from . import scoring
 
-    saved = {k: getattr(config, k) for k in (
-        "EMISSION_DECAY_S", "WIN_CAP", "SCORE_WINDOW_S", "IMMUNITY_S",
-        "HIT_RATE_WINDOW_TRADES", "HIT_RATE_WINDOW_TRADES_V2", "MINER_EMISSION_CAP")}
-    try:
-        config.EMISSION_DECAY_S = HF_EMISSION_DECAY_S
-        config.WIN_CAP = HF_WIN_CAP
-        config.SCORE_WINDOW_S = HF_EMISSION_DECAY_S          # trailing_* (reporting) only
-        # make hit_rate_window_trades_as_of return the HF cap for every t0
-        config.HIT_RATE_WINDOW_TRADES = HF_HIT_RATE_WINDOW_TRADES
-        config.HIT_RATE_WINDOW_TRADES_V2 = HF_HIT_RATE_WINDOW_TRADES
-        config.MINER_EMISSION_CAP = HF_MINER_EMISSION_CAP
-        # The HF warmup is the eligibility INSTANT, not an elapsed span. Zero the
-        # LF immunity clock and hand each miner its eligible_from as first_seen, so
-        # warmup_end (= first_seen + IMMUNITY_S) collapses to exactly that instant
-        # in scoring.score_inputs, scoring.qualified_wins and compute_weights'
-        # immune/probation checks. All three then treat pre-eligibility wins as
-        # warmup — one definition, three call sites, no drift.
-        config.IMMUNITY_S = 0
-
+    with hf_scoring_config():
         states = []
         for hk, decisive in decisive_by_hk.items():
             uid = uid_by_hk.get(hk)
@@ -771,9 +791,6 @@ def hf_compute_weights(decisive_by_hk: dict, first_seen_by_hk: dict,
                 rep_wins=rep_won, rep_decisive=rep_dec, trailing_wins=won_all,
                 qwins=qwins))
         return scoring.compute_weights(states, now)
-    finally:
-        for k, v in saved.items():
-            setattr(config, k, v)
 
 
 # ── on-chain anchor encoding (CONSENSUS) ─────────────────────────────────────
