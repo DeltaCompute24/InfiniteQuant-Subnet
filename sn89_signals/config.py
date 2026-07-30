@@ -483,7 +483,7 @@ COPY_PENALTY_TTL_S = int(os.getenv("SN89_COPY_PENALTY_TTL_S", str(2 * 24 * 3600)
 COPY_WINDOW_S = 30 * 24 * 3600      # rolling lookback for the shadowing report
 COPY_SHARP_LAG_S = 15 * 60          # same (pair,dir) within 15 min = sharp coincidence
 COPY_SOFT_LAG_S = 24 * 3600         # same (pair,dir) within 24 h = soft overlap
-COPY_SHARP_MIN_EVENTS = int(os.getenv("SN89_COPY_SHARP_MIN_EVENTS", "6"))
+COPY_SHARP_MIN_EVENTS = int(os.getenv("SN89_COPY_SHARP_MIN_EVENTS", "8"))
                                     # sharp EPISODES vs one leader ⇒ report as copier.
                                     # 2026-07-16: 3 -> 6. On the curated IQ-Signals cohort,
                                     # independent traders running the SAME price-triggered
@@ -496,6 +496,26 @@ COPY_SHARP_MIN_EVENTS = int(os.getenv("SN89_COPY_SHARP_MIN_EVENTS", "6"))
                                     # 2026-07-16 day-low 3974.47 @13:05:28; two "copiers" both
                                     # longed within 5 min of that bottom — the PRICE was the
                                     # common cause, not a chat.
+                                    #
+                                    # 2026-07-30: 6 -> 8. The gap 6 was cut at has closed.
+                                    # The rule for this threshold is the GAP IN THE DATA, and
+                                    # on 18 days of post-2h-reveal journal the distribution of
+                                    # sharp episodes over all directed leader→follower pairs is
+                                    #   1×60  2×5  3×4  4×6  5×6  6×1  7×1  12×1
+                                    # so 6 and 7 now sit flush against the 4-5 noise floor and
+                                    # the only gap left is 7→12. The penalised set is 3,3,2,1,0
+                                    # at thresholds 4..8 and flat 0 across 8..13 — the flat
+                                    # plateau the 07-16 note demanded starts at 8, not 6.
+                                    # 8 still catches the 12-episode ring the moment it
+                                    # re-trips, and it clears the two keys sitting in the floor:
+                                    # 5EoLdj8t (6 episodes, ALL SIX on moves 2-4 hotkeys held
+                                    # within ±30 min, three of them inside bursts already
+                                    # adjudicated as shared triggers — 07-14 14:09 XAGUSD queue,
+                                    # 07-15 12:19-12:25 PPI, 07-16 gold-ATL) and 5H6Q2A (7).
+                                    # NOTE what is NOT claimed: 5EoLdj8t's follow of 5GvLHY is
+                                    # one-directional (6 forward, 0 reverse), so rotation does
+                                    # not exonerate it. The cut rests on the floor being 4-5,
+                                    # not on that key being innocent.
 COPY_EPISODE_S = int(os.getenv("SN89_COPY_EPISODE_S", str(30 * 60)))
                                     # Sharp follows of the SAME leader landing inside this
                                     # window are ONE episode, not N. The daily cap (6 at the
