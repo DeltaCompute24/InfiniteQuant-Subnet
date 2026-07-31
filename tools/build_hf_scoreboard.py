@@ -788,7 +788,19 @@ def main() -> int:
         # column rendered "60%" for a trader taking the entire HF pool. Divide by
         # the FIXED cap, never by the non-burn sum, so a dust miner stays a
         # fraction of a percent instead of inflating to ~1/N when nobody earns.
-        w_chain = float(weights.get(hk, 0.0)) if qualified else 0.0
+        # NO current-qualification gate on the weight. hf_compute_weights is the
+        # vector the validator commits, and it deliberately has no such gate:
+        # earning is sized by the DECAYED tally of past qualified wins, so a miner
+        # that drops below the gate keeps earning while that tally decays to zero
+        # over HF_EMISSION_DECAY_S (7 days since 2026-07-31). Qualification governs whether NEW wins
+        # enter the tally, never whether the existing tally pays.
+        #
+        # This line used to read `... if qualified else 0.0`, re-imposing exactly
+        # the cliff the no-cliff design removes. Harold, 2026-07-31: one qualified
+        # win 13.8h old (mult 1.083, decay 0.713, tally 0.772) — the real vector
+        # paid him 0.600 while the board rendered 0.000 and the ledger below
+        # accrued him nothing. The site under-reported live on-chain earnings.
+        w_chain = float(weights.get(hk, 0.0))
         cap = hf.HF_MINER_EMISSION_CAP or 1.0
         rows.append({
             "signals_user_id": row_id,
@@ -842,8 +854,10 @@ def main() -> int:
         })
 
     # HF (mecid-1) emission → USD, the mirror of the LF publisher's per-miner
-    # accrual. emission_weight is already the qualified-only share of the pool, so
-    # unqualified rows accrue at rate 0. hf_pool_tao_day is mecid-1's share of the
+    # accrual. It accrues off emission_weight_chain — the REAL vector, including a
+    # decaying residual for a miner that has dropped below the gate. While that
+    # value was being zeroed for unqualified miners this ledger silently stopped
+    # accruing for someone the chain was still paying. hf_pool_tao_day is mecid-1's share of the
     # miner pool (0 to all miners while HF is 100% burn — the plumbing is correct
     # and simply reads zero until someone clears the gate).
     hf_pool = _hf_pool_tao_day()

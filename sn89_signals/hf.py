@@ -617,14 +617,29 @@ def check_pair_open(prior_open_until_ms: list, t_ms: int, t0_unix: float) -> Non
 
 # ── scoring scope ────────────────────────────────────────────────────────────
 # HF tallies into its own MinerState and its own weight vector. Qualification is
-# unchanged from mech 0. Two constants DO change:
+# unchanged from mech 0. One constant DOES change:
 #
-#  * decay — mech 0 runs a 7-day linear decay (shipped 2026-07-22). On a category
-#    whose trades resolve in 30 min that is far too slow to track current form.
 #  * win cap — config.WIN_CAP = 20 is calibrated to ~1 call/day and would bind on
 #    every active HF miner inside a week, so above it volume would stop mattering
 #    in a category whose entire premise is volume.
-HF_EMISSION_DECAY_S = int(os.getenv("SN89_HF_EMISSION_DECAY_S", str(48 * 3600)))
+#
+# DECAY IS NOW 7 DAYS, MATCHING MECH 0 (Whit, 2026-07-31). It shipped at 48h on
+# the argument that a 7-day memory is too slow to track current form where trades
+# resolve in 30 minutes. What that actually bought was a much harsher cliff than
+# LF: a miner who drops below the hit-rate floor loses its residual 3.5x faster,
+# for a category where a single bad session can pull the floor out. HF and LF now
+# fall back at the same rate, which is also what a trader moving between the two
+# expects. Current form is already tracked by the reputation window and by the
+# fact that a loss freezes accrual immediately — decay is the fall-back rate, not
+# the form signal, and those are different jobs.
+#
+# NOT as-of gated (there is no as-of mechanism for decay on either mechanism; the
+# LF 7-day change on 2026-07-22 shipped the same way). Decay is evaluated against
+# `now`, so this does not touch any grade or any past qualified win — it changes
+# what today's vector computes from them. A replay of a PAST block will not
+# reproduce the weights we committed before this change; that is inherent to any
+# decay-constant change and is why it belongs in one commit on master.
+HF_EMISSION_DECAY_S = int(os.getenv("SN89_HF_EMISSION_DECAY_S", str(7 * 24 * 3600)))
 HF_WIN_CAP = int(os.getenv("SN89_HF_WIN_CAP", "200"))
 HF_QUALIFY_MIN_DECISIVE = config.QUALIFY_MIN_DECISIVE     # identical to mech 0
 HF_QUALIFY_LB_FLOOR = config.QUALIFY_LB_FLOOR             # identical to mech 0
@@ -748,7 +763,8 @@ def hf_compute_weights(decisive_by_hk: dict, first_seen_by_hk: dict,
     Reuses the SAME battle-tested tally as mecid 0 (scoring.qualified_wins,
     scoring.compute_weights, scoring._qualifies) — a win still qualifies only if the
     miner had a passing Wilson bound over its recent decisive window at that win.
-    HF differs in the window constants (48h decay, 200 cap), the burn cap, and — the
+    HF differs in the window constants (200 win cap; decay matches mech 0 at 7 days
+    since 2026-07-31), the burn cap, and — the
     load-bearing one — the WARMUP gate: LF warmup is 8 elapsed days from first_seen;
     HF replaces it with hf_eligible_from() (>= HF_QUALIFY_MIN_SUBMISSIONS accepted
     submissions across >= HF_QUALIFY_MIN_TRADING_DAYS distinct UTC days). A miner not

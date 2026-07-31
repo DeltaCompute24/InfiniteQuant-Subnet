@@ -412,8 +412,12 @@ class TestScoringScope:
         assert hf.HF_QUALIFY_MIN_DECISIVE == config.QUALIFY_MIN_DECISIVE == 8
         assert hf.HF_QUALIFY_LB_FLOOR == config.QUALIFY_LB_FLOOR
 
-    def test_decay_is_faster_than_mechanism_zero(self):
-        assert hf.HF_EMISSION_DECAY_S < config.EMISSION_DECAY_S
+    def test_decay_matches_mechanism_zero(self):
+        # Whit 2026-07-31: HF decay was 48h, on the argument that a 7-day memory
+        # is too slow where trades resolve in 30 min. In practice it just made the
+        # fall-back 3.5x harsher than LF for the category most able to have one bad
+        # session. Both mechanisms now decay at the same rate.
+        assert hf.HF_EMISSION_DECAY_S == config.EMISSION_DECAY_S == 7 * 24 * 3600
 
     def test_win_cap_does_not_bind_at_thirty_a_day(self):
         cap, _, _ = hf.hf_rules_as_of(0)
@@ -1273,14 +1277,28 @@ class TestHFEarningGate:
                                   {'A': self.NOW - 200 * 86400}, {'A': 10}, self.NOW, self._subs())
         assert w.get(10, 0.0) == 0.0
 
-    def test_hf_uses_hf_decay_not_lf(self):
+    def test_hf_uses_its_own_decay_constant(self, monkeypatch):
+        """HF must size decay from HF_EMISSION_DECAY_S, not from whatever
+        config.EMISSION_DECAY_S happens to be.
+
+        The two are EQUAL since 2026-07-31, so a value comparison can no longer
+        tell them apart — drive them apart temporarily instead. This is the real
+        regression: hf_scoring_config must inject the HF constant, and must put
+        config back afterwards.
+        """
         from sn89_signals import config
         d = [(self.NOW - (8 - i) * 3600 - 3 * 86400, True, False) for i in range(8)]
-        w = hf.hf_compute_weights({'A': d}, {'A': self.NOW - 40 * 86400}, {'A': 10}, self.NOW, self._subs())
-        # 3d-old wins are fully decayed under HF's 48h window -> no real pool share.
-        # A once-qualified miner keeps only the probation DUST floor (no-cliff), not
-        # a pro-rata share, so the weight is at most dust.
-        assert w.get(10, 0.0) <= config.DUST_WEIGHT
+        args = ({'A': d}, {'A': self.NOW - 40 * 86400}, {'A': 10}, self.NOW, self._subs())
+
+        # at the shipped 7d decay, 3d-old qualified wins still pay a real share
+        assert hf.hf_compute_weights(*args).get(10, 0.0) > config.DUST_WEIGHT
+
+        # forced to a 48h window they fall out entirely; a once-qualified miner
+        # keeps at most the probation DUST floor (no-cliff), never a pro-rata share
+        monkeypatch.setattr(hf, "HF_EMISSION_DECAY_S", 48 * 3600)
+        assert hf.hf_compute_weights(*args).get(10, 0.0) <= config.DUST_WEIGHT
+
+        # and LF's own constant was never touched by either call
         assert config.EMISSION_DECAY_S == 7 * 24 * 3600
 
     def test_config_never_leaks_after_the_call(self):
