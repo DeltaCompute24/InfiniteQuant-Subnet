@@ -35,7 +35,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import websockets
 from bittensor_wallet import Keypair
 
-from sn89_signals import hf
+from sn89_signals import closers, hf
 
 BIND = os.getenv("SN89_HF_BIND", "127.0.0.1")
 PORT = int(os.getenv("SN89_HF_PORT", "8790"))
@@ -86,6 +86,7 @@ class Ingest:
         self.kp = receipt_kp
         self.last_seq: dict[str, int] = {}          # hotkey -> last accepted seq
         self.sent_ms: dict[str, list] = {}          # hotkey -> accepted submit times
+        self.closers_sent_ms: dict[str, list] = {}  # hotkey -> accepted CLOSERS submits (own rate ledger)
         self.windows: dict[int, list] = {}          # window start ms -> receipts
         self.lock_index: dict = {}                  # (hk, pair, mecid) -> ts ms
         # (hk, PAIR) -> [hf.OpenCall]. NOT rebuilt on restart, like sent_ms and
@@ -337,17 +338,27 @@ class Ingest:
         if abs(t_recv_ms - ts_miner) > hf.MAX_CLOCK_SKEW_MS:
             return reject("clock_skew")
 
-        # 4. consensus validity — board, band, horizon, asset class
+        # 4. consensus validity — board, band, horizon, asset class.
+        # A `payload.kind == "closers"` frame is a Closers-competition call: same
+        # signed frame, same receipt, same anchored window (nothing about HF's
+        # path or latency changes) — only the validity + rate rules differ, and
+        # it takes no HF pair lock / open-position slot (it references OUR
+        # position, it doesn't open one of the miner's).
         t0 = t_recv_ms / 1000.0
+        is_closers = str((payload or {}).get("kind", "")) == "closers"
         try:
-            hf.validate_submission(payload, t0)
-            hf.check_rate(self.sent_ms.get(hk, []), t_recv_ms, t0)
+            if is_closers:
+                closers.validate_submission(payload, t0)
+                closers.check_rate(self.closers_sent_ms.get(hk, []), t_recv_ms)
+            else:
+                hf.validate_submission(payload, t0)
+                hf.check_rate(self.sent_ms.get(hk, []), t_recv_ms, t0)
         except hf.HFRejected as e:
             return reject(str(e))
 
-        # 5. the cross-mechanism pair lock
+        # 5. the cross-mechanism pair lock (HF only — a closers call holds no pair)
         pair = str(payload["trade_pair"]).upper()  # noqa: E501
-        if hf.is_pair_locked(self.lock_index, hk, pair, hf.MECID, t_recv_ms):
+        if not is_closers and hf.is_pair_locked(self.lock_index, hk, pair, hf.MECID, t_recv_ms):
             return reject("pair_locked_other_mechanism")
 
         # 5b. the SAME-mechanism open-position gate. Refused here so the trader is
@@ -370,6 +381,14 @@ class Ingest:
         rcpt = self.sign_receipt(hk, seq, ph, t_recv_us, grid)
 
         self.last_seq[hk] = seq
+        if is_closers:
+            # Closers bookkeeping only: its own rate ledger, no pair lock, no
+            # open-call slot. The window log entry below is identical — the
+            # closers grader picks these receipts out of the same anchored logs.
+            self.closers_sent_ms.setdefault(hk, []).append(t_recv_ms)
+            w = hf.window_start_ms(t_recv_ms)
+            self.windows.setdefault(w, []).append({"submit": frame, "receipt": rcpt})
+            return rcpt
         self.sent_ms.setdefault(hk, []).append(t_recv_ms)
         self.lock_index[(hk, pair, hf.MECID)] = t_recv_ms
         # Start tracking the position this call opens. Entry is the last bus price,

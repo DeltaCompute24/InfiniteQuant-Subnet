@@ -29,7 +29,8 @@ import bittensor as bt
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from sn89_signals import hf, hf_grade, bucket, chain, config, crypto, replay, scoring
+from sn89_signals import (bucket, chain, closers, competitions, config, crypto,
+                          hf, hf_grade, replay, scoring)
 from sn89_signals.grader import PENDING, grade
 from sn89_signals.schema import Signal, ValidationError, validate
 from timelock import Timelock
@@ -116,6 +117,7 @@ class Validator:
         self._hf_locks: dict = {}      # §9.1 LF-side pair lock (published HF logs)
         self._hf_locks_at = 0.0
         self._hf_graded_at = 0.0       # last HF sync_and_grade (decoupled from weights)
+        self._closers_graded_at = 0.0  # last Closers sync_and_grade (same pattern)
 
     def _migrate(self):
         """Additive column migration for DBs created before commit_block/t0_ms."""
@@ -439,6 +441,20 @@ class Validator:
         except Exception as e:  # noqa: BLE001 — HF must never break mecid-0
             print(f"  ! HF grade skipped (mecid-0 unaffected): {e}")
 
+    def grade_closers(self):
+        """Resolve Closers calls whose horizon has elapsed — same decoupled
+        pattern as grade_hf, same isolation guarantee: a Closers hiccup never
+        disturbs LF/HF. Reads the SAME published windows the HF grader syncs
+        (closers receipts live in the same anchored logs)."""
+        if time.time() - self._closers_graded_at < HF_GRADE_EVERY_S:
+            return
+        self._closers_graded_at = time.time()
+        try:
+            cache_dir = os.path.expanduser("~/.sn89/closers-grade")
+            closers.sync_and_grade(hf.HF_PUBLIC_BASE, cache_dir, time.time())
+        except Exception as e:  # noqa: BLE001
+            print(f"  ! Closers grade skipped (LF/HF unaffected): {e}")
+
     def grade_revealed(self):
         # ── §9.1 cross-mechanism pair lock, LF side ──────────────────────────
         # The pair is only knowable once revealed, so this cannot run at ingest
@@ -658,6 +674,41 @@ class Validator:
                 "FROM referrals")]
         w = replay.weights_from_journal(sig_rows, meta, uid_by_hotkey, now,
                                         referrals=referral_rows)
+
+        # ── unified multi-competition path (competitions.py) ────────────────
+        # LF/HF/Closers each produce their own normalized vector; the blend is
+        # committed as the SINGLE mecid-0 vector. A competition that fails to
+        # compute burns its own share (never redistributed). Dark by default —
+        # config.COMBINED_WEIGHTS gates it, so mainnet is byte-identical until
+        # the coordinated flip.
+        if config.COMBINED_WEIGHTS:
+            vectors: dict = {"lf": w}
+            try:
+                vectors["hf"] = hf_grade.mecid1_weights(uid_by_hotkey, now)
+            except Exception as e:  # noqa: BLE001 — dead competition burns its share
+                print(f"  ! HF vector failed (share burns): {e}")
+                vectors["hf"] = None
+            try:
+                # "Qualified in HF or LF" = currently earning weight in either
+                # vector (excluding burn) — the closers sybil gate. Testnet
+                # disables the gate via SN89_CLOSERS_REQUIRE_QUALIFIED=0.
+                hk_by_uid = {u: h for h, u in uid_by_hotkey.items()}
+                qual = {hk_by_uid[u]
+                        for vec in (w, vectors.get("hf") or {})
+                        for u, wt in vec.items()
+                        if wt > 0 and u != config.BURN_UID and u in hk_by_uid}
+                vectors["closers"] = closers.closers_weights(
+                    uid_by_hotkey, now, qualified_hks=qual)
+            except Exception as e:  # noqa: BLE001
+                print(f"  ! Closers vector failed (share burns): {e}")
+                vectors["closers"] = None
+            w = competitions.combine(vectors, config.COMP_WEIGHTS)
+            parts = " ".join(
+                f"{k}={'∅' if vectors.get(k) is None else len([u for u, x in (vectors[k] or {}).items() if x > 0 and u != config.BURN_UID])}"
+                for k in config.COMP_WEIGHTS)
+            print(f"  ⊕ combined weights shares={config.COMP_WEIGHTS} "
+                  f"earners: {parts} burn={w.get(config.BURN_UID, 0):.3f}")
+
         uids, vals = list(w.keys()), list(w.values())
         # Every permitted signer commits the SAME vector this cycle. Advance the
         # per-tempo throttle only when at least one commit actually landed.
@@ -687,7 +738,14 @@ class Validator:
         if config.HF_MECID1_WEIGHTS:
             try:
                 from sn89_signals import hf as _hf, hf_grade as _hfg
-                hw = _hfg.mecid1_weights(uid_by_hotkey, now)
+                if config.COMBINED_WEIGHTS:
+                    # HF now pays inside the combined mecid-0 vector; mecid-1
+                    # is kept harmless (all-burn) while MechanismEmissionSplit
+                    # ramps its share to 0. Committing the HF vector here too
+                    # would DOUBLE-pay HF miners for as long as the split > 0.
+                    hw = {config.BURN_UID: 1.0}
+                else:
+                    hw = _hfg.mecid1_weights(uid_by_hotkey, now)
                 huids, hvals = list(hw.keys()), list(hw.values())
                 for sw in signers:
                     ok, msg = self.ch.set_mechanism_weights(sw, _hf.MECID_1, huids, hvals)
@@ -719,6 +777,7 @@ class Validator:
                 self.forfeit_unrevealed()
                 self.grade_revealed()
                 self.grade_hf()
+                self.grade_closers()
                 self.maybe_set_weights()
             except KeyboardInterrupt:
                 raise

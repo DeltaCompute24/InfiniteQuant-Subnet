@@ -12,7 +12,7 @@ from pathlib import Path
 # ── Network ──────────────────────────────────────────────────────────────────
 NETUID = int(os.getenv("SN89_NETUID", "89"))          # mainnet 89; override on testnet
 NETWORK = os.getenv("SN89_NETWORK", "finney")          # "test" for testnet
-TEMPO = 360
+TEMPO = int(os.getenv("SN89_TEMPO", "360"))
 
 # ── drand quicknet (CONSENSUS — same beacon MANTIS uses) ─────────────────────
 DRAND_API = "https://api.drand.sh/v2"
@@ -300,7 +300,7 @@ def hit_rate_window_trades_as_of(t0_unix: float) -> int:
 # stay importable (suffixed *_legacy) so the §8 diff script can compare them.
 CONFIDENCE_SCORING = bool(int(os.getenv("SN89_CONFIDENCE_SCORING", "1")))
 
-QUALIFY_MIN_DECISIVE = 8            # decisive (won+lost) IN THE WINDOW: a small sanity
+QUALIFY_MIN_DECISIVE = int(os.getenv("SN89_QUALIFY_MIN_DECISIVE", "8"))  # decisive (won+lost) IN THE WINDOW: a small sanity
                                     # floor only — the Wilson bound below handles small-n
                                     # itself (was 10 under the legacy raw-hit gate).
 QUALIFY_MIN_HIT = 0.55             # LEGACY raw-hit gate (CONFIDENCE_SCORING=0 path only).
@@ -395,7 +395,7 @@ EFFICIENCY_PRIOR_WASH = float(os.getenv("SN89_EFFICIENCY_PRIOR_WASH", "0.40"))
 # = the board's structural wash target. Recalibrate this whenever that target moves.
 EFFICIENCY_PRIOR_K = int(os.getenv("SN89_EFFICIENCY_PRIOR_K", "40"))
 
-IMMUNITY_S = 8 * 24 * 3600          # from first commit observed for the hotkey
+IMMUNITY_S = int(os.getenv("SN89_IMMUNITY_S", str(8 * 24 * 3600)))  # from first commit observed for the hotkey
 DUST_WEIGHT = 1e-4                  # normalized floor during immunity
 # Probation grace: a QUALIFIED miner that currently earns zero emission keeps the
 # dust floor for this long instead of dropping straight to nothing. Covers (a) a
@@ -752,6 +752,37 @@ WEIGHTS_RETRY_BLOCKS = int(os.getenv("SN89_WEIGHTS_RETRY_BLOCKS", "100"))
 # reproduces the same vector — same trust model as mecid 0. Any failure here NEVER
 # touches the mecid-0 commit (which already landed above). Flip to 0 to disable.
 HF_MECID1_WEIGHTS = os.getenv("SN89_HF_MECID1_WEIGHTS", "1") == "1"
+
+# ── Unified multi-competition weighting (competitions.py) ────────────────────
+# The chain caps a subnet at 2 mechanisms, so a third competition (Closers)
+# cannot take a mechanism slot. When COMBINED_WEIGHTS is on, the validator
+# computes each competition's OWN normalized vector (LF, HF, Closers, any
+# future fourth), blends them by COMP_WEIGHTS (normalize-then-weight — the one
+# choice that keeps specialists' payouts identical to dedicated mechanisms),
+# and commits the blend as the SINGLE mecid-0 vector; mecid-1 is then ramped to
+# 0% via MechanismEmissionSplit and eventually retired. OFF by default: mainnet
+# behavior is byte-identical until this flips, which is a coordinated,
+# announced migration (all 8 permitted validators must flip together — two
+# meanings of the same mecid in one tempo is a consensus split).
+# After the merge the split is CODE-enforced, not chain-enforced: COMP_WEIGHTS
+# is a consensus constant. Commit changes to master and announce them like a
+# band change — the journal is the only public record of the split.
+COMBINED_WEIGHTS = os.getenv("SN89_COMBINED_WEIGHTS", "0") == "1"
+COMP_WEIGHTS_SPEC = os.getenv("SN89_COMP_WEIGHTS", "lf:0.375,hf:0.375,closers:0.25")
+
+
+def _parse_comp_weights(spec: str) -> dict:
+    # inline (not competitions.parse_shares) to keep config import-order free
+    out = {}
+    for part in spec.split(","):
+        if part.strip():
+            k, _, v = part.partition(":")
+            out[k.strip()] = float(v)
+    t = sum(out.values())
+    return {k: v / t for k, v in out.items()} if t > 0 else {}
+
+
+COMP_WEIGHTS = _parse_comp_weights(COMP_WEIGHTS_SPEC)
 
 # Blob fetching is bounded so a slow or malicious host can't stall the
 # synchronous validator loop (audit #7). Each fetch has a hard wall-clock
