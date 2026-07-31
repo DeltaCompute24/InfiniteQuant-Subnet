@@ -326,8 +326,17 @@ def _mecid1_weights(decisive_by_hk, first_seen_by_hk, subs_by_hk, now):
     hf_compute_weights the validator commits. No chain call, no cache mutation —
     the scoreboard only reads; the validator remains the sole writer of on-chain
     weights. Shares normalise, so a synthetic uid map gives each hotkey its share."""
+    # Synthetic uids MUST NOT start at 0. scoring.compute_weights parks the burn
+    # residual on config.BURN_UID (0), so whichever hotkey lands in slot 0
+    # silently absorbs it — and the map is built from sorted(), so slot 0 is just
+    # "alphabetically first hotkey". Live on 2026-07-31: 5C5hiP… (@MatPod) was
+    # published at 66.7% of the HF pool, ranked #1, and accruing emissions, while
+    # being absent from the on-chain mecid-1 vector entirely. The `if qualified`
+    # gate on the row had been masking it; removing that gate (correctly, for the
+    # no-cliff design, 30f65d2) unmasked it. Offset by 1 so BURN_UID stays empty
+    # and the hk_by_uid filter below drops the burn as it was always meant to.
     hks = sorted(first_seen_by_hk)
-    uid_by_hk = {hk: i for i, hk in enumerate(hks)}
+    uid_by_hk = {hk: i + 1 for i, hk in enumerate(hks)}
     try:
         w = hf.hf_compute_weights(decisive_by_hk, first_seen_by_hk, uid_by_hk,
                                   now, subs_by_hk)
