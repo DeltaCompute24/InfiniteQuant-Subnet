@@ -285,6 +285,8 @@ def sync_and_grade(base: str, cache_dir: str, now: float) -> None:
             if not hk or key in graded:
                 continue
             p = sub.get("payload") or {}
+            if str(p.get("kind", "")) == "closers":
+                continue        # closers competition — graded by closers.py, not HF
             pair = p.get("trade_pair")
             t0_ms = rcpt.get("grid_t0_ms")
             board = hf.hf_bands_as_of(t0_ms / 1000.0) if t0_ms else None
@@ -399,7 +401,8 @@ def mecid1_weights(uid_by_hk: dict, now: float | None = None,
     single entry point — mirrors replay.weights_from_journal for mecid 0."""
     now = time.time() if now is None else now
     base = base or hf.HF_PUBLIC_BASE
-    cache_dir = cache_dir or os.path.expanduser("~/.sn89/hf-grade")
+    cache_dir = cache_dir or os.path.expanduser(
+        os.getenv("SN89_HF_GRADE_CACHE", "~/.sn89/hf-grade"))
     sync_and_grade(base, cache_dir, now)
     dec, fs, subs, graded = _history(cache_dir)
     return hf.hf_compute_weights(dec, fs, uid_by_hk, now, subs, graded)

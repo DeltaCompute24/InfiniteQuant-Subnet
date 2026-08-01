@@ -436,7 +436,8 @@ class Validator:
             return
         self._hf_graded_at = time.time()
         try:
-            cache_dir = os.path.expanduser("~/.sn89/hf-grade")
+            cache_dir = os.path.expanduser(
+                os.getenv("SN89_HF_GRADE_CACHE", "~/.sn89/hf-grade"))
             hf_grade.sync_and_grade(hf.HF_PUBLIC_BASE, cache_dir, time.time())
         except Exception as e:  # noqa: BLE001 — HF must never break mecid-0
             print(f"  ! HF grade skipped (mecid-0 unaffected): {e}")
@@ -450,7 +451,8 @@ class Validator:
             return
         self._closers_graded_at = time.time()
         try:
-            cache_dir = os.path.expanduser("~/.sn89/closers-grade")
+            cache_dir = os.path.expanduser(
+                os.getenv("SN89_CLOSERS_GRADE_CACHE", "~/.sn89/closers-grade"))
             closers.sync_and_grade(hf.HF_PUBLIC_BASE, cache_dir, time.time())
         except Exception as e:  # noqa: BLE001
             print(f"  ! Closers grade skipped (LF/HF unaffected): {e}")

@@ -292,7 +292,8 @@ def closers_weights(uid_by_hk: dict, now: float | None = None,
     Burn + the miner emission cap behave exactly as the other competitions."""
     now = time.time() if now is None else now
     base = base or hf.HF_PUBLIC_BASE
-    cache_dir = cache_dir or os.path.expanduser("~/.sn89/closers-grade")
+    cache_dir = cache_dir or os.path.expanduser(
+        os.getenv("SN89_CLOSERS_GRADE_CACHE", "~/.sn89/closers-grade"))
     sync_and_grade(base, cache_dir, now)
 
     since_ms = int((now - CLOSERS_WINDOW_S) * 1000)
