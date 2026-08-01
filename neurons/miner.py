@@ -330,6 +330,139 @@ def submit_closers(wallet: "bt.Wallet", position_id: str, action: str,
     return resp
 
 
+# ── self-hosted Closers access: token, positions feed, local limit orders ────
+PARTNER_API = os.getenv("SN89_PARTNER_API", "https://partner.infinitequant.app")
+
+
+def mint_miner_token(wallet: "bt.Wallet") -> str:
+    """Prove hotkey ownership (challenge → local sign → verify) and return an
+    sn89 miner token. Keys never leave this box; the token only READS (feed,
+    stream) and is revocable server-side."""
+    import requests
+    hk = wallet.hotkey.ss58_address
+    ch = requests.post(f"{PARTNER_API}/api/sn89/register/challenge",
+                       json={"hotkey": hk}, timeout=10).json()
+    msg = ch.get("message") or ch.get("nonce")
+    if not msg:
+        raise RuntimeError(f"challenge failed: {ch}")
+    sig = wallet.hotkey.sign(msg.encode() if isinstance(msg, str) else msg).hex()
+    v = requests.post(f"{PARTNER_API}/api/sn89/register/verify",
+                      json={"hotkey": hk, "nonce": ch.get("nonce", msg),
+                            "signature": sig}, timeout=10).json()
+    if not v.get("token"):
+        raise RuntimeError(f"verify failed: {v}")
+    return v["token"]
+
+
+def fetch_positions_feed(token: str) -> list[dict]:
+    import requests
+    r = requests.get(f"{PARTNER_API}/api/sn89/closers/positions",
+                     headers={"Authorization": f"Bearer {token}"}, timeout=10)
+    r.raise_for_status()
+    return r.json().get("positions") or []
+
+
+def cmd_positions(args) -> int:
+    """One-shot: print the network's open positions (the Closers board)."""
+    token = mint_miner_token(_wallet(args))
+    print(json.dumps(fetch_positions_feed(token), indent=2))
+    return 0
+
+
+def cmd_watch_positions(args) -> int:
+    """Hold the SSE stream open and print one JSON line per feed CHANGE —
+    pipe this into your algo for push alerts on new/closed positions:
+
+        python neurons/miner.py ... watch-positions | your_algo
+    """
+    import requests
+    token = mint_miner_token(_wallet(args))
+    url = f"{PARTNER_API}/api/sn89/closers/positions/stream"
+    while True:
+        try:
+            with requests.get(url, headers={"Authorization": f"Bearer {token}"},
+                              stream=True, timeout=(10, 90)) as r:
+                r.raise_for_status()
+                for line in r.iter_lines():
+                    if line and line.startswith(b"data:"):
+                        print(line[5:].decode().strip(), flush=True)
+        except KeyboardInterrupt:
+            return 0
+        except Exception as e:  # noqa: BLE001 — reconnect; snapshot replays
+            print(f"# stream reconnect: {e}", file=sys.stderr)
+            time.sleep(3)
+
+
+def cmd_limit(args) -> int:
+    """Self-hosted LIMIT submission — HF, LF or Closers. Watches the live
+    quote stream (our tick fan-out) and, the moment price crosses the trigger,
+    signs and submits FROM THIS BOX with your keys:
+
+        limit --kind hf --pair XAUUSD --direction LONG --trigger 4020
+        limit --kind lf --pair BTCUSD --direction SHORT --trigger 63500
+        limit --kind closers --position-id <id> --action CLOSE --trigger 62500
+
+    Side is inferred: trigger above the current price fires on >=, below on <=.
+    The order rests only while this process runs (ctrl-C cancels — nothing is
+    parked server-side, and your keys never leave the box).
+    """
+    import requests
+    w = _wallet(args)
+    kind = args.kind
+    token = mint_miner_token(w)
+    if kind == "closers":
+        pos = {str(p["id"]): p for p in fetch_positions_feed(token)}
+        p = pos.get(args.position_id)
+        if p is None:
+            print(f"unknown position {args.position_id}; open: {list(pos)[:10]}",
+                  file=sys.stderr)
+            return 1
+        pair = str(p["trade_pair"]).upper()
+    else:
+        pair = args.pair.upper()
+    trigger = float(args.trigger)
+    url = f"{PARTNER_API}/api/sn89/closers/stream?pair={pair}"
+    side = None
+    print(f"resting {kind} limit: {pair} @ {trigger} — watching live quotes…",
+          flush=True)
+    while True:
+        try:
+            with requests.get(url, headers={"Authorization": f"Bearer {token}"},
+                              stream=True, timeout=(10, 90)) as r:
+                r.raise_for_status()
+                for line in r.iter_lines():
+                    if not line or not line.startswith(b"data:"):
+                        continue
+                    d = json.loads(line[5:])
+                    px_now = d.get("price")
+                    if not px_now:
+                        continue
+                    if side is None:
+                        side = "above" if trigger > px_now else "below"
+                        print(f"  fires when price {'>=' if side == 'above' else '<='} "
+                              f"{trigger} (now {px_now})", flush=True)
+                    hit = (px_now >= trigger) if side == "above" else (px_now <= trigger)
+                    if not hit:
+                        continue
+                    print(f"  triggered @ {px_now} — submitting…", flush=True)
+                    if kind == "hf":
+                        resp = submit_hf(w, pair, args.direction)
+                    elif kind == "closers":
+                        resp = submit_closers(w, args.position_id, args.action)
+                    else:
+                        sig = build_signal(w.hotkey.ss58_address, pair,
+                                           args.direction.upper(), comment="iq-limit")
+                        resp = submit(w, sig)
+                    print(json.dumps(resp, indent=2))
+                    return 0
+        except KeyboardInterrupt:
+            print("cancelled — nothing was submitted")
+            return 0
+        except Exception as e:  # noqa: BLE001
+            print(f"# stream reconnect: {e}", file=sys.stderr)
+            time.sleep(3)
+
+
 def cmd_submit_closers(args) -> int:
     w = _wallet(args)
     try:
@@ -654,6 +787,25 @@ def main() -> int:
     pc.add_argument("position_id", help="position id from the positions feed")
     pc.add_argument("action", choices=["HOLD", "CLOSE", "hold", "close"])
     pc.set_defaults(fn=cmd_submit_closers)
+
+    pp = sub.add_parser("positions", help="print the Closers open-positions board")
+    pp.set_defaults(fn=cmd_positions)
+
+    pw = sub.add_parser("watch-positions",
+                        help="SSE-follow the positions feed; one JSON line per change")
+    pw.set_defaults(fn=cmd_watch_positions)
+
+    pl = sub.add_parser("limit",
+                        help="rest a local limit submission (hf/lf/closers); fires on trigger")
+    pl.add_argument("--kind", choices=["hf", "lf", "closers"], required=True)
+    pl.add_argument("--pair", help="board pair (hf/lf)")
+    pl.add_argument("--direction", choices=["LONG", "SHORT", "long", "short"],
+                    help="hf/lf direction")
+    pl.add_argument("--position-id", dest="position_id", help="closers position id")
+    pl.add_argument("--action", choices=["HOLD", "CLOSE", "hold", "close"],
+                    help="closers action")
+    pl.add_argument("--trigger", required=True, help="trigger price")
+    pl.set_defaults(fn=cmd_limit)
 
     pv = sub.add_parser("serve", help="run REST intake")
     pv.add_argument("--port", type=int, default=8089)
