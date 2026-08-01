@@ -264,6 +264,89 @@ def submit_hf(wallet: "bt.Wallet", pair: str, direction: str) -> dict:
     return resp
 
 
+def submit_closers(wallet: "bt.Wallet", position_id: str, action: str,
+                   positions_url: str | None = None) -> dict:
+    """Submit one Closers call (HOLD/CLOSE on a network position) and return
+    the signed receipt. Same transport and receipt as HF — one more payload
+    kind on the same ingest — so a self-hosted miner needs nothing new beyond
+    this function.
+
+    The positions feed (SN89_CLOSERS_POSITIONS_URL) is the board you vote on;
+    pair and direction are read from YOUR chosen position and embedded in the
+    payload, so the graded record is self-contained.
+    """
+    import asyncio
+    import secrets
+    import urllib.request
+    import websockets
+    from bittensor_wallet import Keypair
+    from sn89_signals import closers
+
+    action = action.upper()
+    if action not in ("HOLD", "CLOSE"):
+        raise ValueError("action must be HOLD or CLOSE")
+    url = positions_url or closers.POSITIONS_URL
+    if not url:
+        raise ValueError("set SN89_CLOSERS_POSITIONS_URL (the open-positions feed)")
+    with urllib.request.urlopen(url, timeout=10) as r:
+        doc = json.loads(r.read().decode())
+    pos = next((p for p in doc.get("positions", [])
+                if str(p.get("id")) == str(position_id)), None)
+    if pos is None:
+        ids = [str(p.get("id")) for p in doc.get("positions", [])][:10]
+        raise ValueError(f"unknown position {position_id!r}; open now: {ids}")
+
+    hk = wallet.hotkey.ss58_address
+    seq = _hf_next_seq(hk)
+    nonce = secrets.token_hex(16)
+    ts_ms = int(time.time() * 1000)
+    payload = {"kind": "closers", "position_id": str(position_id),
+               "trade_pair": str(pos["trade_pair"]).upper(),
+               "direction": str(pos["direction"]).upper(),
+               "action": action, "asset_class": ""}
+    sb = hf.submit_signing_bytes(hk, seq, nonce, payload, ts_ms)
+    frame = {"v": 1, "kind": "hf.submit", "hk": hk, "seq": seq, "nonce": nonce,
+             "ts_miner": ts_ms, "payload": payload,
+             "sig": wallet.hotkey.sign(sb).hex()}
+
+    async def _send():
+        async with websockets.connect(hf.HF_INGEST_WSS, open_timeout=20) as ws:
+            await ws.send(json.dumps(frame))
+            return json.loads(await asyncio.wait_for(ws.recv(), timeout=20))
+
+    resp = asyncio.run(_send())
+    if resp.get("kind") == "hf.receipt":
+        rb = hf.receipt_signing_bytes(resp["hk"], resp["seq"], resp["ph"],
+                                      resp["t_recv_us"], resp["grid_t0_ms"], resp["ing"])
+        try:
+            resp["verified"] = Keypair(ss58_address=hf.HF_RECEIPT_PUBKEY).verify(
+                rb, bytes.fromhex(resp["sig_owner"]))
+        except Exception:  # noqa: BLE001
+            resp["verified"] = False
+        rp = os.path.expanduser(f"~/.sn89/hf_receipts_{hk}.jsonl")
+        os.makedirs(os.path.dirname(rp), exist_ok=True)
+        with open(rp, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"submit": frame, "receipt": resp}) + "\n")
+    return resp
+
+
+def cmd_submit_closers(args) -> int:
+    w = _wallet(args)
+    try:
+        resp = submit_closers(w, args.position_id, args.action)
+    except ValueError as e:
+        print(f"INVALID: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:  # noqa: BLE001
+        print(f"SUBMIT FAILED: {e}", file=sys.stderr)
+        return 1
+    print(json.dumps(resp, indent=2))
+    if resp.get("kind") == "hf.receipt":
+        return 0
+    print(f"REFUSED: {resp.get('reason', 'unknown')}", file=sys.stderr)
+    return 1
+
+
 def cmd_submit_hf(args) -> int:
     w = _wallet(args)
     try:
@@ -565,6 +648,12 @@ def main() -> int:
     ph.add_argument("--direction", required=True,
                     choices=["LONG", "SHORT", "long", "short"])
     ph.set_defaults(fn=cmd_submit_hf)
+
+    pc = sub.add_parser("submit-closers",
+                        help="vote HOLD/CLOSE on a network open position (Closers)")
+    pc.add_argument("position_id", help="position id from the positions feed")
+    pc.add_argument("action", choices=["HOLD", "CLOSE", "hold", "close"])
+    pc.set_defaults(fn=cmd_submit_closers)
 
     pv = sub.add_parser("serve", help="run REST intake")
     pv.add_argument("--port", type=int, default=8089)

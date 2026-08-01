@@ -767,8 +767,21 @@ HF_MECID1_WEIGHTS = os.getenv("SN89_HF_MECID1_WEIGHTS", "1") == "1"
 # After the merge the split is CODE-enforced, not chain-enforced: COMP_WEIGHTS
 # is a consensus constant. Commit changes to master and announce them like a
 # band change — the journal is the only public record of the split.
+# The env flag is the TESTNET switch. The MAINNET flip is the timestamp below —
+# a committed consensus constant, so every validator that has pulled master
+# flips in the same tempo with no env coordination (an env-coordinated flip
+# would split consensus on whichever validator restarts with a stale unit
+# file). 0 = never. To launch: commit the cutover timestamp + announce, then
+# ramp MechanismEmissionSplit only after the flip is observed on all signers.
+COMBINED_WEIGHTS_FROM_UNIX = int(os.getenv("SN89_COMBINED_WEIGHTS_FROM", "0"))
 COMBINED_WEIGHTS = os.getenv("SN89_COMBINED_WEIGHTS", "0") == "1"
-COMP_WEIGHTS_SPEC = os.getenv("SN89_COMP_WEIGHTS", "lf:0.375,hf:0.375,closers:0.25")
+
+
+def combined_weights_active(now_unix: float) -> bool:
+    """Whether the unified path is live at `now` — env force (testnet) OR the
+    committed mainnet cutover has passed."""
+    return COMBINED_WEIGHTS or (
+        COMBINED_WEIGHTS_FROM_UNIX > 0 and now_unix >= COMBINED_WEIGHTS_FROM_UNIX)
 
 
 def _parse_comp_weights(spec: str) -> dict:
@@ -782,7 +795,30 @@ def _parse_comp_weights(spec: str) -> dict:
     return {k: v / t for k, v in out.items()} if t > 0 else {}
 
 
-COMP_WEIGHTS = _parse_comp_weights(COMP_WEIGHTS_SPEC)
+# Shares are AS-OF versioned like the bands: an auditor replaying an old epoch
+# must resolve the shares in force AT that epoch, not today's. Append a new
+# (effective_from_unix, spec) entry for every ramp step — never edit history.
+# The env override replaces the WHOLE history (testnet convenience only).
+COMP_WEIGHTS_HISTORY: tuple = (
+    # (0, launch-neutral): the merge ships payout-neutral — closers at 0 —
+    # so the neutral-merge soak can reconcile LF/HF payouts against the
+    # dedicated-mechanism baseline before any share moves.
+    (0, "lf:0.5,hf:0.5,closers:0.0"),
+)
+_COMP_ENV = os.getenv("SN89_COMP_WEIGHTS", "")
+if _COMP_ENV:
+    COMP_WEIGHTS_HISTORY = ((0, _COMP_ENV),)
+
+
+def comp_weights_as_of(t_unix: float) -> dict:
+    spec = COMP_WEIGHTS_HISTORY[0][1]
+    for eff, s in COMP_WEIGHTS_HISTORY:
+        if t_unix >= eff:
+            spec = s
+    return _parse_comp_weights(spec)
+
+
+COMP_WEIGHTS = comp_weights_as_of(2**62)   # current-era shares (latest entry)
 
 # Blob fetching is bounded so a slow or malicious host can't stall the
 # synchronous validator loop (audit #7). Each fetch has a hard wall-clock

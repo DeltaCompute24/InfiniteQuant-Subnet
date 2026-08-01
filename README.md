@@ -127,6 +127,28 @@ verifies the receipt against the published ingest key, and appends it to
 `~/.sn89/hf_receipts_<hotkey>.jsonl` (keep these — they are your fraud-proof). A
 strictly-increasing sequence per hotkey is tracked in `~/.sn89/hf_seq_<hotkey>.json`.
 
+### Closers — vote on the network's open positions
+
+The third competition pays for exit timing: the network publishes its OPEN
+positions (`SN89_CLOSERS_POSITIONS_URL`, JSON `{positions: [{id, trade_pair,
+direction, ...}]}`), and you submit **HOLD** (it will keep improving) or
+**CLOSE** (it will give back) on any position, whenever you choose:
+
+```bash
+# read the feed, pick a position id, vote
+python neurons/miner.py --wallet.name mywallet --wallet.hotkey miner \
+    submit-closers <position-id> CLOSE
+```
+
+Same transport and countersigned receipt as HF — one more payload kind on the
+same ingest. Grading: the vol-normalized move over the horizon after your
+call, + for HOLD if the position improved, + for CLOSE if it deteriorated,
+winsorized at ±3σ; the sum over the rolling window ranks you on the Closers
+board. Capped per UTC day; entry requires being a qualified LF or HF miner.
+USDC-quoted (Hyperliquid) positions grade against their USD spot twin's tick
+series — the alias table is committed in
+`scripts/closers_positions_publisher.py`.
+
 **HF board** (bands fixed by the board; you cannot choose them):
 
 | Pair | TP / SL | Horizon |

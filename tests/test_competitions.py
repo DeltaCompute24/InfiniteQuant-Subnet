@@ -75,3 +75,41 @@ class TestCombine:
     def test_default_shares_come_from_config(self):
         assert sum(config.COMP_WEIGHTS.values()) == pytest.approx(1.0)
         assert set(config.COMP_WEIGHTS) == {"lf", "hf", "closers"}
+
+
+class TestVersionGate:
+    def test_env_flag_forces_active(self, monkeypatch):
+        monkeypatch.setattr(config, "COMBINED_WEIGHTS", True)
+        monkeypatch.setattr(config, "COMBINED_WEIGHTS_FROM_UNIX", 0)
+        assert config.combined_weights_active(0)
+
+    def test_timestamp_gate_flips_at_cutover(self, monkeypatch):
+        # the mainnet flip: a committed timestamp, so every validator that has
+        # pulled master flips in the same tempo with no env coordination
+        monkeypatch.setattr(config, "COMBINED_WEIGHTS", False)
+        monkeypatch.setattr(config, "COMBINED_WEIGHTS_FROM_UNIX", 1_800_000_000)
+        assert not config.combined_weights_active(1_799_999_999)
+        assert config.combined_weights_active(1_800_000_000)
+
+    def test_zero_means_never(self, monkeypatch):
+        monkeypatch.setattr(config, "COMBINED_WEIGHTS", False)
+        monkeypatch.setattr(config, "COMBINED_WEIGHTS_FROM_UNIX", 0)
+        assert not config.combined_weights_active(2**40)
+
+
+class TestSharesHistory:
+    def test_as_of_resolves_the_era(self, monkeypatch):
+        monkeypatch.setattr(config, "COMP_WEIGHTS_HISTORY", (
+            (0, "lf:0.5,hf:0.5,closers:0.0"),
+            (1_800_000_000, "lf:0.375,hf:0.375,closers:0.25"),
+        ))
+        early = config.comp_weights_as_of(1_799_999_999)
+        late = config.comp_weights_as_of(1_800_000_001)
+        assert early["closers"] == 0.0
+        assert late["closers"] == 0.25
+        # an auditor replaying an old epoch gets the old shares — never today's
+
+    def test_launch_era_is_payout_neutral(self):
+        # the committed genesis entry must carry closers at 0: the merge ships
+        # neutral and the ramp is a LATER history entry, never an edit
+        assert config.comp_weights_as_of(0).get("closers", 0.0) == 0.0

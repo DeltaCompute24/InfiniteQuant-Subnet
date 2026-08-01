@@ -683,7 +683,7 @@ class Validator:
         # compute burns its own share (never redistributed). Dark by default —
         # config.COMBINED_WEIGHTS gates it, so mainnet is byte-identical until
         # the coordinated flip.
-        if config.COMBINED_WEIGHTS:
+        if config.combined_weights_active(now):
             vectors: dict = {"lf": w}
             try:
                 vectors["hf"] = hf_grade.mecid1_weights(uid_by_hotkey, now)
@@ -704,11 +704,12 @@ class Validator:
             except Exception as e:  # noqa: BLE001
                 print(f"  ! Closers vector failed (share burns): {e}")
                 vectors["closers"] = None
-            w = competitions.combine(vectors, config.COMP_WEIGHTS)
+            shares = config.comp_weights_as_of(now)
+            w = competitions.combine(vectors, shares)
             parts = " ".join(
                 f"{k}={'∅' if vectors.get(k) is None else len([u for u, x in (vectors[k] or {}).items() if x > 0 and u != config.BURN_UID])}"
-                for k in config.COMP_WEIGHTS)
-            print(f"  ⊕ combined weights shares={config.COMP_WEIGHTS} "
+                for k in shares)
+            print(f"  ⊕ combined weights shares={shares} "
                   f"earners: {parts} burn={w.get(config.BURN_UID, 0):.3f}")
 
         uids, vals = list(w.keys()), list(w.values())
@@ -740,7 +741,7 @@ class Validator:
         if config.HF_MECID1_WEIGHTS:
             try:
                 from sn89_signals import hf as _hf, hf_grade as _hfg
-                if config.COMBINED_WEIGHTS:
+                if config.combined_weights_active(now):
                     # HF now pays inside the combined mecid-0 vector; mecid-1
                     # is kept harmless (all-burn) while MechanismEmissionSplit
                     # ramps its share to 0. Committing the HF vector here too
