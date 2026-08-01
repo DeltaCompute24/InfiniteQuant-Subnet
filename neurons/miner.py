@@ -362,6 +362,37 @@ def fetch_positions_feed(token: str) -> list[dict]:
     return r.json().get("positions") or []
 
 
+def cmd_transfer_referrals(args) -> int:
+    """ONE-TIME referral-base transfer (sn89refx). Signed by THIS wallet's
+    hotkey — the ORIGINAL recruiter — it hands every referral this hotkey ever
+    committed to the destination hotkey, forever. The bridge for referrers who
+    built their base on partner traders' hotkeys before the referrer mechanism
+    existed: the trader runs this once, the base lands on the referrer's own
+    miner.
+
+    Protocol facts, not preferences:
+      * only the EARLIEST transfer from this hotkey ever counts — running it
+        again, or a second transfer to someone else, is permanently inert;
+      * non-chaining: the destination cannot re-transfer what it received;
+      * this hotkey's referrer score drops to zero the moment it lands.
+    """
+    w = _wallet(args)
+    to = args.to.strip()
+    if to == w.hotkey.ss58_address:
+        print("REFUSED: destination is this same hotkey", file=sys.stderr)
+        return 1
+    print(f"About to transfer THIS HOTKEY'S ENTIRE REFERRAL BASE, one time, "
+          f"irreversibly:\n  from  {w.hotkey.ss58_address}\n  to    {to}\n")
+    if input("Type the destination's last 6 characters to confirm: ").strip() != to[-6:]:
+        print("confirmation mismatch — nothing committed", file=sys.stderr)
+        return 1
+    ch = chain.Chain()
+    ok = ch.commit_referral_transfer(w, to)
+    print("transfer committed on-chain — it takes effect at the validator's "
+          "next weight cycle" if ok else "COMMIT FAILED — nothing transferred")
+    return 0 if ok else 1
+
+
 def cmd_positions(args) -> int:
     """One-shot: print the network's open positions (the Closers board)."""
     token = mint_miner_token(_wallet(args))
@@ -834,6 +865,12 @@ def main() -> int:
                              "registers (both earn a bonus once both are earning)")
     pr.add_argument("recruit", help="the recruit's hotkey ss58 (NOT yet registered)")
     pr.set_defaults(fn=cmd_refer)
+
+    pt = sub.add_parser("transfer-referrals",
+                        help="ONE-TIME: move every referral this hotkey committed "
+                             "onto another hotkey (the referrer's own miner)")
+    pt.add_argument("--to", required=True, help="destination hotkey ss58")
+    pt.set_defaults(fn=cmd_transfer_referrals)
 
     args = p.parse_args()
     return args.fn(args)

@@ -774,6 +774,17 @@ HF_MECID1_WEIGHTS = os.getenv("SN89_HF_MECID1_WEIGHTS", "1") == "1"
 # file). 0 = never. To launch: commit the cutover timestamp + announce, then
 # ramp MechanismEmissionSplit only after the flip is observed on all signers.
 COMBINED_WEIGHTS_FROM_UNIX = int(os.getenv("SN89_COMBINED_WEIGHTS_FROM", "0"))
+
+# ── Referrer mechanism on mecid-1 (§ referrer) ───────────────────────────────
+# When armed (and the combined path is active), the freed mecid-1 slot pays a
+# REFERRER CLASS instead of parking all-burn: score = Σ recruits' decayed
+# qualified-win tallies (after one-time sn89refx base transfers), pool split
+# pro-rata, field capped like every competition. Referrers need a UID
+# (registration = sybil cost) but never need to trade. Arming this also
+# RETIRES the in-band 20% recruiter bonus inside mecid-0 (the recruit's own
+# 10% entry bonus stays — it is a trader incentive, not a referrer one);
+# MechanismEmissionSplit then sets the combined/referrer emission ratio.
+REFERRER_MECID1 = os.getenv("SN89_REFERRER_MECID1", "0") == "1"
 COMBINED_WEIGHTS = os.getenv("SN89_COMBINED_WEIGHTS", "0") == "1"
 
 

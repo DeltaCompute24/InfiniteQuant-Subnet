@@ -425,6 +425,74 @@ def valid_referral_pairs(referrals: list[dict]) -> list[tuple[str, str]]:
     return sorted(pairs)
 
 
+def apply_referral_transfers(pairs: list[tuple[str, str]],
+                             transfers: list[dict]) -> list[tuple[str, str]]:
+    """Remap referral pairs through journaled sn89refx transfers (§ referrer
+    mechanism). Deterministic and deliberately narrow:
+
+      * ONE transfer per original recruiter hotkey — the earliest commit_block
+        wins (to_hk as the same-block tiebreak); every later transfer from
+        that hotkey is inert forever. This is the "can only be done once for
+        each referral hotkey" rule, enforced at replay so no validator state
+        can drift it.
+      * NON-CHAINING: the remap is a single pass over the ORIGINAL pairs. If
+        A→B and B→C, A's recruits land on B and stay there — B's transfer
+        moves only referrals B itself committed. Chains would let a stolen
+        hotkey re-route someone else's transferred base.
+      * self-transfers are inert.
+
+    transfers: [{from_hk, to_hk, commit_block}] as journaled (raw facts; this
+    function IS the validity filter, mirroring valid_referral_pairs).
+    """
+    best: dict[str, tuple[int, str]] = {}
+    for t in transfers or []:
+        frm, to, cb = t.get("from_hk"), t.get("to_hk"), t.get("commit_block")
+        if not frm or not to or frm == to or cb is None:
+            continue
+        cand = (int(cb), to)
+        if frm not in best or cand < best[frm]:
+            best[frm] = cand
+    remap = {frm: to for frm, (_, to) in best.items()}
+    return sorted((remap.get(recruiter, recruiter), recruit)
+                  for recruiter, recruit in pairs)
+
+
+def referrer_scores(pairs: list[tuple[str, str]],
+                    tally_by_hk: dict[str, float]) -> dict[str, float]:
+    """§ referrer mechanism: score[recruiter] = Σ recruit tallies. The tally is
+    the recruit's decayed qualified-win tally — the same currency that sizes
+    the recruit's own emission — so a referrer earns exactly in proportion to
+    how much their recruits are currently earning. A recruiter whose recruits
+    are all cold scores 0 (no floor: the mechanism pays performance of the
+    base, not its size)."""
+    scores: dict[str, float] = {}
+    for recruiter, recruit in pairs:
+        t = float(tally_by_hk.get(recruit, 0.0))
+        if t > 0:
+            scores[recruiter] = scores.get(recruiter, 0.0) + t
+    return scores
+
+
+def referrer_weights(scores: dict[str, float], uid_by_hk: dict[str, int],
+                     burn_uid: int | None = None) -> dict[int, float]:
+    """{uid: weight} for the referrer mechanism (mecid 1). Pro-rata by score,
+    field capped at MINER_EMISSION_CAP like every other competition, remainder
+    burns. A referrer only earns if their hotkey holds a UID — registration is
+    the sybil cost of joining the referrer class; no trading required."""
+    burn_uid = config.BURN_UID if burn_uid is None else burn_uid
+    weights: dict[int, float] = {}
+    pool = sum(v for hk, v in scores.items() if uid_by_hk.get(hk) is not None)
+    cap = config.MINER_EMISSION_CAP
+    if pool > 0:
+        for hk, v in scores.items():
+            uid = uid_by_hk.get(hk)
+            if uid is not None and v > 0:
+                weights[uid] = weights.get(uid, 0.0) + cap * (v / pool)
+    weights[burn_uid] = weights.get(burn_uid, 0.0) + max(0.0, 1.0 - sum(weights.values()))
+    total = sum(weights.values())
+    return {u: w / total for u, w in weights.items()} if total > 0 else {burn_uid: 1.0}
+
+
 def referral_pair_suspended_until(pair_rows: list[GradedRow], hk_a: str, hk_b: str,
                                   now_unix: float) -> float | None:
     """Pair-scoped no-copy gate: the unix time until which the (hk_a, hk_b)
@@ -650,7 +718,12 @@ def compute_weights(states: list[MinerState], now_unix: float,
             if base[recruiter] <= 0 or base[recruit] <= 0:
                 continue                        # mutual-conditional: both must be earning
             bonus[recruit] += config.REFERRAL_RECRUIT_BONUS * base[recruit]
-            per_recruiter[recruiter] += config.REFERRAL_RECRUITER_BONUS * base[recruit]
+            # § referrer mechanism: once mecid-1 pays referrers directly, the
+            # in-band 20% recruiter share-shift retires (double-paying the same
+            # referral from two pools). The recruit's own bonus above stays —
+            # it is a trader-entry incentive, not a referrer reward.
+            if not config.REFERRER_MECID1:
+                per_recruiter[recruiter] += config.REFERRAL_RECRUITER_BONUS * base[recruit]
         for hk, b in per_recruiter.items():
             bonus[hk] += min(b, config.REFERRAL_MAX_X * base[hk])
 

@@ -147,3 +147,53 @@ def weights_from_journal(
 
     return scoring.compute_weights(states, now, excluded_uids=excluded_uids,
                                    referral_pairs=referral_pairs)
+
+
+def referrer_weights_from_journal(
+    signals: list[dict],
+    meta: dict[str, dict],
+    uid_by_hotkey: dict[str, int],
+    now: float,
+    referrals: list[dict] | None = None,
+    referral_transfers: list[dict] | None = None,
+) -> dict[int, float]:
+    """§ referrer mechanism (mecid 1) — PURE rebuild, the auditor's mirror of
+    the validator's referrer vector. Pipeline:
+
+        valid_referral_pairs (same gate as the in-band bonus era)
+          → apply_referral_transfers (one-time sn89refx remaps)
+          → recruit tallies (decayed qualified wins — the recruit's own
+            emission currency, rebuilt from the journal)
+          → referrer_scores → referrer_weights (cap + burn)
+
+    Copy forensics and habitual-copier stripping are deliberately NOT applied
+    to the recruit tallies here: the referrer score is a read on the recruit's
+    RAW qualified performance, and re-running the copy pipeline per mechanism
+    would double the heaviest part of replay for a second-order effect. If a
+    copier gets zeroed on mecid-0, their tally still decays to nothing within
+    the decay window — the referrer's score follows with the same lag.
+    """
+    pairs = scoring.valid_referral_pairs(referrals or [])
+    pairs = scoring.apply_referral_transfers(pairs, referral_transfers or [])
+    if not pairs:
+        return {config.BURN_UID: 1.0}
+
+    recruit_hks = {recruit for _, recruit in pairs}
+    tally_by_hk: dict[str, float] = {}
+    for hk in recruit_hks:
+        m = meta.get(hk)
+        if m is None:
+            continue
+        decisive = [(s["t0_unix"], s["status"] == "won", bool(s.get("is_copy", 0)))
+                    for s in signals
+                    if s["hotkey"] == hk and s["status"] in ("won", "lost")]
+        if not decisive:
+            continue
+        graded = [(s["t0_unix"], s["status"] == "washed") for s in signals
+                  if s["hotkey"] == hk and s["status"] in ("won", "lost", "washed")]
+        qwins = scoring.qualified_wins(decisive, m["first_seen_unix"],
+                                       habitual=False, graded=graded)
+        tally_by_hk[hk] = scoring.decayed_qwin_tally(qwins, now)
+
+    scores = scoring.referrer_scores(pairs, tally_by_hk)
+    return scoring.referrer_weights(scores, uid_by_hotkey)

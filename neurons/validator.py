@@ -85,6 +85,14 @@ CREATE TABLE IF NOT EXISTS referrals (
   recruit_reg_block INTEGER,           -- filled ONCE at first metagraph sighting; never updated
   PRIMARY KEY (recruiter_hk, recruit_hk)
 );
+CREATE TABLE IF NOT EXISTS referral_transfers (
+  from_hk          TEXT NOT NULL,     -- ORIGINAL recruiter (the signer)
+  to_hk            TEXT NOT NULL,     -- referrer's own hotkey
+  commit_block     INTEGER NOT NULL,  -- consensus-exact inclusion block
+  first_seen_block INTEGER NOT NULL,
+  observed_unix    REAL NOT NULL,
+  PRIMARY KEY (from_hk, to_hk)
+);
 CREATE TABLE IF NOT EXISTS copier_flags (
   follower      TEXT NOT NULL,
   leader        TEXT NOT NULL,
@@ -185,6 +193,24 @@ class Validator:
             print(f"  ⊕ referral {recruiter[:8]}… → {recruit[:8]}… "
                   f"commit_block={c.get('commit_block') or block}")
 
+    def _journal_referral_transfer(self, c: dict, block: int, now: float):
+        """Journal one observed sn89refx referral-base transfer. Raw facts only
+        — INSERT OR IGNORE on (from, to) keeps the first-observed commit_block;
+        which single transfer per from_hk actually COUNTS (earliest block, once
+        ever, non-chaining) is re-derived at replay by
+        scoring.apply_referral_transfers, so validator state cannot drift it."""
+        frm, to = c["hotkey"], c["to"]
+        if frm == to:
+            print(f"  ✗ referral transfer rejected {frm[:8]}…: self-transfer")
+            return
+        cur = self.db.execute(
+            "INSERT OR IGNORE INTO referral_transfers (from_hk, to_hk, "
+            "commit_block, first_seen_block, observed_unix) VALUES (?,?,?,?,?)",
+            (frm, to, int(c.get("commit_block") or block), block, now))
+        if cur.rowcount:
+            print(f"  ⇄ referral base transfer {frm[:8]}… → {to[:8]}… "
+                  f"commit_block={c.get('commit_block') or block}")
+
     def refresh_referrals(self, mg):
         """Fill recruit_reg_block ONCE at the recruit's first metagraph sighting.
 
@@ -237,6 +263,8 @@ class Validator:
         for c in sources:
             if c.get("kind") == "referral":
                 self._journal_referral(c, block, now)
+            elif c.get("kind") == "referral_transfer":
+                self._journal_referral_transfer(c, block, now)
             else:
                 self._journal_commit(c, block, now)
         self.db.commit()
@@ -742,11 +770,22 @@ class Validator:
             try:
                 from sn89_signals import hf as _hf, hf_grade as _hfg
                 if config.combined_weights_active(now):
-                    # HF now pays inside the combined mecid-0 vector; mecid-1
-                    # is kept harmless (all-burn) while MechanismEmissionSplit
-                    # ramps its share to 0. Committing the HF vector here too
-                    # would DOUBLE-pay HF miners for as long as the split > 0.
-                    hw = {config.BURN_UID: 1.0}
+                    if config.REFERRER_MECID1:
+                        # § referrer mechanism: the freed slot pays the
+                        # referrer class — pure replay, same trust model.
+                        transfer_rows = [
+                            {"from_hk": f, "to_hk": t, "commit_block": cb}
+                            for f, t, cb in self.db.execute(
+                                "SELECT from_hk, to_hk, commit_block "
+                                "FROM referral_transfers")]
+                        hw = replay.referrer_weights_from_journal(
+                            sig_rows, meta, uid_by_hotkey, now,
+                            referrals=referral_rows,
+                            referral_transfers=transfer_rows)
+                    else:
+                        # merge-era parking: all-burn while the split ramps.
+                        # Committing the HF vector here would DOUBLE-pay HF.
+                        hw = {config.BURN_UID: 1.0}
                 else:
                     hw = _hfg.mecid1_weights(uid_by_hotkey, now)
                 huids, hvals = list(hw.keys()), list(hw.values())

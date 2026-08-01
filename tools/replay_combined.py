@@ -111,6 +111,33 @@ def main() -> None:
     blend = competitions.combine(vectors, shares)
     print(f"\nBLEND    {fmt(blend, config.BURN_UID)}")
 
+    if config.REFERRER_MECID1:
+        import sqlite3 as _sq
+        dbc = _sq.connect(f"file:{os.path.expanduser(a.db)}?mode=ro", uri=True)
+        referral_rows = [
+            {"recruiter_hk": r, "recruit_hk": c, "commit_block": cb,
+             "recruit_reg_block": rb}
+            for r, c, cb, rb in dbc.execute(
+                "SELECT recruiter_hk, recruit_hk, commit_block, recruit_reg_block "
+                "FROM referrals")]
+        transfer_rows = [
+            {"from_hk": f, "to_hk": t, "commit_block": cb}
+            for f, t, cb in dbc.execute(
+                "SELECT from_hk, to_hk, commit_block FROM referral_transfers")]
+        sig_rows2, meta2 = [], {}
+        for ch_, hk, t0, st_, cp, pt in dbc.execute(
+                "SELECT commit_hex, hotkey, t0_unix, status, is_copy, plaintext FROM signals"):
+            sig_rows2.append({"commit_hex": ch_, "hotkey": hk, "t0_unix": t0,
+                              "status": st_, "is_copy": int(cp or 0), "plaintext": pt})
+        for hk, fs, sk in dbc.execute(
+                "SELECT hotkey, first_seen_unix, strikes FROM hotkey_meta"):
+            meta2[hk] = {"first_seen_unix": fs, "strikes": int(sk or 0)}
+        dbc.close()
+        rw = replay.referrer_weights_from_journal(
+            sig_rows2, meta2, uid_by_hotkey, now,
+            referrals=referral_rows, referral_transfers=transfer_rows)
+        print(f"MECID-1 (referrers) {fmt(rw, config.BURN_UID)}")
+
     if a.compare:
         # On-chain weights for the highest-stake validator uid (the signer),
         # straight from Weights storage — the metagraph's W is empty on a lite

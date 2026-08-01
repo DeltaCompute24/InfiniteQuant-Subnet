@@ -35,6 +35,17 @@ _REF_PREFIX = "sn89ref"
 _REF_V = 1
 _REF_RE = re.compile(rf"^{_REF_PREFIX}:(\d+):(5[1-9A-HJ-NP-Za-km-z]{{46,50}})$")
 
+# Referral-base TRANSFER (§ referrer mechanism): the ORIGINAL recruiter hotkey
+# commits "sn89refx:1:<new_recruiter_ss58>" to hand its whole referral base to
+# the referrer's own hotkey (the Rilwan case: recruits were committed under
+# partner traders' hotkeys before referrers had a home). ONE-TIME per original
+# hotkey — the earliest-block transfer wins, everything later is inert — and
+# non-chaining: a transfer moves only referrals the SIGNER originally
+# committed, never ones it received via transfer.
+_REFX_PREFIX = "sn89refx"
+_REFX_V = 1
+_REFX_RE = re.compile(rf"^{_REFX_PREFIX}:(\d+):(5[1-9A-HJ-NP-Za-km-z]{{46,50}})$")
+
 
 def url_tag(url: str) -> str:
     return hashlib.sha256(url.encode()).hexdigest()[:16]
@@ -87,6 +98,27 @@ def decode_referral(data: str) -> dict | None:
     return {"recruit": recruit}
 
 
+def encode_referral_transfer(to_ss58: str) -> str:
+    return f"{_REFX_PREFIX}:{_REFX_V}:{to_ss58}"
+
+
+def decode_referral_transfer(data: str) -> dict | None:
+    """Decode an sn89refx transfer commitment, or None. Same ss58 checksum
+    discipline as referrals — a typo'd destination is dropped, not journaled."""
+    m = _REFX_RE.match((data or "").strip())
+    if not m:
+        return None
+    v, to = m.groups()
+    if int(v) != _REFX_V:
+        return None
+    try:
+        from scalecodec.utils.ss58 import ss58_decode
+        ss58_decode(to)
+    except Exception:  # noqa: BLE001
+        return None
+    return {"to": to}
+
+
 def _decode_any(data: str | None) -> dict | None:
     """Decode a commitment payload of either kind. Signal entries keep their
     exact legacy shape plus kind="signal" (existing consumers ignore unknown
@@ -101,6 +133,10 @@ def _decode_any(data: str | None) -> dict | None:
     if ref:
         ref["kind"] = "referral"
         return ref
+    refx = decode_referral_transfer(data)
+    if refx:
+        refx["kind"] = "referral_transfer"
+        return refx
     return None
 
 
@@ -220,6 +256,13 @@ class Chain:
         # inclusion is sufficient — entry T0 = the inclusion block (docs/entry-timing.md
         # §2.1). Returning at inclusion (~1 block) instead of finalization (~2 blocks)
         # unblocks the per-tenant commit loop, cutting cross-tenant serialization latency.
+        return self.st.set_commitment(wallet=wallet, netuid=self.netuid, data=data,
+                                      wait_for_finalization=False)
+
+    def commit_referral_transfer(self, wallet: "bt.Wallet", to_ss58: str) -> bool:
+        """One-time referral-base transfer commitment (sn89refx). IRREVERSIBLE
+        by protocol: only the earliest transfer from this hotkey ever counts."""
+        data = encode_referral_transfer(to_ss58)
         return self.st.set_commitment(wallet=wallet, netuid=self.netuid, data=data,
                                       wait_for_finalization=False)
 
