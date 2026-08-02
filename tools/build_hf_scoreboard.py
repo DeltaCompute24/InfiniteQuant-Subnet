@@ -540,6 +540,26 @@ def _ago(days: float) -> str:
     return f"{int(days)}d ago"
 
 
+# How many of a hotkey's own HF calls the board carries. This is the ONLY
+# per-miner HF history that exists anywhere: the grade cache holds a verdict with
+# no direction, the published receipts hold a direction with no verdict, and the
+# private /me/hf-calls endpoint shows in-flight calls only — so a 30-minute call
+# is invisible minutes after it fires. Cap matches the LF board's RECENT_CALLS_CAP
+# in spirit; HF runs ~10x the cadence, so it is larger.
+HF_RECENT_CALLS_CAP = int(os.getenv("SN89_HF_RECENT_CALLS_CAP", "60"))
+
+
+def _recent_calls(entries: list) -> list:
+    """A hotkey's own newest HF calls, every status, newest first.
+
+    Shaped like the LF `calls` rows the miner page already renders (t0_unix /
+    trade_pair / direction / status / outcome_bps), plus the HF-only fields a
+    trader needs to read the result: the band it was graded against and how far
+    the path ran either way.
+    """
+    return sorted(entries, key=lambda e: e["t0_unix"] or 0, reverse=True)[:HF_RECENT_CALLS_CAP]
+
+
 def _win_ledger(v: dict | None, calls_by_t0: dict, paths: dict, now: float) -> list:
     """The drawer's 'wins & their live value' — each recent win, the × it banked,
     and how much of that value is left after HF's linear emission decay."""
@@ -714,6 +734,7 @@ def main() -> int:
     assets_by: dict = {}      # hk -> {pair -> AssetRow-shaped dict}
     excur: dict = {}          # hk -> {"r": [...], "mfe": [...], "mae": [...]}
     calls_by_t0: dict = {}    # hk -> {t0_unix -> call}, for the win ledger
+    recent_by_hk: dict = {}   # hk -> [call rows], for the miner page's HF history
     for (hk, seq), c in calls.items():
         if hk not in registered:
             continue
@@ -760,6 +781,28 @@ def main() -> int:
         # else: a resolved 'void' (no valid price at the grid point) — a real
         # submission (counted in n/longs/shorts) but neither decisive, wash, nor
         # pending. Falls through so it never inflates the pending count.
+
+        # the miner's own call history. Built for EVERY status including void and
+        # pending: a trader chasing "where did my call go" is asking about exactly
+        # the rows an outcome-only view drops.
+        t0_unix = int(c["grid_t0_ms"]) / 1000.0 if c.get("grid_t0_ms") else None
+        band = (hf.hf_bands_as_of(t0_unix) or {}).get(pair) if t0_unix else None
+        p = paths.get(key) or {}
+        recent_by_hk.setdefault(hk, []).append({
+            "seq": seq,
+            "t0_unix": t0_unix,
+            "trade_pair": c.get("pair"),
+            "asset_class": c.get("asset_class"),
+            "direction": c.get("direction"),
+            "status": {"wash": "washed", None: "pending"}.get(st, st),
+            "outcome_bps": round(p["out_bps"]) if p.get("out_bps") is not None else None,
+            "entry_price": p.get("entry"),
+            "mfe_bps": p.get("mfe_bps"),
+            "mae_bps": p.get("mae_bps"),
+            "tp_bps": round(float(band[0])) if band else None,
+            "sl_bps": round(float(band[1])) if band else None,
+            "horizon_s": int(band[2]) if band else None,
+        })
 
     # cadence strip + the subnet-level network block, both from the LF builder
     con = _signals_view(calls, grades, held_by_key, paths, registered)
@@ -847,6 +890,8 @@ def main() -> int:
             "raw_hit_pct": (v or {}).get("raw_hit_pct"),
             "tier_raw": tier,
             "wins": _win_ledger(v, calls_by_t0.get(hk) or {}, paths, now),
+            # the miner's own HF calls, every status — the per-miner page reads this
+            "recent_calls": _recent_calls(recent_by_hk.get(hk) or []),
             # HF has no seal/reveal timelock (instant receipts), so nothing is ever
             # "sealed awaiting reveal" — washes live in the per-pair breakdown.
             "sn89_won": won, "sn89_lost": lost, "sn89_sealed": 0,
