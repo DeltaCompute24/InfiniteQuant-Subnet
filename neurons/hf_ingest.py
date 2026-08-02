@@ -66,6 +66,23 @@ TICK_POLL_MS = int(os.getenv("SN89_HF_INGEST_TICK_POLL_MS", "250"))
 # refuse legal re-entry for a whole horizon. Past this the gate FAILS OPEN: a bad
 # accept is voided by the grader, a bad refusal is a trade the trader never gets.
 TICK_STALE_MS = int(os.getenv("SN89_HF_INGEST_TICK_STALE_MS", "30000"))
+# Refusals were signed and returned and then FORGOTTEN. A refused call left no
+# trace anywhere on this side, so a trader asking "where did my call go" could not
+# be answered from any artifact we hold: Canefis submitted seq 2->39 on 2026-07-31
+# and 14 of them simply did not exist server-side. Worse, a signed rejection is
+# still an HTTP 200, so a client that logs success off the status code prints
+# "true" for a refused call -- which is exactly what he saw.
+#
+# DELIBERATELY A SUBDIRECTORY, and deliberately not part of the anchor. A refusal
+# is not a submission: it never had a grid t0, it is not in the Merkle root, and
+# nothing replays it. Both consumers of the accepted stream glob LOG_DIR/*.jsonl
+# NON-recursively (hf_anchor._pending, build_hf_scoreboard._accepted_calls), so a
+# subdir is invisible to them and this cannot leak into consensus. Do not flatten
+# it into LOG_DIR.
+REJECT_DIR = Path(os.getenv("SN89_HF_REJECT_DIR", str(LOG_DIR / "rejects")))
+# Long enough that a trader can still ask about last week; the board only reads
+# the newest few per hotkey.
+REJECT_RETAIN_S = int(os.getenv("SN89_HF_REJECT_RETAIN_S", str(30 * 86400)))
 
 _state: dict = {"seq": {}, "sent": {}, "windows": {}}
 
@@ -81,6 +98,13 @@ class Ingest:
     _subtensor = None
     _pruned_at = 0.0
     _tick_ok_at = 0.0
+    # None = do not persist refusals. The test helpers build an Ingest via
+    # object.__new__ and drive handle() directly, and with the module constant as
+    # the default every suite run appended live-looking refusals from throwaway
+    # keypairs into the production reject log — four of them on the first run.
+    # __init__ sets the real path; a test that wants to exercise persistence sets
+    # its own tmp dir (test_reject_log_persists_a_refusal does).
+    _reject_dir = None
 
     def __init__(self, receipt_kp: Keypair):
         self.kp = receipt_kp
@@ -102,6 +126,7 @@ class Ingest:
         self._reg_loaded_at = 0.0
         self._subtensor = None                      # reused across refreshes — see _conn()
         self._pruned_at = 0.0
+        self._reject_dir = REJECT_DIR
         LOG_DIR.mkdir(parents=True, exist_ok=True)
         self.refresh_mech0_locks()
         if REQUIRE_REGISTERED and not self.refresh_registered():
@@ -195,10 +220,12 @@ class Ingest:
                 self.open_calls[k] = kept
             else:
                 del self.open_calls[k]
-        if dropped or stale or shut:
+        rej = self.prune_rejects()
+        if dropped or stale or shut or rej:
             _log(f"prune: sent_ms -{dropped} ts, lock_index -{len(stale)} keys, "
                  f"open_calls -{shut} (now {len(self.sent_ms)} hk / "
-                 f"{len(self.lock_index)} locks / {len(self.open_calls)} held pairs)")
+                 f"{len(self.lock_index)} locks / {len(self.open_calls)} held pairs), "
+                 f"reject logs -{rej}")
         self._pruned_at = time.time()
 
     # ── tick tail (feeds the open-position gate) ─────────────────────────────
@@ -295,6 +322,57 @@ class Ingest:
                 "t_recv_us": t_recv_us, "ing": ING_ID,
                 "sig_owner": self.kp.sign(rb).hex()}
 
+    def record_rejection(self, rej: dict, frame: dict) -> None:
+        """Append a signed refusal to the (unanchored) reject log. Never raises.
+
+        The hot path is sub-second and this runs inside it, so it is one buffered
+        append and no fsync: losing the tail of a reject log on a hard kill costs
+        a display row, while an exception here would turn a refusal into a dropped
+        connection. Carries the payload so the page can say WHICH call was refused
+        -- `reason` alone reads as a system error rather than a decision about the
+        XRPUSD SHORT the trader just sent.
+        """
+        if self._reject_dir is None:
+            return
+        try:
+            p = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
+            d = Path(self._reject_dir)
+            d.mkdir(parents=True, exist_ok=True)
+            w = hf.window_start_ms(rej["t_recv_us"] // 1000)
+            row = {
+                # `comp` is which COMPETITION the frame was for: the outer frame
+                # kind is always "hf.submit", and a Closers call is distinguished
+                # only by payload.kind (see handle). Without this the HF table
+                # would list refused Closers votes as refused HF calls.
+                "kind": frame.get("kind"), "comp": p.get("kind") or "hf",
+                "hk": rej["hk"], "seq": rej["seq"],
+                "reason": rej["reason"], "t_recv_us": rej["t_recv_us"],
+                "ing": rej["ing"], "sig_owner": rej["sig_owner"],
+                "payload": {k: p.get(k) for k in
+                            ("trade_pair", "direction", "asset_class", "tp_bps",
+                             "sl_bps", "horizon_s")} if p else None,
+            }
+            with open(d / f"{w}.jsonl", "a") as f:
+                f.write(json.dumps(row, separators=(",", ":")) + "\n")
+        except Exception as e:                                   # noqa: BLE001
+            _log(f"reject log write failed ({rej.get('reason')}): {e}")
+
+    def prune_rejects(self) -> int:
+        """Drop reject-log windows past REJECT_RETAIN_S. Unbounded otherwise —
+        a miner in a refusal loop writes one line per submit, forever."""
+        if self._reject_dir is None:
+            return 0
+        cut = int((time.time() - REJECT_RETAIN_S) * 1000)
+        n = 0
+        try:
+            for p in Path(self._reject_dir).glob("*.jsonl"):
+                if p.stem.isdigit() and int(p.stem) < cut:
+                    p.unlink()
+                    n += 1
+        except OSError as e:
+            _log(f"reject prune failed: {e}")
+        return n
+
     # ── the hot path ─────────────────────────────────────────────────────────
     def handle(self, frame: dict) -> dict:
         t_recv_us = time.time_ns() // 1000
@@ -303,7 +381,9 @@ class Ingest:
         seq = int(frame.get("seq", -1))
 
         def reject(reason):
-            return self.sign_rejection(hk, seq, reason, t_recv_us)
+            rej = self.sign_rejection(hk, seq, reason, t_recv_us)
+            self.record_rejection(rej, frame)
+            return rej
 
         try:
             nonce = str(frame["nonce"])

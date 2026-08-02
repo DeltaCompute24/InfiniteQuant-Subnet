@@ -225,6 +225,50 @@ def _accepted_calls() -> dict:
     return calls
 
 
+REJECT_DIR = os.getenv("SN89_HF_REJECT_DIR", os.path.join(LOG_DIR, "rejects"))
+
+
+def _refusals() -> dict:
+    """hk -> [refused submissions], newest first, from the ingest reject log.
+
+    Kept OUT of `leaderboard` rows on purpose. A refusal is not a call: it has no
+    grid t0, no grade and no path, it must never touch a hit rate or the pace
+    strip, and a hotkey whose every submission was refused must not appear on the
+    public board as a trader. It rides as a separate top-level map so the
+    per-miner page can answer "where did my call go" for ANY hotkey, including one
+    with no board row at all — which is precisely the new miner most likely to be
+    getting refused.
+    """
+    out: dict = {}
+    for f in glob.glob(os.path.join(REJECT_DIR, "*.jsonl")):
+        if not Path(f).stem.isdigit():
+            continue
+        try:
+            for line in open(f, encoding="utf-8"):
+                if not line.strip():
+                    continue
+                r = json.loads(line)
+                hk = r.get("hk")
+                if not hk:
+                    continue
+                p = r.get("payload") or {}
+                out.setdefault(hk, []).append({
+                    "seq": r.get("seq"),
+                    "t_unix": (r.get("t_recv_us") or 0) / 1e6,
+                    "comp": r.get("comp") or "hf",     # "hf" | "closers"
+                    "reason": r.get("reason"),
+                    "trade_pair": p.get("trade_pair"),
+                    "direction": p.get("direction"),
+                    "asset_class": p.get("asset_class"),
+                })
+        except (OSError, ValueError):
+            continue
+    for hk in out:
+        out[hk] = sorted(out[hk], key=lambda r: r["t_unix"],
+                         reverse=True)[:HF_RECENT_CALLS_CAP]
+    return out
+
+
 def _grades():
     """Returns (status_by_key, rows, held_by_key) from the first readable grade
     cache: status_by_key = {'hk:seq': status}; rows = [(hk, t0_ms, status), ...];
@@ -947,6 +991,9 @@ def main() -> int:
         # linear emission decay for the win ledger — 48h on HF, 7d on LF
         "win_decay_days": round(hf.HF_EMISSION_DECAY_S / 86400.0, 2),
         "leaderboard": rows,
+        # refused submissions, keyed by hotkey and OUTSIDE the leaderboard — read
+        # by the per-miner page only. See _refusals for why they are not rows.
+        "refusals": _refusals(),
     }
     tmp = OUT + ".tmp"
     Path(tmp).write_text(json.dumps(doc, separators=(",", ":")))

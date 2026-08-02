@@ -1444,3 +1444,113 @@ class TestTouchTicksLF:
         monkeypatch.setattr(hf_grade, "_ticks_for", lambda *a, **k: (ticks, [self.T0]))
         past = self.DONE + hf_grade.GRADE_ABANDON_S * 1000 + 1
         assert grader.grade(self._sig(), self.T0, past).status == grader.WASHED
+
+
+class TestRejectLog:
+    """A refusal was signed, returned, and forgotten. Nothing on our side recorded
+    it, so a trader asking "where did my call go" could not be answered from any
+    artifact we hold — 14 of Canefis's 39 seqs on 2026-07-31 had no server-side
+    existence at all. The reject log is that record.
+
+    The first version of this defaulted `_reject_dir` to the module constant, and
+    the suite promptly wrote four throwaway-keypair refusals into the PRODUCTION
+    log at /var/lib/sn89-hf/rejects. Hence the None default and this test setting
+    its own path: persistence has to be exercised somewhere, just not there.
+    """
+
+    def _ingest(self, tmp_path, registered=frozenset()):
+        import importlib
+        from bittensor_wallet import Keypair
+        hi = importlib.import_module("neurons.hf_ingest")
+        ing = object.__new__(hi.Ingest)
+        ing.kp = Keypair.create_from_uri("//RejectLogKey")
+        ing.last_seq, ing.sent_ms, ing.windows = {}, {}, {}
+        ing.lock_index, ing._locks_loaded_at = {}, 9e18
+        ing.registered, ing._reg_loaded_at = set(registered), 9e18
+        ing.open_calls, ing.last_px = {}, {}
+        ing._tick_ok_at = 0.0
+        ing._reject_dir = str(tmp_path / "rejects")
+        return hi, ing
+
+    def _frame(self, kp, seq=1, pair="BTCUSD"):
+        import time as _t
+        ts = int(_t.time() * 1000)
+        tp, sl, hor, ac = hf.hf_bands_as_of(ts / 1000.0)[pair]
+        payload = {"trade_pair": pair, "direction": "SHORT", "asset_class": ac,
+                   "tp_bps": tp, "sl_bps": sl, "horizon_s": hor}
+        sb = hf.submit_signing_bytes(kp.ss58_address, seq, "n" * 32, payload, ts)
+        return {"v": 1, "kind": "hf.submit", "hk": kp.ss58_address, "seq": seq,
+                "nonce": "n" * 32, "ts_miner": ts, "payload": payload,
+                "sig": kp.sign(sb).hex()}
+
+    def _rows(self, tmp_path):
+        import json as _j
+        out = []
+        for p in sorted((tmp_path / "rejects").glob("*.jsonl")):
+            out += [_j.loads(ln) for ln in p.read_text().splitlines() if ln.strip()]
+        return out
+
+    def test_a_refusal_is_written_with_the_payload(self, tmp_path):
+        from bittensor_wallet import Keypair
+        miner = Keypair.create_from_uri("//RejectLogMiner")
+        hi, ing = self._ingest(tmp_path)
+        out = ing.handle(self._frame(miner))
+        assert out["kind"] == "hf.reject" and out["reason"] == "not_registered"
+        rows = self._rows(tmp_path)
+        assert len(rows) == 1
+        r = rows[0]
+        assert r["hk"] == miner.ss58_address
+        assert r["seq"] == 1
+        assert r["reason"] == "not_registered"
+        # the payload is what makes the row readable as "your BTCUSD SHORT was
+        # refused" rather than an unattributed system error
+        assert r["payload"]["trade_pair"] == "BTCUSD"
+        assert r["payload"]["direction"] == "SHORT"
+        # and it stays verifiable: the signature we handed the miner is the one
+        # we kept, so the log cannot be rewritten after the fact without detection
+        assert r["sig_owner"] == out["sig_owner"]
+        assert r["comp"] == "hf"
+
+    def test_an_accepted_call_writes_nothing(self, tmp_path, monkeypatch):
+        from bittensor_wallet import Keypair
+        miner = Keypair.create_from_uri("//RejectLogAccepted")
+        hi, ing = self._ingest(tmp_path, registered={miner.ss58_address})
+        monkeypatch.setattr(hf, "HF_OPEN_GATE_FROM", 9e18)
+        out = ing.handle(self._frame(miner))
+        assert out["kind"] == "hf.receipt", out.get("reason")
+        assert self._rows(tmp_path) == []
+
+    def test_no_reject_dir_means_no_write(self, tmp_path):
+        """The default. An Ingest that never ran __init__ must not touch disk."""
+        from bittensor_wallet import Keypair
+        miner = Keypair.create_from_uri("//RejectLogNoDir")
+        hi, ing = self._ingest(tmp_path)
+        ing._reject_dir = None
+        assert ing.handle(self._frame(miner))["kind"] == "hf.reject"
+        assert not (tmp_path / "rejects").exists()
+
+    def test_prune_drops_windows_past_retention(self, tmp_path):
+        import time as _t
+        import importlib
+        hi = importlib.import_module("neurons.hf_ingest")
+        _, ing = self._ingest(tmp_path)
+        d = tmp_path / "rejects"
+        d.mkdir(parents=True)
+        old = hf.window_start_ms(int((_t.time() - hi.REJECT_RETAIN_S - 3600) * 1000))
+        new = hf.window_start_ms(int(_t.time() * 1000))
+        (d / f"{old}.jsonl").write_text("{}\n")
+        (d / f"{new}.jsonl").write_text("{}\n")
+        assert ing.prune_rejects() == 1
+        assert not (d / f"{old}.jsonl").exists()
+        assert (d / f"{new}.jsonl").exists()
+
+    def test_a_write_failure_never_breaks_the_refusal(self, tmp_path):
+        """This runs inside the sub-second accept path. A refusal that raises here
+        would become a dropped connection, which is strictly worse than an
+        unrecorded refusal."""
+        from bittensor_wallet import Keypair
+        miner = Keypair.create_from_uri("//RejectLogUnwritable")
+        hi, ing = self._ingest(tmp_path)
+        ing._reject_dir = str(tmp_path / "nope" / "\0bad")
+        out = ing.handle(self._frame(miner))
+        assert out["kind"] == "hf.reject" and out["reason"] == "not_registered"
