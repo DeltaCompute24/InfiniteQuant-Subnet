@@ -606,13 +606,39 @@ def check_pair_open(prior_open_until_ms: list, t_ms: int, t0_unix: float) -> Non
 
     No-op before HF_OPEN_GATE_FROM. The 4 declared at launch was never applied, and
     a replay must not retroactively void calls that were legal when they landed.
+
+    The refusal reason carries WHEN THE PAIR FREES, as
+    `pair_open_same_mechanism:<openmax>:<free_at_ms>`. Without it the gate is
+    unactionable: a miner is told the pair is held and has no way to find out for
+    how long, so the only strategy available is to keep firing and keep getting
+    refused. Canefis lost 13 of 38 submissions to exactly that on 2026-07-31,
+    including a run of four and a run of five, and could not have avoided one of
+    them with the information he had. His positions were resolving on TP/SL well
+    inside the 30-min horizon, so even guessing the horizon would have been wrong
+    in the expensive direction.
+
+    APPENDED, not substituted. Everything that reads this string matches on the
+    part before the first ':' (`_refusal_help`, `refusedNote`), and openmax stays
+    in field 1 where it has always been.
+
+    `free_at_ms` is an UPPER BOUND on the live path, and say so wherever it is
+    shown. A holder that has already touched reports its exact touch; one that has
+    not yet touched reports its horizon, because that is the latest it can hold.
+    Which is the useful direction for a client scheduling a retry — retry then and
+    the pair is free for certain — and the dangerous direction to present as exact,
+    since a miner told "free at 14:59" would sit out the 14:35 touch that actually
+    released it.
     """
     if t0_unix < HF_OPEN_GATE_FROM:
         return
     _, _, openmax = hf_rules_as_of(t0_unix)
-    n = sum(1 for u in prior_open_until_ms if int(t_ms) < int(u))
-    if n >= openmax:
-        raise HFRejected(f"pair_open_same_mechanism:{openmax}")
+    still_open = sorted(int(u) for u in prior_open_until_ms if int(t_ms) < int(u))
+    if len(still_open) >= openmax:
+        # The gate clears once enough of the holders have closed to bring the count
+        # below openmax, which is the (n - openmax)-th soonest to close. At the live
+        # openmax of 1 that is simply the last one standing.
+        raise HFRejected("pair_open_same_mechanism:"
+                         f"{openmax}:{still_open[len(still_open) - openmax]}")
 
 
 # ── scoring scope ────────────────────────────────────────────────────────────

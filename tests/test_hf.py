@@ -172,6 +172,47 @@ class TestOpenPositionGate:
         assert hf.hf_rules_as_of(hf.HF_OPEN_GATE_FROM)[2] == 1
         assert hf.hf_rules_as_of(hf.HF_OPEN_GATE_FROM - 1)[2] == 4
 
+    # ── the reason carries when the pair frees ───────────────────────────────
+    # Without it the gate is unactionable: told only that the pair is held, a
+    # miner can do nothing but fire again. Canefis lost 13 of 38 submissions to
+    # that on 2026-07-31 and could not have avoided one of them.
+
+    def _free_at(self, prior, t_ms):
+        with pytest.raises(hf.HFRejected) as e:
+            hf.check_pair_open(prior, t_ms, self.T / 1000.0)
+        parts = str(e.value).split(":")
+        assert parts[0] == "pair_open_same_mechanism"
+        assert int(parts[1]) == 1          # openmax stays in field 1
+        return int(parts[2])
+
+    def test_the_reason_reports_when_the_pair_frees(self):
+        held = self.T + self.HOR * 1000
+        assert self._free_at([held], self.T + 1000) == held
+
+    def test_with_several_holders_it_reports_the_last_one_standing(self):
+        # openmax is 1, so the pair is not free until every holder has closed.
+        # Reporting the soonest would send the miner back while it is still held.
+        a, b, c = self.T + 60_000, self.T + 120_000, self.T + 90_000
+        assert self._free_at([a, b, c], self.T + 1000) == b
+
+    def test_holders_that_already_closed_are_ignored(self):
+        closed, live = self.T + 10_000, self.T + 300_000
+        assert self._free_at([closed, live], self.T + 20_000) == live
+
+    def test_the_prefix_is_unchanged_for_existing_consumers(self):
+        # _refusal_help and refusedNote both match on the part before the first
+        # ':', and the ack path asserts on the prefix. Appending must not move it.
+        held = self.T + self.HOR * 1000
+        with pytest.raises(hf.HFRejected) as e:
+            hf.check_pair_open([held], self.T + 1000, self.T / 1000.0)
+        assert str(e.value).startswith("pair_open_same_mechanism:1")
+
+    def test_a_retry_at_the_reported_time_is_accepted(self):
+        # The whole contract: do what the refusal tells you and you get in.
+        held = self.T + self.HOR * 1000
+        free_at = self._free_at([held], self.T + 1000)
+        hf.check_pair_open([held], free_at, self.T / 1000.0)
+
     # ── the live twin ────────────────────────────────────────────────────────
     def test_opencall_tracks_the_same_answer_as_open_until_ms(self):
         tp_px = self.ENTRY * (1 + self.TP / 10000.0)
