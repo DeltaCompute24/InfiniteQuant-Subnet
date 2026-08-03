@@ -841,6 +841,17 @@ COMP_WEIGHTS_HISTORY: tuple = (
     # 80/20 ([52428, 13107]) in the same instant, so within mecid-0 the
     # shares are 37.5/37.5/25. An empty field burns its share until earned.
     (1785790800, "lf:0.375,hf:0.375,closers:0.25"),
+    # ⚑ 2026-08-03 21:10 UTC: the 80/20 split hit MechanismEmissionRateLimit
+    # (24h; reopens Aug 4 ~17:55 UTC) so the chain still routes 100% through
+    # mecid-0. Reserve the referrers' 20% IN-BAND: a `referrers` share key
+    # with no vector burns its share (combine() dead-share rule), making the
+    # interim pools exactly LF 30 / HF 30 / Closers 20 / burn 20.
+    (1785791400, "lf:0.30,hf:0.30,closers:0.20,referrers:0.20"),
+    # ⚑ 2026-08-04 18:05 UTC: the staged retry lands the 80/20 chain split at
+    # ~18:00; mecid-0 shares return to 37.5/37.5/25 and the referrers' 20%
+    # flows on-chain via mecid-1. If the retry fails, pull this row forward —
+    # leaving it with a 100/0 chain split would overpay LF/HF again.
+    (1785866700, "lf:0.375,hf:0.375,closers:0.25"),
 )
 _COMP_ENV = os.getenv("SN89_COMP_WEIGHTS", "")
 if _COMP_ENV:
