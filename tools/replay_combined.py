@@ -66,6 +66,10 @@ def main() -> None:
     ap.add_argument("--db", default=config.DB_PATH,
                     help="validator journal (LF competition input)")
     ap.add_argument("--now", type=float, default=None)
+    ap.add_argument("--tol", type=float, default=0.01,
+                    help="max acceptable per-uid delta vs the revealed vector "
+                         "(grade drift between reveal and replay is normal; "
+                         "0.00048 measured on flip day)")
     ap.add_argument("--compare", action="store_true",
                     help="diff the blend against on-chain weights")
     a = ap.parse_args()
@@ -157,13 +161,16 @@ def main() -> None:
         keys = set(blend) | set(onchain)
         worst = max((abs(blend.get(u, 0) - onchain.get(u, 0)) for u in keys),
                     default=0.0)
-        print(f"max per-uid delta: {worst:.5f}"
-              + ("  ✔ replay parity" if worst < 0.01 else
+        ok = worst < a.tol
+        print(f"max per-uid delta: {worst:.5f} (tol {a.tol})"
+              + ("  ✔ replay parity" if ok else
                  "  ⚠ divergent — EITHER the last on-chain reveal predates "
                  "recent grades (re-run after the next reveal; earners only "
                  "ever appearing in the rebuild is the tell) OR the validator "
                  "is not computing the public record. Persistent divergence "
                  "across two reveals is the second one — investigate."))
+        if not ok:
+            raise SystemExit(1)
 
 
 if __name__ == "__main__":
