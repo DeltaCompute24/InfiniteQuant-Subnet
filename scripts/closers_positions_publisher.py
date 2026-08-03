@@ -80,6 +80,22 @@ ALLOW_HOTKEYS = tuple(h.strip() for h in
                       os.getenv("SN89_CLOSERS_HOTKEY_ALLOW", "").split(",")
                       if h.strip())
 MINER_LABEL = os.getenv("SN89_CLOSERS_MINER_LABEL", "iq")
+# Per-key display overrides: "<hotkey-or-prefix>:<label>,..." — e.g. the demo
+# key that seeds the votable set reads "Demo" so nobody grades it as an SN89
+# book. Everything else publishes the flat anonymous MINER_LABEL.
+MINER_LABELS = {}
+for part in os.getenv("SN89_CLOSERS_MINER_LABELS", "").split(","):
+    if ":" in part:
+        k, _, v = part.strip().partition(":")
+        if k and v:
+            MINER_LABELS[k] = v
+
+
+def miner_label(hotkey: str) -> str:
+    for k, v in MINER_LABELS.items():
+        if hotkey.startswith(k):
+            return v
+    return MINER_LABEL
 
 
 def gradeable_pairs() -> set[str]:
@@ -135,7 +151,7 @@ def open_positions() -> list[dict]:
                     "venue_pair": venue_pair,
                     "direction": e.get("direction"),
                     "opened_ms": int(e.get("processed_ms") or 0),
-                    "miner": MINER_LABEL,
+                    "miner": miner_label(hk),
                     "entry_price": float(e.get("entry_price") or 0),
                     "net_leverage": abs(float(e.get("net_leverage") or 0)),
                 }
