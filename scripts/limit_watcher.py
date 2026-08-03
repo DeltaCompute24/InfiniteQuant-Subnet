@@ -209,9 +209,17 @@ def export_grades() -> None:
                 "SELECT key, hk, t0_ms, pair, action, score, status FROM grades")]
     # pending too — "submission arrived, horizon still running" is the state a
     # trader looks for right after clicking, and grades alone can't show it
-    pend = [{"key": k, "hk": h, "t0_ms": t, "pair": p, "action": a}
-            for k, h, t, p, a in src.execute(
-                "SELECT key, hk, t0_ms, pair, action FROM pending")]
+    try:
+        pend = [{"key": k, "hk": h, "t0_ms": t, "pair": p, "action": a,
+                 "position_id": pid or ""}
+                for k, h, t, p, a, pid in src.execute(
+                    "SELECT key, hk, t0_ms, pair, action, pid FROM pending")]
+    except sqlite3.OperationalError:
+        # validator hasn't run the pid migration on this cache yet (it owns
+        # the schema; this reader is read-only) — export without position ids
+        pend = [{"key": k, "hk": h, "t0_ms": t, "pair": p, "action": a}
+                for k, h, t, p, a in src.execute(
+                    "SELECT key, hk, t0_ms, pair, action FROM pending")]
     src.close()
     tmp = GRADES_EXPORT + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:

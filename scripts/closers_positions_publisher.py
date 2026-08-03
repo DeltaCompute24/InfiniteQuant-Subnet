@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import sys
 import time
 
@@ -56,6 +57,16 @@ OUT = os.getenv("SN89_CLOSERS_POSITIONS_OUT",
 INDEX_DIR = os.getenv("SN89_HF_PUBLIC_DIR_INDEX", "")
 SYNTH = os.getenv("SN89_CLOSERS_SYNTH_POSITIONS", "0") == "1"
 EVERY_S = float(os.getenv("SN89_CLOSERS_PUBLISH_EVERY_S", "5"))
+
+# A position enters the feed only after it has moved ±MIN_MOVE_BPS from entry
+# (either direction — a drawdown is exactly when a CLOSE vote is informative).
+# Fresh positions sitting inside the spread would invite votes on chop that
+# grade as coin flips and pressure us to exit trades that never went anywhere.
+# Once a position crosses, it is LATCHED into the feed for life even if price
+# chops back, so the votable set never flickers. 0 disables the gate.
+MIN_MOVE_BPS = float(os.getenv("SN89_CLOSERS_MIN_MOVE_BPS", "10"))
+MARKS_DB = os.getenv("IQ_MARKS_DB", "/opt/iq-platform/data/live/signals-marks.db")
+LATCH_PATH = OUT + ".latch.json"
 
 
 def gradeable_pairs() -> set[str]:
@@ -100,8 +111,57 @@ def open_positions() -> list[dict]:
                     "direction": e.get("direction"),
                     "opened_ms": int(e.get("processed_ms") or 0),
                     "miner": str(e.get("miner_hotkey", ""))[:8],
+                    "entry_price": float(e.get("entry_price") or 0),
                 }
     return [p for p in opens.values() if p["trade_pair"] in ok_pairs]
+
+
+def gate_moved(pos: list[dict]) -> list[dict]:
+    """Apply the ±MIN_MOVE_BPS entry gate (see constant above). Fail-open on
+    missing entry price or mark: a marks-store gap must degrade to the old
+    behavior (publish everything), never blank the votable set."""
+    if MIN_MOVE_BPS <= 0:
+        return pos
+    try:
+        latched = set(json.load(open(LATCH_PATH)))
+    except Exception:  # noqa: BLE001 — first run / unreadable → empty latch
+        latched = set()
+    con = None
+    try:
+        con = sqlite3.connect(f"file:{MARKS_DB}?mode=ro", uri=True, timeout=5)
+    except sqlite3.Error:
+        pass
+    out = []
+    for p in pos:
+        pid = str(p["id"])
+        if p.get("synthetic") or pid in latched:
+            out.append(p)
+            continue
+        entry = p.get("entry_price") or 0.0
+        mark = None
+        if con is not None and entry:
+            try:
+                row = con.execute(
+                    "SELECT mark FROM marks WHERE asset=? "
+                    "ORDER BY ts DESC LIMIT 1", (p["trade_pair"],)).fetchone()
+                mark = row[0] if row else None
+            except sqlite3.Error:
+                mark = None
+        if not entry or not mark:
+            out.append(p)
+            continue
+        if abs(mark / entry - 1.0) * 1e4 >= MIN_MOVE_BPS:
+            latched.add(pid)
+            out.append(p)
+    if con is not None:
+        con.close()
+    # prune closed positions so the latch never grows unbounded
+    latched &= {str(p["id"]) for p in pos}
+    tmp = LATCH_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(sorted(latched), fh)
+    os.replace(tmp, LATCH_PATH)
+    return out
 
 
 def synth_positions() -> list[dict]:
@@ -131,7 +191,7 @@ def main() -> None:
     print(f"closers-positions: events={EVENTS} out={OUT} synth={SYNTH} "
           f"index_dir={INDEX_DIR or '-'}", flush=True)
     while True:
-        pos = open_positions()
+        pos = gate_moved(open_positions())
         if SYNTH:
             pos += synth_positions()
         doc = {"generated_at_ms": int(time.time() * 1000), "positions": pos}

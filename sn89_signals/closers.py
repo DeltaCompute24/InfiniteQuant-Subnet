@@ -191,7 +191,12 @@ def _db(cache_dir: str) -> sqlite3.Connection:
     c.execute("CREATE TABLE IF NOT EXISTS windows_seen (w INTEGER PRIMARY KEY)")
     c.execute("CREATE TABLE IF NOT EXISTS pending ("
               "key TEXT PRIMARY KEY, hk TEXT, t0_ms INTEGER, pair TEXT, "
-              "direction TEXT, action TEXT, asset_class TEXT, end_ms INTEGER)")
+              "direction TEXT, action TEXT, asset_class TEXT, end_ms INTEGER, "
+              "pid TEXT DEFAULT '')")
+    try:  # pre-existing caches: add the position-id column in place
+        c.execute("ALTER TABLE pending ADD COLUMN pid TEXT DEFAULT ''")
+    except sqlite3.OperationalError:
+        pass
     c.execute("CREATE TABLE IF NOT EXISTS grades ("
               "key TEXT PRIMARY KEY, hk TEXT, t0_ms INTEGER, pair TEXT, "
               "action TEXT, score REAL, status TEXT)")
@@ -248,12 +253,13 @@ def sync_and_grade(base: str, cache_dir: str, now: float,
             key = f"{hk}:{seq}"
             if not hk or not t0_ms or key in graded:
                 continue
-            db.execute("INSERT OR REPLACE INTO pending VALUES (?,?,?,?,?,?,?,?)",
+            db.execute("INSERT OR REPLACE INTO pending VALUES (?,?,?,?,?,?,?,?,?)",
                        (key, hk, int(t0_ms), str(p.get("trade_pair", "")).upper(),
                         str(p.get("direction", "")).upper(),
                         str(p.get("action", "")).upper(),
                         str(p.get("asset_class", "")),
-                        int(t0_ms) + CLOSERS_HORIZON_S * 1000))
+                        int(t0_ms) + CLOSERS_HORIZON_S * 1000,
+                        str(p.get("position_id", ""))))
             if on_new is not None:
                 try:
                     on_new(e)
