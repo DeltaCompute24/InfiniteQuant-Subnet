@@ -207,12 +207,18 @@ def _db(cache_dir: str) -> sqlite3.Connection:
     return c
 
 
-def sync_and_grade(base: str, cache_dir: str, now: float) -> None:
+def sync_and_grade(base: str, cache_dir: str, now: float,
+                   on_new=None) -> None:
     """Pull closers receipts out of the published HF windows into `pending`,
     then score every call whose horizon has settled. Incremental and
     replayable: inputs are the anchored window logs + the anchored tick feed,
     both public. Deliberately reuses hf_grade's fetch/cache machinery — one
-    window sync serves both competitions."""
+    window sync serves both competitions.
+
+    on_new(entry): optional observer fired once per NEWLY-SEEN submission
+    (full receipt entry: submit + countersigned receipt). Side-effect hook for
+    the caller (the validator notifies the operator channel); grading itself
+    stays pure — the callback never influences what is journaled or scored."""
     from . import hf_grade  # late import: hf_grade imports hf, avoid cycles
 
     now_ms = int(now * 1000)
@@ -248,6 +254,11 @@ def sync_and_grade(base: str, cache_dir: str, now: float) -> None:
                         str(p.get("action", "")).upper(),
                         str(p.get("asset_class", "")),
                         int(t0_ms) + CLOSERS_HORIZON_S * 1000))
+            if on_new is not None:
+                try:
+                    on_new(e)
+                except Exception:  # noqa: BLE001 — observer must never break sync
+                    pass
         db.execute("INSERT OR IGNORE INTO windows_seen VALUES (?)", (w,))
     db.commit()
 

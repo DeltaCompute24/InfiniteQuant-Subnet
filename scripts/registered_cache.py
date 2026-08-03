@@ -60,6 +60,26 @@ try:
             mecid_split = None
     except Exception:
         mecid_split = None
+    # ⚑ POST-MERGE (combined_weights_active): the chain split stops meaning
+    # LF-vs-HF — mecid-0 carries BOTH, divided by config.COMP_WEIGHTS. Reading
+    # the raw split here would credit every LF miner ~2x the moment the split
+    # moves to [65535,0] (the exact class of error miners caught at 2x before:
+    # harold $120-dash/$74-wallet). Source the fractions from the committed
+    # shares instead: lf_frac = mecid0_share x share_lf.
+    try:
+        import sys as _sys, time as _time
+        _sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        from sn89_signals import config as _cfg
+        if _cfg.combined_weights_active(_time.time()):
+            shares = _cfg.comp_weights_as_of(_time.time())
+            hf_like = shares.get("hf", 0.0) + shares.get("closers", 0.0)
+            base = lf_frac                      # mecid-0's chain share (→1.0 post-split-move)
+            lf_frac = base * shares.get("lf", 0.0)
+            hf_frac_override = base * hf_like
+        else:
+            hf_frac_override = None
+    except Exception:
+        hf_frac_override = None
     pool = {
         "netuid": NETUID,
         "network": NETWORK,
@@ -69,8 +89,10 @@ try:
         "mecid_emission_split": mecid_split,      # [mecid0, mecid1] u16, or None
         "lf_emission_frac": round(lf_frac, 6),    # mecid-0's share of the miner pool
         "lf_pool_tao_day": round(total_miner_pool * lf_frac, 4),  # what LF miners split
-        "hf_emission_frac": round(1.0 - lf_frac, 6),             # mecid-1's share
-        "hf_pool_tao_day": round(total_miner_pool * (1.0 - lf_frac), 4),  # what HF miners split
+        "hf_emission_frac": round(hf_frac_override if hf_frac_override is not None
+                                  else (1.0 - lf_frac), 6),
+        "hf_pool_tao_day": round(total_miner_pool * (hf_frac_override if hf_frac_override is not None
+                                  else (1.0 - lf_frac)), 4),
     }
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(POOL_OUT), suffix=".tmp")
     with os.fdopen(fd, "w", encoding="utf-8") as fh:

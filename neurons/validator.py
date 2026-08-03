@@ -45,6 +45,8 @@ HF_LOCK_REFRESH_S = int(os.getenv("SN89_HF_LOCK_REFRESH_S", "60"))
 # HF now does the same. Throttled because sync_and_grade fetches published windows
 # over the network — a few min of staleness in a warmup board is fine.
 HF_GRADE_EVERY_S = int(os.getenv("SN89_HF_GRADE_EVERY_S", "120"))
+_ch = int(os.getenv("SN89_CLOSERS_HORIZON_S", "3600"))
+CLOSERS_NOTIFY_HORIZON_TXT = f"{_ch // 60}min" if _ch < 3600 else f"{_ch // 3600}h"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS signals (
@@ -470,6 +472,56 @@ class Validator:
         except Exception as e:  # noqa: BLE001 — HF must never break mecid-0
             print(f"  ! HF grade skipped (mecid-0 unaffected): {e}")
 
+    def _notify_closers_submission(self, entry: dict):
+        """Operator-channel alert for a new Closers submission, fired as the
+        VALIDATOR first observes it in the published anchored windows (not at
+        ingest) — so the alert proves the full pipeline: miner signed frame →
+        countersigned receipt → sealed window → validator fetch. The validator
+        re-verifies the miner's sr25519 signature itself before alerting;
+        closers calls are signed-not-encrypted by design (instant + public),
+        so signature verification is this mechanism's analogue of the LF
+        owner-decrypt."""
+        token = os.getenv("OPENCLAW_TELEGRAM_BOT_TOKEN", "")
+        chat = os.getenv("OPENCLAW_TELEGRAM_CHAT_ID", "")
+        if not token or not chat:
+            return
+        try:
+            sub = entry.get("submit") or {}
+            # optional allowlist: alert only for these hotkeys (comma-sep).
+            # Unset = alert on everything — fine until a bot fleet floods the
+            # channel with one ping per 20s submission (2026-08-02, 2,364
+            # unread). Batching is the real mainnet answer; this is the valve.
+            allow = os.getenv("SN89_CLOSERS_ALERT_HOTKEYS", "").strip()
+            if allow and sub.get("hk") not in {h.strip() for h in allow.split(",")}:
+                return
+            rcpt = entry.get("receipt") or {}
+            p = sub.get("payload") or {}
+            from bittensor_wallet import Keypair
+            sb = hf.submit_signing_bytes(sub["hk"], int(sub["seq"]),
+                                         str(sub["nonce"]), p,
+                                         int(sub["ts_miner"]))
+            sig_ok = Keypair(ss58_address=sub["hk"]).verify(
+                sb, bytes.fromhex(sub["sig"]))
+            t0 = int(rcpt.get("grid_t0_ms") or 0)
+            when = time.strftime("%H:%M:%S", time.gmtime(t0 / 1000)) if t0 else "?"
+            msg = (f"🧭 *CLOSERS submission* (testnet {config.NETUID})\n"
+                   f"miner `{sub['hk'][:10]}…{sub['hk'][-6:]}`\n"
+                   f"*{p.get('action')}* {p.get('trade_pair')} "
+                   f"(position {str(p.get('position_id'))[:14]}…)\n"
+                   f"t0 {when} UTC · sig {'verified ✓' if sig_ok else 'FAILED ✗'} · "
+                   f"grades in {CLOSERS_NOTIFY_HORIZON_TXT}")
+            import urllib.request
+            req = urllib.request.Request(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                data=json.dumps({"chat_id": chat, "text": msg,
+                                 "parse_mode": "Markdown"}).encode(),
+                headers={"Content-Type": "application/json"})
+            urllib.request.urlopen(req, timeout=10)
+            print(f"  📣 operator notified: closers {p.get('action')} "
+                  f"{p.get('trade_pair')} sig_ok={sig_ok}")
+        except Exception as e:  # noqa: BLE001 — alerting must never break the loop
+            print(f"  ! closers notify failed: {e}")
+
     def grade_closers(self):
         """Resolve Closers calls whose horizon has elapsed — same decoupled
         pattern as grade_hf, same isolation guarantee: a Closers hiccup never
@@ -481,7 +533,8 @@ class Validator:
         try:
             cache_dir = os.path.expanduser(
                 os.getenv("SN89_CLOSERS_GRADE_CACHE", "~/.sn89/closers-grade"))
-            closers.sync_and_grade(hf.HF_PUBLIC_BASE, cache_dir, time.time())
+            closers.sync_and_grade(hf.HF_PUBLIC_BASE, cache_dir, time.time(),
+                                   on_new=self._notify_closers_submission)
         except Exception as e:  # noqa: BLE001
             print(f"  ! Closers grade skipped (LF/HF unaffected): {e}")
 
@@ -770,7 +823,7 @@ class Validator:
             try:
                 from sn89_signals import hf as _hf, hf_grade as _hfg
                 if config.combined_weights_active(now):
-                    if config.REFERRER_MECID1:
+                    if config.referrer_active(now):
                         # § referrer mechanism: the freed slot pays the
                         # referrer class — pure replay, same trust model.
                         transfer_rows = [

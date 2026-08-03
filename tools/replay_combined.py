@@ -111,7 +111,7 @@ def main() -> None:
     blend = competitions.combine(vectors, shares)
     print(f"\nBLEND    {fmt(blend, config.BURN_UID)}")
 
-    if config.REFERRER_MECID1:
+    if config.referrer_active(now):
         import sqlite3 as _sq
         dbc = _sq.connect(f"file:{os.path.expanduser(a.db)}?mode=ro", uri=True)
         referral_rows = [

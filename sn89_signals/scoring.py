@@ -722,7 +722,7 @@ def compute_weights(states: list[MinerState], now_unix: float,
             # in-band 20% recruiter share-shift retires (double-paying the same
             # referral from two pools). The recruit's own bonus above stays —
             # it is a trader-entry incentive, not a referrer reward.
-            if not config.REFERRER_MECID1:
+            if not config.referrer_active(now_unix):
                 per_recruiter[recruiter] += config.REFERRAL_RECRUITER_BONUS * base[recruit]
         for hk, b in per_recruiter.items():
             bonus[hk] += min(b, config.REFERRAL_MAX_X * base[hk])
