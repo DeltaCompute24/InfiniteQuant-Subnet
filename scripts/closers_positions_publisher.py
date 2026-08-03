@@ -58,12 +58,15 @@ INDEX_DIR = os.getenv("SN89_HF_PUBLIC_DIR_INDEX", "")
 SYNTH = os.getenv("SN89_CLOSERS_SYNTH_POSITIONS", "0") == "1"
 EVERY_S = float(os.getenv("SN89_CLOSERS_PUBLISH_EVERY_S", "5"))
 
-# A position enters the feed only after it has moved ±MIN_MOVE_BPS from entry
-# (either direction — a drawdown is exactly when a CLOSE vote is informative).
-# Fresh positions sitting inside the spread would invite votes on chop that
-# grade as coin flips and pressure us to exit trades that never went anywhere.
-# Once a position crosses, it is LATCHED into the feed for life even if price
-# chops back, so the votable set never flickers. 0 disables the gate.
+# A position enters the feed only after its POSITION-LEVEL leveraged return
+# (direction × price-move × net leverage — the ±% the operator bot shows) has
+# reached ±MIN_MOVE_BPS (10 = 0.10%, either direction — a drawdown is exactly
+# when a CLOSE vote is informative). Fresh positions sitting near flat P&L
+# would invite votes on chop that grade as coin flips and pressure us to exit
+# trades that never went anywhere. Leverage matters: a 0.10× book needs a 1%
+# price move to reach 0.10% position P&L. Once a position crosses, it is
+# LATCHED into the feed for life even if P&L chops back, so the votable set
+# never flickers. 0 disables the gate.
 MIN_MOVE_BPS = float(os.getenv("SN89_CLOSERS_MIN_MOVE_BPS", "10"))
 MARKS_DB = os.getenv("IQ_MARKS_DB", "/opt/iq-platform/data/live/signals-marks.db")
 LATCH_PATH = OUT + ".latch.json"
@@ -101,7 +104,16 @@ def open_positions() -> list[dict]:
                 continue
             if e.get("is_close"):
                 opens.pop(u, None)
-            elif u not in opens and e.get("direction") in ("LONG", "SHORT"):
+            elif e.get("direction") in ("LONG", "SHORT"):
+                if u in opens:
+                    # later fill on the same position (add / partial reduce) —
+                    # refresh the avg entry and net leverage the gate uses
+                    opens[u]["direction"] = e.get("direction")
+                    opens[u]["entry_price"] = float(
+                        e.get("entry_price") or opens[u]["entry_price"])
+                    opens[u]["net_leverage"] = abs(float(
+                        e.get("net_leverage") or opens[u]["net_leverage"]))
+                    continue
                 venue_pair = str(e.get("asset", "")).upper()
                 pair = PAIR_ALIAS.get(venue_pair, venue_pair)
                 opens[u] = {
@@ -112,6 +124,7 @@ def open_positions() -> list[dict]:
                     "opened_ms": int(e.get("processed_ms") or 0),
                     "miner": str(e.get("miner_hotkey", ""))[:8],
                     "entry_price": float(e.get("entry_price") or 0),
+                    "net_leverage": abs(float(e.get("net_leverage") or 0)),
                 }
     return [p for p in opens.values() if p["trade_pair"] in ok_pairs]
 
@@ -138,6 +151,7 @@ def gate_moved(pos: list[dict]) -> list[dict]:
             out.append(p)
             continue
         entry = p.get("entry_price") or 0.0
+        lev = p.get("net_leverage") or 0.0
         mark = None
         if con is not None and entry:
             try:
@@ -147,10 +161,12 @@ def gate_moved(pos: list[dict]) -> list[dict]:
                 mark = row[0] if row else None
             except sqlite3.Error:
                 mark = None
-        if not entry or not mark:
+        if not entry or not mark or not lev:
             out.append(p)
             continue
-        if abs(mark / entry - 1.0) * 1e4 >= MIN_MOVE_BPS:
+        sign = 1.0 if p.get("direction") == "LONG" else -1.0
+        ret_bps = sign * (mark / entry - 1.0) * lev * 1e4
+        if abs(ret_bps) >= MIN_MOVE_BPS:
             latched.add(pid)
             out.append(p)
     if con is not None:
