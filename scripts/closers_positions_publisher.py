@@ -71,6 +71,16 @@ MIN_MOVE_BPS = float(os.getenv("SN89_CLOSERS_MIN_MOVE_BPS", "10"))
 MARKS_DB = os.getenv("IQ_MARKS_DB", "/opt/iq-platform/data/live/signals-marks.db")
 LATCH_PATH = OUT + ".latch.json"
 
+# Which hotkeys' positions are votable. Comma-separated ss58 (or unique
+# prefixes); EMPTY publishes every key on the event journal (testnet default).
+# The set lives in the service unit's env, never in this public file — the
+# feed itself publishes no key identity either (see MINER_LABEL): votable
+# positions are "the network's book", not attributable to a wallet.
+ALLOW_HOTKEYS = tuple(h.strip() for h in
+                      os.getenv("SN89_CLOSERS_HOTKEY_ALLOW", "").split(",")
+                      if h.strip())
+MINER_LABEL = os.getenv("SN89_CLOSERS_MINER_LABEL", "iq")
+
 
 def gradeable_pairs() -> set[str]:
     """Pairs the HF tick recorder covers: HF board ∪ LF board (mirrors the
@@ -105,6 +115,9 @@ def open_positions() -> list[dict]:
             if e.get("is_close"):
                 opens.pop(u, None)
             elif e.get("direction") in ("LONG", "SHORT"):
+                hk = str(e.get("miner_hotkey", ""))
+                if ALLOW_HOTKEYS and not hk.startswith(ALLOW_HOTKEYS):
+                    continue
                 if u in opens:
                     # later fill on the same position (add / partial reduce) —
                     # refresh the avg entry and net leverage the gate uses
@@ -122,7 +135,7 @@ def open_positions() -> list[dict]:
                     "venue_pair": venue_pair,
                     "direction": e.get("direction"),
                     "opened_ms": int(e.get("processed_ms") or 0),
-                    "miner": str(e.get("miner_hotkey", ""))[:8],
+                    "miner": MINER_LABEL,
                     "entry_price": float(e.get("entry_price") or 0),
                     "net_leverage": abs(float(e.get("net_leverage") or 0)),
                 }
@@ -210,7 +223,12 @@ def main() -> None:
         pos = gate_moved(open_positions())
         if SYNTH:
             pos += synth_positions()
-        doc = {"generated_at_ms": int(time.time() * 1000), "positions": pos}
+        # entry_price/net_leverage are gate inputs only — published, they would
+        # fingerprint the key against PTN's public per-hotkey positions API,
+        # defeating the anonymous MINER_LABEL.
+        pub = [{k: v for k, v in p.items()
+                if k not in ("entry_price", "net_leverage")} for p in pos]
+        doc = {"generated_at_ms": int(time.time() * 1000), "positions": pub}
         tmp = OUT + ".tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(doc, fh, separators=(",", ":"))
