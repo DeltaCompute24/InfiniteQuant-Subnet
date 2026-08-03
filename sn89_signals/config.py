@@ -794,7 +794,11 @@ COMBINED_WEIGHTS_FROM_UNIX = int(os.getenv("SN89_COMBINED_WEIGHTS_FROM", "178577
 REFERRER_MECID1 = os.getenv("SN89_REFERRER_MECID1", "0") == "1"
 # committed arming instant for mainnet (0 = not scheduled yet; set together
 # with the MechanismEmissionSplit move to ~[58982, 6553] = 90/10)
-REFERRER_MECID1_FROM_UNIX = int(os.getenv("SN89_REFERRER_MECID1_FROM", "0"))
+# ⚑ armed 2026-08-03 21:00 UTC with the 80/20 split flip — mecid-1 pays
+# referrers from this instant (all-burn while no referrer holds a UID+score).
+# The in-band LF recruiter share-shift retires at the same instant
+# (scoring.py gates on referrer_active) so no referral pays from two pools.
+REFERRER_MECID1_FROM_UNIX = int(os.getenv("SN89_REFERRER_MECID1_FROM", "1785790800"))
 
 
 def referrer_active(now_unix: float) -> bool:
@@ -832,6 +836,11 @@ COMP_WEIGHTS_HISTORY: tuple = (
     # so the neutral-merge soak can reconcile LF/HF payouts against the
     # dedicated-mechanism baseline before any share moves.
     (0, "lf:0.5,hf:0.5,closers:0.0"),
+    # ⚑ 2026-08-03 21:00 UTC (Whit): full carve-out. Of TOTAL miner incentive:
+    # LF 30 / HF 30 / Closers 20 / Referrers 20. The chain split moves to
+    # 80/20 ([52428, 13107]) in the same instant, so within mecid-0 the
+    # shares are 37.5/37.5/25. An empty field burns its share until earned.
+    (1785790800, "lf:0.375,hf:0.375,closers:0.25"),
 )
 _COMP_ENV = os.getenv("SN89_COMP_WEIGHTS", "")
 if _COMP_ENV:
