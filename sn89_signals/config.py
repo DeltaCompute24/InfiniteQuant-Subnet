@@ -773,12 +773,14 @@ HF_MECID1_WEIGHTS = os.getenv("SN89_HF_MECID1_WEIGHTS", "1") == "1"
 # would split consensus on whichever validator restarts with a stale unit
 # file). 0 = never. To launch: commit the cutover timestamp + announce, then
 # ramp MechanismEmissionSplit only after the flip is observed on all signers.
-# ⚑ MAINNET CUTOVER: 2026-08-06 14:00:00 UTC. At this instant every updated
-# validator commits the unified LF+HF(+Closers at 0) vector on mecid-0 and
-# parks mecid-1 all-burn; the owner moves MechanismEmissionSplit → [65535, 0]
-# at the same time (announced). Payout-neutral by construction — verified
-# exact-zero per-uid drift (tools/reconcile_merge.py).
-COMBINED_WEIGHTS_FROM_UNIX = int(os.getenv("SN89_COMBINED_WEIGHTS_FROM", "1786024800"))
+# ⚑ MAINNET CUTOVER: 2026-08-03 17:30:00 UTC (pulled forward from 08-06 —
+# chef holds ~73% of permitted stake, so consensus follows the flip; late
+# validators pay their own vtrust). At this instant every updated validator
+# commits the unified LF+HF(+Closers at 0) vector on mecid-0 and parks
+# mecid-1 all-burn; the owner moves MechanismEmissionSplit → [65535, 0] at
+# the same time. Payout-neutral by construction — verified exact-zero
+# per-uid drift (tools/reconcile_merge.py), mainnet and testnet.
+COMBINED_WEIGHTS_FROM_UNIX = int(os.getenv("SN89_COMBINED_WEIGHTS_FROM", "1785778200"))
 
 # ── Referrer mechanism on mecid-1 (§ referrer) ───────────────────────────────
 # When armed (and the combined path is active), the freed mecid-1 slot pays a
