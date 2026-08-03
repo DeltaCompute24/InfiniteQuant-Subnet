@@ -69,7 +69,11 @@ def main() -> int:
         shares = config.comp_weights_as_of(now)
         m0 = pct[0]
         pools_pct = {c: round(m0 * sh, 2) for c, sh in shares.items()}
-        pools_pct["referrers"] = round(pct[1], 2) if len(pct) > 1 else 0.0
+        # referrers pool = any IN-BAND reserve (a `referrers` share key inside
+        # mecid-0, burned until the chain split lands) + the mecid-1 slice
+        pools_pct["referrers"] = round(
+            m0 * shares.get("referrers", 0.0)
+            + (pct[1] if len(pct) > 1 else 0.0), 2)
 
     doc = {
         "refreshed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
