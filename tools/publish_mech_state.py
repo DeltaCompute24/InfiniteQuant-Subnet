@@ -68,11 +68,15 @@ def main() -> int:
     if combined and pct:
         shares = config.comp_weights_as_of(now)
         m0 = pct[0]
-        pools_pct = {c: round(m0 * sh, 2) for c, sh in shares.items()}
-        # referrers pool = any IN-BAND reserve (a `referrers` share key inside
-        # mecid-0, burned until the chain split lands) + the mecid-1 slice
+        pools_pct = {c: round(m0 * sh, 2)
+                     for c, sh in shares.items() if c != "reserve"}
+        # Referrers are exclusively mecid-1. Display their pool as the mecid-1
+        # chain slice plus any in-band `reserve` placeholder (the 20% burned
+        # inside mecid-0 while the split waits out its 24h rate limit) — the
+        # reserve IS the referrer carve-out, held as burn until the chain
+        # routes it to mechanism 1.
         pools_pct["referrers"] = round(
-            m0 * shares.get("referrers", 0.0)
+            m0 * shares.get("reserve", 0.0)
             + (pct[1] if len(pct) > 1 else 0.0), 2)
 
     doc = {
