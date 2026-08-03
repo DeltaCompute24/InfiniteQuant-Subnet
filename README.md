@@ -36,7 +36,7 @@ QUALIFIED   = window decisive ≥ 8  AND  Wilson lower bound on true hit-rate �
               (~90% confidence you beat a coin flip — luck does not qualify)
 tier        = on a SHRUNK hit-rate (thin samples pulled toward 50%):
               QUALIFIED ≥ 55% → 1.0×  |  SHARP ≥ 60% → 1.2×  |  WOLF ≥ 70% → 2.0×
-your weight ∝ (min(wins last 30 d, 20) × tier) / Σ same over all qualified
+your weight ∝ (your qualified wins × tier, each decaying linearly to 0 over 7 d, count-capped 20) / Σ same over all qualified
 ```
 
 - Reputation decays (~60 d / ~100 trades): old wins can't mask bad recent trading, and a bad early stretch ages out.
