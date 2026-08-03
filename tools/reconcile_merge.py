@@ -53,7 +53,18 @@ def main() -> int:
         split = [x / tot for x in raw]
     except Exception:  # noqa: BLE001
         split = [0.5, 0.5]
-    print(f"netuid {config.NETUID} · chain split {[round(x, 4) for x in split]}")
+    # POST-FLIP the live chain split is [65535, 0] and no longer encodes the
+    # LF/HF division — using it would make this check trivially self-consistent.
+    # The neutrality target is the committed shares (the pre-flip 50/50 the
+    # chain used to enforce), so reconcile against comp_weights instead.
+    if config.combined_weights_active(now):
+        shares_now = config.comp_weights_as_of(now)
+        split = [shares_now.get("lf", 0.5),
+                 shares_now.get("hf", 0.5) + shares_now.get("closers", 0.0)]
+        print(f"netuid {config.NETUID} · combined era · target split from "
+              f"COMP_WEIGHTS {[round(x, 4) for x in split]}")
+    else:
+        print(f"netuid {config.NETUID} · chain split {[round(x, 4) for x in split]}")
 
     lf = lf_vector(os.path.expanduser(a.db), uid_by_hotkey, now)
     hf = hf_grade.mecid1_weights(uid_by_hotkey, now)
