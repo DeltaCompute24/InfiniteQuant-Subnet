@@ -79,8 +79,34 @@ def main() -> int:
             m0 * shares.get("reserve", 0.0)
             + (pct[1] if len(pct) > 1 else 0.0), 2)
 
+    # Per-competition daily TAO, live (the website's scoreboard.json is baked at
+    # deploy time, so a tab that reads only that shows a stale pool forever).
+    pools_tao = None
+    try:
+        _pool = json.loads(Path("/opt/iq-platform/data/live/sn89-pool.json")
+                           .read_text())
+        gross = float(_pool.get("miner_pool_tao_day") or 0.0)
+        cap = 1.0
+        try:
+            _st = json.loads(Path("/opt/iq-platform/data/live/"
+                                  "validator-standing.json").read_text())
+            cap = float((_st.get("weights") or {}).get("miner_cap_pct")
+                        or 100.0) / 100.0
+        except Exception:  # noqa: BLE001
+            pass
+        if gross and pools_pct:
+            pools_tao = {"gross_day": round(gross, 4),
+                         "miner_cap_pct": round(cap * 100, 2)}
+            for comp, ppct in pools_pct.items():
+                pools_tao[comp] = round(gross * ppct / 100.0, 4)
+                pools_tao[comp + "_field"] = round(
+                    gross * ppct / 100.0 * cap, 4)
+    except Exception:  # noqa: BLE001
+        pools_tao = None
+
     doc = {
         "refreshed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "pools_tao_day": pools_tao,
         "netuid": NETUID,
         "mechanism_count": n_mech,
         "emission_split_pct": pct,          # index = mecid (raw chain view)
