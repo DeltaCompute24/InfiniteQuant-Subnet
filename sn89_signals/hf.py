@@ -228,7 +228,10 @@ def load_hf_locks(log_dir: str, since_ms: int) -> list:
             for line in f.open():
                 e = json.loads(line)
                 sub, rcpt = e.get("submit") or {}, e.get("receipt") or {}
-                pair = (sub.get("payload") or {}).get("trade_pair")
+                payload = sub.get("payload") or {}
+                if str(payload.get("kind", "")) == "closers":
+                    continue          # a closers vote never locks the pair
+                pair = payload.get("trade_pair")
                 ts = rcpt.get("grid_t0_ms")
                 if pair and ts and int(ts) >= since_ms:
                     rows.append((sub.get("hk"), str(pair).upper(), MECID, int(ts)))

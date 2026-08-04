@@ -150,3 +150,40 @@ class TestWeightsShape:
         w2 = closers.closers_weights({"hkA": 1}, now=now_ms / 1000 + 60,
                                      cache_dir=cache, qualified_hks={"hkA"})
         assert w2.get(1, 0) > 0
+
+
+class TestClosersDoesNotLockPairs:
+    """A closers vote must never lock the pair on HF/LF.
+
+    Closers receipts share the anchored windows with HF calls, and the LF void
+    path rebuilds its lock index by walking those windows. Without a kind filter
+    a HOLD/CLOSE vote voided the miner's own next LF call on that pair —
+    Brian, 2026-08-04: closers USDJPY CLOSE at 03:42, LF USDJPY LONG voided at
+    03:58 as pair_locked_other_mechanism.
+    """
+
+    def _window(self, tmp_path, entries):
+        import json
+        d = tmp_path / "1785000000000"
+        d.mkdir(parents=True)
+        (d / "receipts.jsonl").write_text("\n".join(json.dumps(e) for e in entries))
+        (tmp_path / "index.json").write_text(json.dumps({"windows": [1785000000000]}))
+        return tmp_path
+
+    def _entry(self, kind, pair, ts):
+        p = {"trade_pair": pair}
+        if kind:
+            p["kind"] = kind
+        return {"submit": {"hk": "hk1", "payload": p},
+                "receipt": {"grid_t0_ms": ts}}
+
+    def test_closers_receipt_is_not_a_lock_row(self, tmp_path):
+        from sn89_signals import hf_grade
+        base = self._window(tmp_path, [self._entry("closers", "USDJPY", 1785000001000)])
+        assert hf_grade.load_hf_lock_rows(f"file://{base}", 0) == []
+
+    def test_hf_receipt_still_locks(self, tmp_path):
+        from sn89_signals import hf_grade
+        base = self._window(tmp_path, [self._entry("hf", "USDJPY", 1785000001000)])
+        rows = hf_grade.load_hf_lock_rows(f"file://{base}", 0)
+        assert [(r[0], r[1]) for r in rows] == [("hk1", "USDJPY")]

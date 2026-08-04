@@ -156,7 +156,15 @@ def load_hf_lock_rows(base: str, since_ms: int) -> list:
             except ValueError:
                 continue
             sub, rcpt = e.get("submit") or {}, e.get("receipt") or {}
-            pair = (sub.get("payload") or {}).get("trade_pair")
+            payload = sub.get("payload") or {}
+            # Closers receipts share these windows with HF calls. A HOLD/CLOSE
+            # vote is not a directional call on the pair — it is a vote on our
+            # open position — so it must NOT lock the pair for the miner's own
+            # LF call. Without this filter a closers vote voided the miner's
+            # next LF call on that pair (Brian, 2026-08-04).
+            if str(payload.get("kind", "")) == "closers":
+                continue
+            pair = payload.get("trade_pair")
             hk, ts = sub.get("hk"), rcpt.get("grid_t0_ms")
             if hk and pair and ts and int(ts) >= since_ms:
                 rows.append((hk, str(pair).upper(), hf.MECID, int(ts)))
