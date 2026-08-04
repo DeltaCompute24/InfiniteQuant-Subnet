@@ -82,14 +82,19 @@ try:
         from sn89_signals import config as _cfg
         if _cfg.combined_weights_active(_time.time()):
             shares = _cfg.comp_weights_as_of(_time.time())
-            hf_like = shares.get("hf", 0.0) + shares.get("closers", 0.0)
             base = lf_frac                      # mecid-0's chain share (→1.0 post-split-move)
+            # Each competition reports its OWN slice. This used to publish
+            # hf = hf + closers, from when the site had two buckets and Closers
+            # had no card; after the carve-out that made HF read 50% of the
+            # pool while its card said 30%.
             lf_frac = base * shares.get("lf", 0.0)
-            hf_frac_override = base * hf_like
+            hf_frac_override = base * shares.get("hf", 0.0)
+            closers_frac = base * shares.get("closers", 0.0)
+            reserve_frac = base * shares.get("reserve", 0.0)
         else:
-            hf_frac_override = None
+            hf_frac_override = closers_frac = reserve_frac = None
     except Exception:
-        hf_frac_override = None
+        hf_frac_override = closers_frac = reserve_frac = None
     pool = {
         "netuid": NETUID,
         "network": NETWORK,
@@ -103,6 +108,16 @@ try:
                                   else (1.0 - lf_frac), 6),
         "hf_pool_tao_day": round(total_miner_pool * (hf_frac_override if hf_frac_override is not None
                                   else (1.0 - lf_frac)), 4),
+        # own slices, so a consumer never has to infer one competition's pool
+        # from another's (which is how HF ended up carrying Closers' share)
+        "closers_emission_frac": (round(closers_frac, 6)
+                                  if closers_frac is not None else None),
+        "closers_pool_tao_day": (round(total_miner_pool * closers_frac, 4)
+                                 if closers_frac is not None else None),
+        "reserve_emission_frac": (round(reserve_frac, 6)
+                                  if reserve_frac is not None else None),
+        "reserve_pool_tao_day": (round(total_miner_pool * reserve_frac, 4)
+                                 if reserve_frac is not None else None),
     }
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(POOL_OUT), suffix=".tmp")
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
