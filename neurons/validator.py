@@ -570,11 +570,17 @@ class Validator:
                 hotkey=hk, trade_pair=s.trade_pair, direction=s.direction,
                 t0_unix=t0, status="ok" if status in ("revealed", "pending") else status,
                 horizon_h=config.horizon_h_for(s.trade_pair, t0))))
-        filtered = scoring.apply_validity_filters([r for _, _, r in rows],
-                                                  hf_locks=hf_locks)
-        for (commit_hex, s, _), fr in zip(rows, filtered):
-            if fr.status == "void":
-                self._void(commit_hex, fr.void_reason or "validity", strike=False)
+        # apply_validity_filters SORTS its input and returns the sorted list, so
+        # zipping the result against our own (unsorted) rows wrote each verdict
+        # onto a different commit — that is how a call with no lock row at all
+        # was voided `pair_locked_other_mechanism` (Israel #5147, 2026-08-04).
+        # It mutates each GradedRow in place and sorted() preserves identity, so
+        # our own objects already carry the verdict: match by identity, never by
+        # position.
+        scoring.apply_validity_filters([r for _, _, r in rows], hf_locks=hf_locks)
+        for commit_hex, _s, r in rows:
+            if r.status == "void":
+                self._void(commit_hex, r.void_reason or "validity", strike=False)
 
         # touch-grade whatever survives and isn't decisive yet
         now_ms = int(time.time() * 1000)
