@@ -504,7 +504,10 @@ class Validator:
                 sb, bytes.fromhex(sub["sig"]))
             t0 = int(rcpt.get("grid_t0_ms") or 0)
             when = time.strftime("%H:%M:%S", time.gmtime(t0 / 1000)) if t0 else "?"
-            msg = (f"🧭 *CLOSERS submission* (testnet {config.NETUID})\n"
+            # The network NAME, not a hardcoded word. This read "testnet" on netuid 89
+            # for as long as it existed, so every real mainnet closers vote reached the
+            # operator channel looking like test traffic and was discounted as such.
+            msg = (f"🧭 *CLOSERS submission* ({config.NETWORK} {config.NETUID})\n"
                    f"miner `{sub['hk'][:10]}…{sub['hk'][-6:]}`\n"
                    f"*{p.get('action')}* {p.get('trade_pair')} "
                    f"(position {str(p.get('position_id'))[:14]}…)\n"
