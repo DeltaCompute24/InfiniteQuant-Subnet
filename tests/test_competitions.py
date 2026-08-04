@@ -73,8 +73,15 @@ class TestCombine:
                        3: pytest.approx(0.25), 4: pytest.approx(0.25)}
 
     def test_default_shares_come_from_config(self):
+        # Shares always total 1. Keys are the COMPETITIONS plus, optionally, a
+        #  burn placeholder — a share deliberately held unearned (used
+        # while the referrer cut waits on a chain split, so it burns in-band
+        # instead of silently paying LF/HF). A reserve is NOT a competition and
+        # must never gain an earner vector.
         assert sum(config.COMP_WEIGHTS.values()) == pytest.approx(1.0)
-        assert set(config.COMP_WEIGHTS) == {"lf", "hf", "closers"}
+        competitions = set(config.COMP_WEIGHTS) - {"reserve"}
+        assert competitions <= {"lf", "hf", "closers"}
+        assert {"lf", "hf"} <= competitions
 
 
 class TestVersionGate:

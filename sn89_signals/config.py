@@ -868,6 +868,15 @@ COMP_WEIGHTS_HISTORY: tuple = (
     # 0.125 x 80% = the same 35/35/10 of total. If the retry fails, pull this
     # row forward — leaving it under a 100/0 split would overpay LF/HF by 25%.
     (1785866700, "lf:0.4375,hf:0.4375,closers:0.125"),
+    # ⚑ 2026-08-04 22:00 UTC — REVERT. The row above is mecid-0-RELATIVE and
+    # assumed the 80/20 chain split would have landed by 18:05. It did not (the
+    # retry never ran; MechanismEmissionSplit is still [65535, 0]), so under a
+    # 100/0 split it paid LF and HF 43.75% of TOTAL each instead of 35% — a 25%
+    # overpay, live 18:05–22:00 — and reserved nothing for referrers. Back to
+    # the reserve form, which is correct while the chain routes 100% through
+    # mecid-0. Re-add a mecid-0-relative row ONLY once the split is confirmed
+    # on chain, never on a schedule.
+    (1785967200, "lf:0.35,hf:0.35,closers:0.10,reserve:0.20"),
 )
 _COMP_ENV = os.getenv("SN89_COMP_WEIGHTS", "")
 if _COMP_ENV:
