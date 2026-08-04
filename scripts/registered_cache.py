@@ -15,12 +15,22 @@ OUT = os.getenv("SN89_AUTH_REG_CACHE",
 st = bt.Subtensor(network=NETWORK)
 mg = st.metagraph(NETUID)
 hotkeys = list(mg.hotkeys)
+# coldkey -> the hotkeys it owns. A hosted miner only ever holds their coldkey,
+# so this is what lets the auth path say "that is your coldkey, your hotkey is
+# X and we hold it" instead of a bare "not registered".
+owners: dict = {}
+try:
+    for ck, hk in zip(list(mg.coldkeys), hotkeys):
+        owners.setdefault(ck, []).append(hk)
+except Exception:  # noqa: BLE001 — the hotkey set is the load-bearing half
+    owners = {}
 payload = {
     "netuid": NETUID,
     "network": NETWORK,
     "updated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
     "n": len(hotkeys),
     "hotkeys": hotkeys,
+    "owner_coldkeys": owners,
 }
 d = os.path.dirname(OUT)
 fd, tmp = tempfile.mkstemp(dir=d, suffix=".tmp")
