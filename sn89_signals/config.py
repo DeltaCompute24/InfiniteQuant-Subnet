@@ -848,11 +848,17 @@ COMP_WEIGHTS_HISTORY: tuple = (
     # (combine() dead-share rule), so interim pools are exactly
     # LF 30 / HF 30 / Closers 20 / burn 20 until the chain split lands.
     (1785791400, "lf:0.30,hf:0.30,closers:0.20,reserve:0.20"),
+    # ⚑ 2026-08-04 04:10 UTC (Whit): Closers cut to 10% of total miner
+    # incentive, LF/HF take the freed 10% (35/35). Of the TOTAL:
+    # LF 35 / HF 35 / Closers 10 / Referrers 20. Burn while closers and
+    # referrers have no earners = 0.40x(LF+HF) + closers + referrers = 58%.
+    (1785816600, "lf:0.35,hf:0.35,closers:0.10,reserve:0.20"),
     # ⚑ 2026-08-04 18:05 UTC: the staged retry lands the 80/20 chain split at
-    # ~18:00; mecid-0 shares return to 37.5/37.5/25 and the referrers' 20%
-    # flows on-chain via mecid-1. If the retry fails, pull this row forward —
-    # leaving it with a 100/0 chain split would overpay LF/HF again.
-    (1785866700, "lf:0.375,hf:0.375,closers:0.25"),
+    # ~18:00, so mecid-0 carries 80% of emission and the referrers' 20% moves
+    # on-chain to mecid-1. These are mecid-0-RELATIVE shares: 0.4375/0.4375/
+    # 0.125 x 80% = the same 35/35/10 of total. If the retry fails, pull this
+    # row forward — leaving it under a 100/0 split would overpay LF/HF by 25%.
+    (1785866700, "lf:0.4375,hf:0.4375,closers:0.125"),
 )
 _COMP_ENV = os.getenv("SN89_COMP_WEIGHTS", "")
 if _COMP_ENV:
