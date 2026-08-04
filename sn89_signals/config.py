@@ -27,7 +27,8 @@ DRAND_PUBLIC_KEY = (
 ALG_LABEL = "x25519-hkdf-sha256+chacha20poly1305+drand-tlock"
 
 # ── Envelope / reveal (CONSENSUS) ────────────────────────────────────────────
-# Reveal delay cut 24h→2h (2026-07-12). A competitor reading the plaintext 2h in
+# Reveal delay cut 24h→2h (2026-07-12), then 2h→15min (2026-08-04).
+# A competitor reading the plaintext 2h in
 # enters a stale, mostly-played-out move (crypto grade window is 8h) — a losing
 # entry — so the longer timelock guarded no real edge, while the 24h gap between a
 # trade resolving in-bot and revealing on-chain confused traders ("won but the
@@ -36,9 +37,17 @@ ALG_LABEL = "x25519-hkdf-sha256+chacha20poly1305+drand-tlock"
 # hosted miners that haven't bumped config yet keep validating instead of voiding.
 # Drop REVEAL_DELAY_LEGACY_S from the tuple once nothing committed before the flip
 # remains sealed (≥24h after cutover).
-REVEAL_DELAY_S = 2 * 3600           # tlock round = commit time + 2h
+# ⚑ 2026-08-04: 2h -> 15min (Whit). The reveal delay is the window in which the
+# validator cannot see the call, so nothing shown to a miner during it can be
+# validator truth — it has to come from our own marks, and that split is what
+# produced the grading disputes (a 0.13bps near-miss, a card that lagged a real
+# touch). 15 minutes keeps the anti-front-running purpose while shrinking the
+# blind spot. Revealing later confers no edge: a call is priced and graded from
+# its COMMIT time, never its reveal.
+REVEAL_DELAY_S = 15 * 60            # tlock round = commit time + 15min
+REVEAL_DELAY_PREV_S = 2 * 3600      # pre-2026-08-04 delay; ACCEPTED during migration
 REVEAL_DELAY_LEGACY_S = 24 * 3600   # pre-2026-07-12 delay; ACCEPTED during migration
-ACCEPTED_REVEAL_DELAYS_S = (REVEAL_DELAY_S, REVEAL_DELAY_LEGACY_S)
+ACCEPTED_REVEAL_DELAYS_S = (REVEAL_DELAY_S, REVEAL_DELAY_PREV_S, REVEAL_DELAY_LEGACY_S)
 ROUND_TOLERANCE_S = 600             # blob round must be within ±10min of expected
                                     # (MANTIS UID-46 lesson: wrong round ⇒ void, never hang)
 REVEAL_GRACE_S = int(os.getenv("SN89_REVEAL_GRACE_S", str(6 * 3600)))
