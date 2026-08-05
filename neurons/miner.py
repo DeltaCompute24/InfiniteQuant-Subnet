@@ -285,16 +285,25 @@ def submit_closers(wallet: "bt.Wallet", position_id: str, action: str,
     action = action.upper()
     if action not in ("HOLD", "CLOSE"):
         raise ValueError("action must be HOLD or CLOSE")
+    # Feed source, in order: an explicit URL (someone mirroring it themselves),
+    # then SN89_CLOSERS_POSITIONS_URL, then the SAME authenticated endpoint the
+    # `positions` subcommand uses. Without that last fallback this required an
+    # env var with no public URL to point at, so the documented flow failed at
+    # the vote step while step 1 worked (Canefis, 2026-08-05).
     url = positions_url or closers.POSITIONS_URL
-    if not url:
-        raise ValueError("set SN89_CLOSERS_POSITIONS_URL (the open-positions feed)")
-    with urllib.request.urlopen(url, timeout=10) as r:
-        doc = json.loads(r.read().decode())
-    pos = next((p for p in doc.get("positions", [])
+    if url:
+        with urllib.request.urlopen(url, timeout=10) as r:
+            positions = json.loads(r.read().decode()).get("positions") or []
+    else:
+        positions = fetch_positions_feed(mint_miner_token(wallet))
+    pos = next((p for p in positions
                 if str(p.get("id")) == str(position_id)), None)
     if pos is None:
-        ids = [str(p.get("id")) for p in doc.get("positions", [])][:10]
-        raise ValueError(f"unknown position {position_id!r}; open now: {ids}")
+        ids = [str(p.get("id")) for p in positions][:10]
+        hint = (", ".join(ids) if ids else
+                "none right now — a position becomes votable only after it "
+                "moves ±0.10% in position P&L")
+        raise ValueError(f"unknown position {position_id!r}. Open now: {hint}")
 
     hk = wallet.hotkey.ss58_address
     seq = _hf_next_seq(hk)
