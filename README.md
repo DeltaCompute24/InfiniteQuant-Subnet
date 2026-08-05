@@ -134,11 +134,54 @@ positions (`SN89_CLOSERS_POSITIONS_URL`, JSON `{positions: [{id, trade_pair,
 direction, ...}]}`), and you submit **HOLD** (it will keep improving) or
 **CLOSE** (it will give back) on any position, whenever you choose:
 
+**1. List what is open.** Positions are keyed by an id you pass to the vote, so
+start here:
+
 ```bash
-# read the feed, pick a position id, vote
-python neurons/miner.py --wallet.name mywallet --wallet.hotkey miner \
-    submit-closers <position-id> CLOSE
+python neurons/miner.py --wallet.name mywallet --wallet.hotkey miner positions
 ```
+
+```jsonc
+{"generated_at_ms": 1785..., "positions": [
+  {"id": "f8973be2-58ec-467d-a718-0a644df9229b",
+   "trade_pair": "BTCUSD", "venue_pair": "BTCUSDC",
+   "direction": "LONG", "opened_ms": 1785..., "miner": "iq"}
+]}
+```
+
+`trade_pair` is what your vote is GRADED on; `venue_pair` is the instrument we
+actually hold (a USDC perp grades against its USD spot twin). A position only
+appears once it has moved ±0.10% in position P&L — before that it is not votable,
+so an empty list is normal, not an error.
+
+**2. Vote.** `HOLD` = it keeps improving, `CLOSE` = it gives back:
+
+```bash
+python neurons/miner.py --wallet.name mywallet --wallet.hotkey miner \
+    submit-closers f8973be2-58ec-467d-a718-0a644df9229b CLOSE
+```
+
+Prints the countersigned receipt on success; a refusal prints `REFUSED: <reason>`
+and exits non-zero, so it scripts cleanly.
+
+**3. Push feed, for an algo.** Holds an SSE stream open and prints one JSON line
+per change — new position, closed position — instead of polling:
+
+```bash
+python neurons/miner.py --wallet.name mywallet --wallet.hotkey miner \
+    watch-positions | your_algo
+```
+
+**4. Rest a vote until a price.** Fires locally when the trigger hits, so your
+keys never leave your box:
+
+```bash
+python neurons/miner.py --wallet.name mywallet --wallet.hotkey miner \
+    limit --kind closers --position-id <id> --action CLOSE --trigger 63500
+```
+
+`limit` also takes `--kind hf|lf` with `--pair` and `--direction` for the other
+two competitions.
 
 Same transport and countersigned receipt as HF — one more payload kind on the
 same ingest. Grading: the vol-normalized move over the horizon after your
