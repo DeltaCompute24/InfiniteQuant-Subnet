@@ -428,6 +428,10 @@ class Ingest:
         is_closers = str((payload or {}).get("kind", "")) == "closers"
         try:
             if is_closers:
+                # BASE-or-better at submission time. Enforced here so an
+                # unqualified miner is told in milliseconds rather than
+                # discovering at payout that a graded record was never payable.
+                closers.check_qualified(hk, t_recv_ms / 1000.0)
                 closers.validate_submission(payload, t0)
                 closers.check_rate(self.closers_sent_ms.get(hk, []), t_recv_ms)
             else:

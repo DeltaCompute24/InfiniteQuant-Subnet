@@ -108,6 +108,46 @@ def baseline_z(asset_class: str, action: str) -> float:
     return float(BASELINE_Z.get((asset_class, action), 0.0))
 
 
+# ── qualification (BASE or better) ──────────────────────────────────────────
+# Entry is limited to miners already qualified on LF or HF. This is enforced at
+# INGEST as well as at payout: a vote from an unqualified miner can never be
+# paid, so accepting it only builds a public record that misleads its owner.
+STANDING_PATH = os.getenv(
+    "SN89_STANDING_PATH", "/opt/iq-platform/data/live/sn89-standing-main.json")
+QUALIFY_REFRESH_S = int(os.getenv("SN89_CLOSERS_QUALIFY_REFRESH_S", "60"))
+_qual_cache: dict = {"at": 0.0, "hks": None}
+
+
+def qualified_hotkeys(now: float | None = None) -> set | None:
+    """Hotkeys meeting the LF/HF qualification gate, or None if unknowable.
+
+    None is NOT an empty set: an unreadable standing file must not silently
+    refuse every miner, the same fail-open/closed distinction the HF lock feed
+    draws. The caller decides.
+    """
+    now = time.time() if now is None else now
+    if _qual_cache["hks"] is not None and now - _qual_cache["at"] <= QUALIFY_REFRESH_S:
+        return _qual_cache["hks"]
+    try:
+        with open(STANDING_PATH, encoding="utf-8") as fh:
+            roster = json.load(fh).get("roster") or []
+    except (OSError, ValueError):
+        return _qual_cache["hks"]          # last good set, or None on first run
+    hks = {r["hotkey"] for r in roster
+           if r.get("hotkey") and r.get("meets_gate")}
+    _qual_cache.update(at=now, hks=hks)
+    return hks
+
+
+def check_qualified(hotkey: str, now: float | None = None) -> None:
+    """Raise ClosersRejected unless `hotkey` is qualified right now."""
+    hks = qualified_hotkeys(now)
+    if hks is None:
+        return                              # cannot decide -> do not refuse
+    if hotkey not in hks:
+        raise ClosersRejected("not_qualified")
+
+
 # ── ingest-side validation ───────────────────────────────────────────────────
 class ClosersRejected(hf.HFRejected):
     """Refused at ingest — signed, like every HF refusal."""
