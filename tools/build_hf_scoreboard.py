@@ -200,7 +200,16 @@ GRADE_PUBLISH = "/var/lib/sn89-hf/hf_grades.db"
 
 
 def _accepted_calls() -> dict:
-    """(hk, seq) -> {hk, pair, grid_t0_ms} from the accepted-window logs."""
+    """(hk, seq) -> {hk, pair, grid_t0_ms} from the accepted-window logs.
+
+    HF submissions ONLY. The ingest writes every competition into the same window
+    logs, so a Closers vote (`payload.kind == "closers"`) lands here too — and
+    since it is graded by closers.py and never enters the HF grade cache, it read
+    as an HF call `pending` FOREVER. Measured 2026-08-06: 207 of the board's 209
+    pending rows were Closers votes, every one of them already graded on the
+    Closers board. `hf_grade.sync_and_grade` has skipped them from the start; this
+    is the same filter, and the two must not drift.
+    """
     calls = {}
     for f in glob.glob(os.path.join(LOG_DIR, "*.jsonl")):
         if not Path(f).stem.isdigit():
@@ -215,6 +224,8 @@ def _accepted_calls() -> dict:
                 if not hk or seq is None:
                     continue
                 p = sub.get("payload") or {}
+                if str(p.get("kind", "")) == "closers":
+                    continue        # graded by closers.py — not an HF call
                 calls[(hk, seq)] = {
                     "hk": hk, "pair": p.get("trade_pair"),
                     "direction": p.get("direction"),
