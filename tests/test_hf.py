@@ -32,7 +32,36 @@ class TestBoard:
         assert hf.HF_BOARD_V1["XAUUSD"][0] < lf / 4
 
     def test_board_is_as_of_versioned(self):
-        assert hf.hf_bands_as_of(hf.HF_LAUNCH_FROM) is hf.hf_bands_as_of(2_000_000_000)
+        # Was: assert as_of(LAUNCH) is as_of(2e9). That is an identity check across
+        # all time -- it asserts the board NEVER changes, which is the opposite of
+        # as-of versioning, and it passed only while one entry existed. Test the
+        # mechanism instead.
+        assert hf.hf_bands_as_of(hf.HF_LAUNCH_FROM - 1) is None
+        assert hf.hf_bands_as_of(hf.HF_LAUNCH_FROM) is hf.HF_BOARD_V1
+        assert hf.hf_bands_as_of(hf.HF_V2_FROM - 1) is hf.HF_BOARD_V1
+        assert hf.hf_bands_as_of(hf.HF_V2_FROM) is hf.HF_BOARD_V2
+        assert hf.hf_bands_as_of(2_000_000_000) is hf.HF_BOARD_V2
+
+    def test_every_board_version_clears_the_spread_floor(self):
+        # A band may only ever be narrowed to a level where the outcome is still
+        # opinion rather than microstructure. This has to hold for EVERY historical
+        # version, not just the current one, because old calls grade on old boards.
+        for eff, board in hf.HF_BANDS_HISTORY:
+            for pair, row in board.items():
+                spread = hf.HF_TYPICAL_SPREAD_BPS.get(pair)
+                assert spread, f"{pair} has no measured spread"
+                assert row[0] / spread >= hf.MIN_BAND_SPREAD_RATIO, (
+                    f"{pair} band {row[0]} is under "
+                    f"{hf.MIN_BAND_SPREAD_RATIO}x spread in the board effective {eff}")
+
+    def test_a_new_board_version_only_changes_bands(self):
+        # Horizon and asset_class are structural. A recalibration moves the BAND; if
+        # it silently moved a horizon, calls would grade on a window nobody announced.
+        for pair, v1 in hf.HF_BOARD_V1.items():
+            v2 = hf.HF_BOARD_V2[pair]
+            assert v1[2] == v2[2], f"{pair} horizon moved {v1[2]} -> {v2[2]}"
+            assert v1[3] == v2[3], f"{pair} asset_class moved {v1[3]} -> {v2[3]}"
+        assert set(hf.HF_BOARD_V1) == set(hf.HF_BOARD_V2), "pair set changed"
 
 
 class TestValidity:

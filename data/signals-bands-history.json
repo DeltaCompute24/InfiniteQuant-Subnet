@@ -648,5 +648,97 @@
     "tp_bps": 33
    }
   }
+ },
+ {
+  "version": "volnorm-equalwash40-20260808",
+  "effective_from_unix": 1786147200,
+  "note": "Scheduled 45d structural-wash recalibration (scripts/recalibrate_bands.py, LF target 40%, 7pp deadband), effective 2026-08-08T00:00:00Z. Three pairs left the deadband on the 2026-06-22 -> 2026-08-06 window: SOLUSD 159 (52.2% wash) -> 134 (40.1%), XRPUSD 140 (49.0%) -> 123 (40.1%), USDJPY 14 (31.2%) -> 16 (38.8%). The other 14 pairs are inside the deadband and are unchanged. USDJPY is a WIDENING, so this entry ships future-effective and the live board is not touched until the boundary -- flipping the hot-read board ahead of an as-of history entry voids every call in the gap as invalid_payload. Structural wash is a property of price alone (symmetric bands, no miner behaviour), so this responds to volatility regime and not to how selective miners have become. This cycle would have run on 2026-08-01 but the controller died writing its proposal and the run was lost; the write is now atomic and the unit alarms on failure.",
+  "bands": {
+   "BTCUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 105,
+    "tp_bps": 105
+   },
+   "ETHUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 138,
+    "tp_bps": 138
+   },
+   "SOLUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 134,
+    "tp_bps": 134
+   },
+   "XRPUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 123,
+    "tp_bps": 123
+   },
+   "XAUUSD": {
+    "asset_class": "forex-commodities",
+    "sl_bps": 96,
+    "tp_bps": 96
+   },
+   "XAGUSD": {
+    "asset_class": "forex-commodities",
+    "sl_bps": 195,
+    "tp_bps": 195
+   },
+   "EURUSD": {
+    "asset_class": "forex",
+    "sl_bps": 20,
+    "tp_bps": 20
+   },
+   "GBPUSD": {
+    "asset_class": "forex",
+    "sl_bps": 23,
+    "tp_bps": 23
+   },
+   "USDJPY": {
+    "asset_class": "forex",
+    "sl_bps": 16,
+    "tp_bps": 16
+   },
+   "USDCHF": {
+    "asset_class": "forex",
+    "sl_bps": 26,
+    "tp_bps": 26
+   },
+   "USDCAD": {
+    "asset_class": "forex",
+    "sl_bps": 20,
+    "tp_bps": 20
+   },
+   "AUDUSD": {
+    "asset_class": "forex",
+    "sl_bps": 28,
+    "tp_bps": 28
+   },
+   "NZDUSD": {
+    "asset_class": "forex",
+    "sl_bps": 36,
+    "tp_bps": 36
+   },
+   "NZDCHF": {
+    "asset_class": "forex",
+    "sl_bps": 40,
+    "tp_bps": 40
+   },
+   "AUDNZD": {
+    "asset_class": "forex",
+    "sl_bps": 26,
+    "tp_bps": 26
+   },
+   "GBPCAD": {
+    "asset_class": "forex",
+    "sl_bps": 25,
+    "tp_bps": 25
+   },
+   "NZDJPY": {
+    "asset_class": "forex",
+    "sl_bps": 33,
+    "tp_bps": 33
+   }
+  }
  }
 ]

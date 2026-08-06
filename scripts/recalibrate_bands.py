@@ -269,6 +269,28 @@ def run(now: float | None = None) -> dict:
     return prop
 
 
+def _write_proposal(p: dict) -> None:
+    """Write the proposal atomically.
+
+    Uses a temp file + os.replace rather than write_text. write_text opens the
+    EXISTING file, so it needs write permission on that FILE; os.replace needs it
+    on the DIRECTORY. On 2026-08-01 the monthly run computed a correct proposal
+    (the only change it found was HF XAUUSD 12.0 -> 10.1) and then lost it to
+    PermissionError because the stale proposal had drifted to another owner. A
+    propose-only controller whose output vanishes is worse than no controller: it
+    reports success in the log right up to the line that throws.
+    """
+    PROPOSAL_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = PROPOSAL_PATH.with_name(PROPOSAL_PATH.name + f".tmp.{os.getpid()}")
+    try:
+        tmp.write_text(json.dumps(p, indent=1))
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, PROPOSAL_PATH)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
+    _log(f"proposal written to {PROPOSAL_PATH}")
+
 def verify_propagation() -> int:
     """All user-facing copies must equal the consensus board. This is the check
     that would have caught the BTC 103-vs-76 drift found 2026-07-26.
@@ -312,8 +334,6 @@ if __name__ == "__main__":
     if a.verify_propagation:
         sys.exit(1 if verify_propagation() else 0)
     p = run(a.now)
-    PROPOSAL_PATH.parent.mkdir(parents=True, exist_ok=True)
-    PROPOSAL_PATH.write_text(json.dumps(p, indent=1))
-    _log(f"proposal written to {PROPOSAL_PATH}")
+    _write_proposal(p)
     if not AUTO_APPLY:
         _log("PROPOSE-ONLY (SN89_BANDS_AUTO_APPLY != 1) — no board written")

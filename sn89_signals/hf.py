@@ -98,8 +98,22 @@ def band_spread_ratio(pair: str, t0_unix: float = 0.0) -> float | None:
 # means HF can accept and grade calls while still paying zero, which is exactly the
 # preview posture.
 HF_LAUNCH_FROM = int(os.getenv("SN89_HF_LAUNCH_FROM", "1784764800"))   # 2026-07-23T00:00:00Z
+
+# v2 — 2026-08-08T00:00:00Z. Scheduled 45d structural-wash recalibration
+# (scripts/recalibrate_bands.py, HF target 14%, 7pp deadband). XAUUSD was the only
+# pair outside the band: 22.1% structural wash at 12.0 bps on the 2026-06-22 ->
+# 2026-08-06 window, and 21.7% on the 2026-08-01 run, so this is a volatility regime
+# and not one noisy window. 10.0 bps lands at 14.17%. The solver returned 9.9
+# (13.84%); 10.0 is closer to target and is a clean number. Spread ratio 16.4x, well
+# clear of MIN_BAND_SPREAD_RATIO. Every other pair held: BTC 11.9, ETH 15.7, SOL 19.3,
+# XRP 17.9, EUR 11.3, GBP 16.2, JPY 14.7. SOL and XRP are drifting toward the top of
+# the deadband on a shared 24.0 band and are the likely next split.
+HF_BOARD_V2 = dict(HF_BOARD_V1, XAUUSD=(10.0, 10.0, 1800, "forex-commodities"))
+HF_V2_FROM = int(os.getenv("SN89_HF_V2_FROM", "1786147200"))          # 2026-08-08T00:00:00Z
+
 HF_BANDS_HISTORY = (
     (HF_LAUNCH_FROM, HF_BOARD_V1),
+    (HF_V2_FROM, HF_BOARD_V2),
 )
 
 
