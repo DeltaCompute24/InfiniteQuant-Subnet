@@ -171,7 +171,16 @@ def fire_lf(hk: str, signers: dict, payload: dict) -> dict:
         return {"kind": "error", "reason": "lf_needs_wallet_signer"}
     import bittensor as bt
     from neurons.miner import build_signal, submit
-    w = bt.Wallet(name=ent["wallet"], hotkey=ent.get("wallet_hotkey", "default"))
+    # Fall back to the NAME implied by hotkey_file, never to "default". No managed
+    # tenant is named "default" (156 "miner", 3 "miner_e2", 1 "hosted"), so that
+    # guess could only ever produce a FileNotFound — and it did, on every LF order,
+    # while the map entry looked complete.
+    hk_name = ent.get("wallet_hotkey")
+    if not hk_name and ent.get("hotkey_file"):
+        hk_name = os.path.basename(ent["hotkey_file"])
+    if not hk_name:
+        return {"kind": "error", "reason": "lf_signer_has_no_hotkey_name"}
+    w = bt.Wallet(name=ent["wallet"], hotkey=hk_name)
     sig = build_signal(w.hotkey.ss58_address, payload["trade_pair"],
                        payload["direction"], comment="iq-limit")
     return {"kind": "lf.commit", **submit(w, sig)}
