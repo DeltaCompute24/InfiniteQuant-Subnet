@@ -687,6 +687,29 @@ def _signals_view(calls: dict, grades: dict, held: dict, paths: dict, registered
     return con
 
 
+
+def _call_display_status(st, t0_unix, band, now):
+    """What a miner should read on a call that carries no grade yet.
+
+    Before early-decisive grading every call in a batch resolved together, so
+    "pending" meant one thing. It now means either "still running" or "finished,
+    being graded", and only the first is about the trade. Naming which one it is
+    is the difference between information and a suspected stall.
+    """
+    if st == "wash":
+        return "washed"
+    if st is not None:
+        return st
+    horizon_s = int(band[2]) if band else 0
+    # t0_unix is None for a row with no anchored grid point, and band is None for a
+    # pair off the board at that t0 — in neither case can a horizon be computed, so
+    # fall back to the old wording rather than assert a state we cannot support.
+    if not horizon_s or t0_unix is None:
+        return "pending"
+    if now < float(t0_unix) + horizon_s:
+        return "open"
+    return "grading"
+
 def _pace_and_network(con, now: float, max_per_day: int | None):
     """(pace_by_hk, network_block) — or ({}, None) when build_dashboard isn't
     importable, in which case the board simply renders without those sections."""
@@ -849,7 +872,9 @@ def main() -> int:
             "trade_pair": c.get("pair"),
             "asset_class": c.get("asset_class"),
             "direction": c.get("direction"),
-            "status": {"wash": "washed", None: "pending"}.get(st, st),
+            # NB: only the DISPLAY list. The `signals` table above keeps its own
+            # "pending" spelling because DECISIVE and the pace metric key off it.
+            "status": _call_display_status(st, t0_unix, band, now),
             "outcome_bps": round(p["out_bps"]) if p.get("out_bps") is not None else None,
             "entry_price": p.get("entry"),
             "mfe_bps": p.get("mfe_bps"),
