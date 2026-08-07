@@ -46,6 +46,20 @@ GRADE_SETTLE_S = int(os.getenv("SN89_HF_GRADE_SETTLE_S", "900"))
 # the same (by then final) published set, so they still converge.
 GRADE_ABANDON_S = int(os.getenv("SN89_HF_GRADE_ABANDON_S", "21600"))
 
+# Grade a call the moment the SETTLED series already decides it, instead of waiting
+# out its horizon. hf.grade walks in time order and returns at the first decisive
+# touch, so a won/lost read from a series truncated at the settle point is the same
+# won/lost the full series yields — this changes when the row is written, never what
+# it says. Only decisive outcomes qualify: a `wash` off a truncated series is exactly
+# the incomplete-series defect _ticks_for exists to prevent (a short series simply
+# never touches a level), so wash and void still wait for the horizon.
+# Worth the most on forex, whose 2h horizon meant a call decided in 3 minutes stayed
+# pending for 2h15m.
+EARLY_DECISIVE = os.getenv("SN89_HF_EARLY_DECISIVE", "1") == "1"
+# Don't probe a call until it has this much SETTLED series behind it — a call
+# submitted seconds ago has nothing to read and would refetch windows every tempo.
+EARLY_MIN_SPAN_S = int(os.getenv("SN89_HF_EARLY_MIN_SPAN_S", "60"))
+
 
 def _fetch_text(url: str, timeout: float = 15.0) -> str | None:
     try:
@@ -319,55 +333,104 @@ def sync_and_grade(base: str, cache_dir: str, now: float) -> None:
     due = db.execute("SELECT key, hk, t0_ms, pair, direction, end_ms FROM pending "
                      "WHERE end_ms <= ? ORDER BY end_ms, t0_ms, key",
                      (now_ms - GRADE_SETTLE_S * 1000,)).fetchall()
-    for key, hk, t0_ms, pair, direction, end_ms in due:
-        board = hf.hf_bands_as_of(t0_ms / 1000.0)
-        if not board or pair not in board:
-            db.execute("DELETE FROM pending WHERE key=?", (key,))
-            continue
-        tp, sl, horizon_s, _ = board[pair]
-        # ...and ordering alone is not enough: a predecessor stuck in `pending` on a
-        # tick gap is NOT in this batch, so grading its successor now would read an
-        # empty prior set and pass a call the gate should void. Wait for it. It
-        # either grades on a later tempo or is abandoned, and either way it lands
-        # before this one — its end_ms is smaller.
-        blocked = db.execute(
-            "SELECT 1 FROM pending WHERE hk=? AND pair=? AND t0_ms<? LIMIT 1",
-            (hk, pair, int(t0_ms))).fetchone()
-        if blocked:
-            continue
-        ticks, missing = _ticks_for(base, tick_dir, pair, int(t0_ms), int(end_ms))
-        if missing and now_ms < int(end_ms) + GRADE_ABANDON_S * 1000:
-            # Prices we do not hold. Leave the call in `pending` and retry next
-            # tempo rather than grading a hole as `wash` — a grade is written once
-            # and never revisited, so guessing here is permanent.
-            continue
-        entry = hf.price_at(ticks, int(t0_ms))
-        # The same-mechanism open-position gate. A prior call still holding this pair
-        # at t0 voids this one — the trader stacked a second position on a view the
-        # board had not answered yet. Only NON-VOID predecessors hold the pair
-        # (open_until_ms is written as t0_ms for a void), so a refusal never chains.
-        prior_open = [r[0] for r in db.execute(
-            "SELECT open_until_ms FROM grades WHERE hk=? AND pair=? AND t0_ms<? "
-            "AND status!='void' AND open_until_ms IS NOT NULL",
-            (hk, pair, int(t0_ms)))]
-        try:
-            hf.check_pair_open(prior_open, int(t0_ms), t0_ms / 1000.0)
-        except hf.HFRejected:
-            db.execute("INSERT OR REPLACE INTO grades VALUES (?,?,?,?,?,?)",
-                       (key, hk, int(t0_ms), pair, "void", int(t0_ms)))
-            db.execute("DELETE FROM pending WHERE key=?", (key,))
-            continue
-        g = hf.grade(pair, direction, entry, tp, sl, int(t0_ms), horizon_s, ticks)
-        # grade()'s own exit_ms IS open_until_ms on a complete series — the touch for
-        # won/lost, t_end for wash — so take it rather than re-walking. Deriving the
-        # held-until from the grade makes the two impossible to drift apart, which is
-        # the failure that would void legal calls.
-        held = int(t0_ms) if g["status"] == "void" else int(g["exit_ms"])
-        db.execute("INSERT OR REPLACE INTO grades VALUES (?,?,?,?,?,?)",
-                   (key, hk, int(t0_ms), pair, g["status"], int(held)))
-        db.execute("DELETE FROM pending WHERE key=?", (key,))
+    for row in due:
+        _resolve_pending(db, base, tick_dir, row, now_ms, walk_to=None)
+
+    # Then grade anything the SETTLED series ALREADY decides, without waiting out
+    # its horizon. `end_ms > settled_to` is the complement of the `due` query above,
+    # so a call is only ever handled by one pass. The t0 bound skips calls too fresh
+    # to have any readable series yet.
+    if EARLY_DECISIVE:
+        settled_to = now_ms - GRADE_SETTLE_S * 1000
+        early = db.execute(
+            "SELECT key, hk, t0_ms, pair, direction, end_ms FROM pending "
+            "WHERE end_ms > ? AND t0_ms <= ? ORDER BY t0_ms, key",
+            (settled_to, settled_to - EARLY_MIN_SPAN_S * 1000)).fetchall()
+        for row in early:
+            _resolve_pending(db, base, tick_dir, row, now_ms, walk_to=settled_to)
+
     db.commit()
     db.close()
+
+
+def _resolve_pending(db, base: str, tick_dir: str, row, now_ms: int,
+                     walk_to: int | None) -> None:
+    """Resolve ONE pending call. Both passes share this body on purpose — two copies
+    of a consensus rule is how the board and the history drifted apart in July.
+
+    walk_to=None  — the horizon has elapsed. Full behaviour: any outcome may be
+                    written, including wash and void, and the abandon deadline
+                    applies.
+    walk_to=<ms>  — early probe. The series is truncated at the settle point, so a
+                    non-decisive read carries no information and NOTHING is written;
+                    the call stays pending for its horizon.
+    """
+    key, hk, t0_ms, pair, direction, end_ms = row
+    early = walk_to is not None
+    board = hf.hf_bands_as_of(t0_ms / 1000.0)
+    if not board or pair not in board:
+        if not early:
+            db.execute("DELETE FROM pending WHERE key=?", (key,))
+        return
+    tp, sl, horizon_s, _ = board[pair]
+    # ...and ordering alone is not enough: a predecessor stuck in `pending` on a
+    # tick gap is NOT in this batch, so grading its successor now would read an
+    # empty prior set and pass a call the gate should void. Wait for it. It
+    # either grades on a later tempo or is abandoned, and either way it lands
+    # before this one — its end_ms is smaller.
+    blocked = db.execute(
+        "SELECT 1 FROM pending WHERE hk=? AND pair=? AND t0_ms<? LIMIT 1",
+        (hk, pair, int(t0_ms))).fetchone()
+    if blocked:
+        return
+    walk_end = min(int(end_ms), int(walk_to)) if early else int(end_ms)
+    if early and walk_end <= int(t0_ms):
+        return
+    ticks, missing = _ticks_for(base, tick_dir, pair, int(t0_ms), walk_end)
+    if missing:
+        # Prices we do not hold. Leave the call in `pending` and retry next
+        # tempo rather than grading a hole as `wash` — a grade is written once
+        # and never revisited, so guessing here is permanent. A hole is fatal to an
+        # early read too: the touch it hides could be the FIRST one, which is the
+        # one that decides the call.
+        if early or now_ms < int(end_ms) + GRADE_ABANDON_S * 1000:
+            return
+    entry = hf.price_at(ticks, int(t0_ms))
+    # The same-mechanism open-position gate. A prior call still holding this pair
+    # at t0 voids this one — the trader stacked a second position on a view the
+    # board had not answered yet. Only NON-VOID predecessors hold the pair
+    # (open_until_ms is written as t0_ms for a void), so a refusal never chains.
+    prior_open = [r[0] for r in db.execute(
+        "SELECT open_until_ms FROM grades WHERE hk=? AND pair=? AND t0_ms<? "
+        "AND status!='void' AND open_until_ms IS NOT NULL",
+        (hk, pair, int(t0_ms)))]
+    try:
+        hf.check_pair_open(prior_open, int(t0_ms), t0_ms / 1000.0)
+    except hf.HFRejected:
+        if early:
+            return          # a void costs the miner nothing to learn at the horizon
+        db.execute("INSERT OR REPLACE INTO grades VALUES (?,?,?,?,?,?)",
+                   (key, hk, int(t0_ms), pair, "void", int(t0_ms)))
+        db.execute("DELETE FROM pending WHERE key=?", (key,))
+        return
+    g = hf.grade(pair, direction, entry, tp, sl, int(t0_ms), horizon_s, ticks)
+    if early:
+        # Only a decisive touch INSIDE the settled span is trustworthy here. `wash`
+        # off a truncated series means "no touch YET" and would be a permanent
+        # verdict on an unfinished call; `void` for no_entry_price may still resolve
+        # once a missing leading window publishes.
+        if g["status"] not in ("won", "lost"):
+            return
+        if int(g["exit_ms"]) > walk_end:
+            return
+    # grade()'s own exit_ms IS open_until_ms on a complete series — the touch for
+    # won/lost, t_end for wash — so take it rather than re-walking. Deriving the
+    # held-until from the grade makes the two impossible to drift apart, which is
+    # the failure that would void legal calls.
+    held = int(t0_ms) if g["status"] == "void" else int(g["exit_ms"])
+    db.execute("INSERT OR REPLACE INTO grades VALUES (?,?,?,?,?,?)",
+               (key, hk, int(t0_ms), pair, g["status"], int(held)))
+    db.execute("DELETE FROM pending WHERE key=?", (key,))
 
 
 def _history(cache_dir: str):
