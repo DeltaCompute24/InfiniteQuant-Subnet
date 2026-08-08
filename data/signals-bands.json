@@ -1,7 +1,7 @@
 {
- "version": "volnorm-equalwash40-20260726",
+ "version": "volnorm-equalwash40-20260808",
  "vol_window_days": 30,
- "note": "One-time vol recalibration to an EQUAL structural wash target of 40% on every asset, effective 2026-07-26T06:00:00Z. Structural wash = P(the path never travels the band, either way, inside the horizon) \u2014 a property of price alone, measured on 90d of 1m bars. The board was not in fact vol-normalised: z = band/sigma_horizon was 0.94-1.06 on crypto but 0.57-0.59 on metals, so XAUUSD resolved ~4x more easily than BTCUSD and a gold call banked decisive outcomes a crypto call could not. The 2026-07-11 pass narrowed gold 88->62, which moved it further off curve, not onto it. Crypto is already on curve and barely moves; the correction is almost entirely metals. Signals committed before effective_from grade on the prior entry (no regrade). Maintained monthly from here by scripts/recalibrate_bands.py.",
+ "note": "Scheduled 45d structural-wash recalibration (scripts/recalibrate_bands.py, LF target 40%, 7pp deadband), effective 2026-08-08T00:00:00Z. SOLUSD 159 -> 134 (structural wash 52.2% -> 40.1%), XRPUSD 140 -> 123 (49.0% -> 40.1%), USDJPY 14 -> 16 (31.2% -> 38.8%). The other 14 pairs were inside the deadband and are unchanged. Structural wash is the probability a path never travels the band either way inside the horizon, measured on 45d of 1m bars -- a property of price alone, so it tracks volatility regime and not miner selectivity. Values are copied from the history entry now in force, never recomputed here.",
  "bands": {
   "BTCUSD": {
    "asset_class": "crypto",
@@ -15,13 +15,13 @@
   },
   "SOLUSD": {
    "asset_class": "crypto",
-   "sl_bps": 159,
-   "tp_bps": 159
+   "sl_bps": 134,
+   "tp_bps": 134
   },
   "XRPUSD": {
    "asset_class": "crypto",
-   "sl_bps": 140,
-   "tp_bps": 140
+   "sl_bps": 123,
+   "tp_bps": 123
   },
   "XAUUSD": {
    "asset_class": "forex-commodities",
@@ -45,8 +45,8 @@
   },
   "USDJPY": {
    "asset_class": "forex",
-   "sl_bps": 14,
-   "tp_bps": 14
+   "sl_bps": 16,
+   "tp_bps": 16
   },
   "USDCHF": {
    "asset_class": "forex",
