@@ -335,6 +335,61 @@ def sync_and_grade(base: str, cache_dir: str, now: float,
 
 
 # ── weights ──────────────────────────────────────────────────────────────────
+def _eligible_scores(per_hk: dict, uid_by_hk: dict,
+                     qualified_hks: set | None) -> dict:
+    """{hotkey: positive score sum} for keys that clear every closers gate —
+    registered, qualified (when required), and at least CLOSERS_MIN_CALLS graded
+    calls in the window. The single definition of "who ranks", shared by the
+    weight vector and the referrer tally so the two cannot drift on eligibility.
+    """
+    out: dict[str, float] = {}
+    for hk, ss in per_hk.items():
+        if uid_by_hk.get(hk) is None:
+            continue
+        if CLOSERS_REQUIRE_QUALIFIED and hk not in (qualified_hks or set()):
+            continue
+        if len(ss) < CLOSERS_MIN_CALLS:
+            continue
+        total = sum(ss)
+        if total > 0:
+            out[hk] = total
+    return out
+
+
+def _window_scores(now: float, base: str | None, cache_dir: str | None) -> dict:
+    """{hotkey: [call scores]} over the trailing window, graded rows only."""
+    base = base or hf.HF_PUBLIC_BASE
+    cache_dir = cache_dir or os.path.expanduser(
+        os.getenv("SN89_CLOSERS_GRADE_CACHE", "~/.sn89/closers-grade"))
+    sync_and_grade(base, cache_dir, now)
+    since_ms = int((now - CLOSERS_WINDOW_S) * 1000)
+    db = _db(cache_dir)
+    per_hk: dict[str, list[float]] = {}
+    for hk, score, status in db.execute(
+            "SELECT hk, score, status FROM grades WHERE t0_ms >= ?", (since_ms,)):
+        if status == "graded":
+            per_hk.setdefault(hk, []).append(float(score))
+    db.close()
+    return per_hk
+
+
+def closers_tallies(uid_by_hk: dict, now: float | None = None,
+                    base: str | None = None, cache_dir: str | None = None,
+                    qualified_hks: set | None = None) -> dict:
+    """{hotkey: raw closers score} — the ranking basis behind closers_weights,
+    before the pro-rata split, the emission cap and the burn.
+
+    Feeds the referrer mechanism (§ referrer multicomp). Closers has no dust
+    floor, so this is nearer to its vector than the LF/HF cases are to theirs,
+    but it is still the RAW basis on purpose: the referrer score normalizes each
+    competition itself, and handing it an already-capped vector would apply
+    MINER_EMISSION_CAP twice.
+    """
+    now = time.time() if now is None else now
+    per_hk = _window_scores(now, base, cache_dir)
+    return _eligible_scores(per_hk, uid_by_hk, qualified_hks)
+
+
 def closers_weights(uid_by_hk: dict, now: float | None = None,
                     base: str | None = None, cache_dir: str | None = None,
                     qualified_hks: set | None = None) -> dict:
@@ -348,33 +403,12 @@ def closers_weights(uid_by_hk: dict, now: float | None = None,
     qualified_hks: the HF/LF-qualified set when CLOSERS_REQUIRE_QUALIFIED.
     Burn + the miner emission cap behave exactly as the other competitions."""
     now = time.time() if now is None else now
-    base = base or hf.HF_PUBLIC_BASE
-    cache_dir = cache_dir or os.path.expanduser(
-        os.getenv("SN89_CLOSERS_GRADE_CACHE", "~/.sn89/closers-grade"))
-    sync_and_grade(base, cache_dir, now)
-
-    since_ms = int((now - CLOSERS_WINDOW_S) * 1000)
-    db = _db(cache_dir)
-    per_hk: dict[str, list[float]] = {}
-    for hk, score, status in db.execute(
-            "SELECT hk, score, status FROM grades WHERE t0_ms >= ?", (since_ms,)):
-        if status == "graded":
-            per_hk.setdefault(hk, []).append(float(score))
-    db.close()
+    per_hk = _window_scores(now, base, cache_dir)
 
     weights: dict[int, float] = {}
-    scores: dict[int, float] = {}
-    for hk, ss in per_hk.items():
-        uid = uid_by_hk.get(hk)
-        if uid is None:
-            continue
-        if CLOSERS_REQUIRE_QUALIFIED and hk not in (qualified_hks or set()):
-            continue
-        if len(ss) < CLOSERS_MIN_CALLS:
-            continue
-        total = sum(ss)
-        if total > 0:
-            scores[uid] = total
+    scores: dict[int, float] = {
+        uid_by_hk[hk]: s
+        for hk, s in _eligible_scores(per_hk, uid_by_hk, qualified_hks).items()}
 
     pool = sum(scores.values())
     cap = config.MINER_EMISSION_CAP

@@ -852,6 +852,43 @@ def hf_compute_weights(decisive_by_hk: dict, first_seen_by_hk: dict,
         return scoring.compute_weights(states, now)
 
 
+def hf_compute_tallies(decisive_by_hk: dict, first_seen_by_hk: dict,
+                       uid_by_hk: dict, now: float, subs_by_hk: dict,
+                       graded_by_hk: dict | None = None) -> dict:
+    """{hotkey: decayed qualified-win tally} over HF-only outcomes — the RAW
+    earning currency behind hf_compute_weights, before any floor or cap.
+
+    Exists for the referrer mechanism (§ referrer multicomp), which scores a
+    recruiter off what their recruits are earning across every competition and
+    must NOT read a weight vector to get it: compute_weights adds the immunity
+    dust floor and the probation floor, and paying a recruiter for those would
+    make registering idle hotkeys profitable.
+
+    Same eligibility gate as the vector — a miner below HF_QUALIFY_MIN_SUBMISSIONS
+    or HF_QUALIFY_MIN_TRADING_DAYS is absent, not zero — so the two cannot
+    disagree about who is a participant. Runs inside hf_scoring_config for the
+    same reason every other HF caller does: the LF constants would produce a
+    different tally than the vector was built from.
+    """
+    from . import scoring
+
+    with hf_scoring_config():
+        out: dict[str, float] = {}
+        for hk, decisive in decisive_by_hk.items():
+            if uid_by_hk.get(hk) is None:
+                continue
+            eligible = hf_eligible_from(subs_by_hk.get(hk, []))
+            if eligible is None:
+                continue
+            qwins = scoring.qualified_wins(
+                decisive, eligible, habitual=False,
+                graded=(graded_by_hk or {}).get(hk))
+            t = scoring.decayed_qwin_tally(qwins, now)
+            if t > 0:
+                out[hk] = t
+        return out
+
+
 # ── on-chain anchor encoding (CONSENSUS) ─────────────────────────────────────
 # A commitment field holds at most 128 RAW BYTES, and two 64-char hex roots alone
 # are already 128 — so the two roots are bound into ONE window root and the halves

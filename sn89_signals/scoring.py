@@ -473,6 +473,63 @@ def referrer_scores(pairs: list[tuple[str, str]],
     return scores
 
 
+def blended_recruit_tallies(tallies_by_comp: dict[str, dict[str, float]],
+                            shares: dict[str, float]) -> dict[str, float]:
+    """Collapse per-competition raw tallies into ONE cross-competition tally.
+
+        blended[hk] = Σ_c  share_c · tally_c[hk] / Σ_field tally_c
+
+    NORMALIZE-THEN-WEIGHT, the same property competitions.combine relies on: a
+    recruit is credited with their share OF a competition, scaled by what that
+    competition is worth. Summing raw tallies instead would let the metrics'
+    natural scales decide — Closers sums winsorized vol-normalized scores while
+    LF sums tier-weighted decayed wins, and whichever runs bigger numbers would
+    quietly become the only competition a recruiter is paid for.
+
+    Two things this deliberately consumes are RAW tallies, not weight vectors:
+
+      * a weight vector carries the immunity DUST floor, so scoring off it would
+        pay a recruiter for registering hotkeys and never trading them — the
+        cheapest sybil in the mechanism. A tally has no floor.
+      * the LF vector carries the recruit's own +10% referral bonus, so scoring
+        off it would compound the bonus into the score that caused it.
+
+    `shares` normally comes from config.comp_weights_as_of(now) with the burn
+    placeholders dropped and the remainder renormalized (see referrer_shares).
+    A competition with an empty field contributes zero to everyone, which is
+    correct for a RELATIVE score — there is nothing to burn in a score.
+    """
+    blended: dict[str, float] = {}
+    for comp, share in shares.items():
+        if share <= 0:
+            continue
+        field = tallies_by_comp.get(comp) or {}
+        total = sum(v for v in field.values() if v > 0)
+        if total <= 0:
+            continue
+        for hk, v in field.items():
+            if v > 0:
+                blended[hk] = blended.get(hk, 0.0) + share * (v / total)
+    return blended
+
+
+def referrer_shares(comp_shares: dict[str, float]) -> dict[str, float]:
+    """The competition shares a recruiter is scored across.
+
+    Drops non-competition keys — `reserve` is a pure BURN placeholder holding
+    the referrers' own carve-out inside mecid-0, and crediting a recruit for it
+    would pay the referrer pool out of itself. The remainder is renormalized so
+    the LF/HF/Closers RELATIVE weighting is what it looks like, independent of
+    how much reserve happens to be parked in the row this era.
+    """
+    live = {k: v for k, v in comp_shares.items()
+            if v > 0 and k not in config.REFERRER_SCORE_EXCLUDED_COMPS}
+    total = sum(live.values())
+    if total <= 0:
+        return {}
+    return {k: v / total for k, v in live.items()}
+
+
 def referrer_weights(scores: dict[str, float], uid_by_hk: dict[str, int],
                      burn_uid: int | None = None) -> dict[int, float]:
     """{uid: weight} for the referrer mechanism (mecid 1). Pro-rata by score,

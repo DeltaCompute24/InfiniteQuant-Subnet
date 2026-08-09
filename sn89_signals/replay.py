@@ -149,6 +149,49 @@ def weights_from_journal(
                                    referral_pairs=referral_pairs)
 
 
+def referrer_recruit_tallies(
+    signals: list[dict],
+    meta: dict[str, dict],
+    now: float,
+    hotkeys,
+) -> dict[str, float]:
+    """{hotkey: LF decayed qualified-win tally} for the given hotkeys.
+
+    Split out of referrer_weights_from_journal so the LF leg of the referrer
+    score has ONE definition — the publisher that shows a recruiter WHY they
+    score needs the same per-recruit numbers, and a second copy of this loop is
+    how the page and the payout drift apart.
+    """
+    # Bucket ONCE. The original inline version rescanned the whole journal twice
+    # per hotkey, which was tolerable for a handful of recruits and is not when
+    # the multicomp path needs the tally for the entire field every cycle.
+    want = set(hotkeys)
+    decisive_by: dict[str, list] = {}
+    graded_by: dict[str, list] = {}
+    for s in signals:
+        hk = s["hotkey"]
+        if hk not in want:
+            continue
+        st = s["status"]
+        if st not in ("won", "lost", "washed"):
+            continue
+        graded_by.setdefault(hk, []).append((s["t0_unix"], st == "washed"))
+        if st != "washed":
+            decisive_by.setdefault(hk, []).append(
+                (s["t0_unix"], st == "won", bool(s.get("is_copy", 0))))
+
+    out: dict[str, float] = {}
+    for hk, decisive in decisive_by.items():
+        m = meta.get(hk)
+        if m is None:
+            continue
+        qwins = scoring.qualified_wins(decisive, m["first_seen_unix"],
+                                       habitual=False,
+                                       graded=graded_by.get(hk))
+        out[hk] = scoring.decayed_qwin_tally(qwins, now)
+    return out
+
+
 def referrer_weights_from_journal(
     signals: list[dict],
     meta: dict[str, dict],
@@ -156,6 +199,7 @@ def referrer_weights_from_journal(
     now: float,
     referrals: list[dict] | None = None,
     referral_transfers: list[dict] | None = None,
+    extra_tallies: dict[str, dict[str, float]] | None = None,
 ) -> dict[int, float]:
     """§ referrer mechanism (mecid 1) — PURE rebuild, the auditor's mirror of
     the validator's referrer vector. Pipeline:
@@ -172,6 +216,18 @@ def referrer_weights_from_journal(
     would double the heaviest part of replay for a second-order effect. If a
     copier gets zeroed on mecid-0, their tally still decays to nothing within
     the decay window — the referrer's score follows with the same lag.
+
+    extra_tallies: {competition_key: {hotkey: raw tally}} for the competitions
+    this module cannot rebuild from the signals journal — HF and Closers grade
+    off the public HF base, not off `signals`. Required once
+    config.referrer_multicomp_active(now); ignored before it, so a replay of a
+    pre-flip block is byte-identical whether or not they are supplied.
+
+    ⚠ An auditor replaying the multicomp era from the journal ALONE cannot
+    reproduce this vector — they need the public HF/Closers logs too. That is
+    the cost of paying recruiters for what their recruits actually earn rather
+    than for the third of it that lives in this file. The inputs are public;
+    the rebuild is just wider.
     """
     pairs = scoring.valid_referral_pairs(referrals or [])
     pairs = scoring.apply_referral_transfers(pairs, referral_transfers or [])
@@ -179,21 +235,22 @@ def referrer_weights_from_journal(
         return {config.BURN_UID: 1.0}
 
     recruit_hks = {recruit for _, recruit in pairs}
-    tally_by_hk: dict[str, float] = {}
-    for hk in recruit_hks:
-        m = meta.get(hk)
-        if m is None:
-            continue
-        decisive = [(s["t0_unix"], s["status"] == "won", bool(s.get("is_copy", 0)))
-                    for s in signals
-                    if s["hotkey"] == hk and s["status"] in ("won", "lost")]
-        if not decisive:
-            continue
-        graded = [(s["t0_unix"], s["status"] == "washed") for s in signals
-                  if s["hotkey"] == hk and s["status"] in ("won", "lost", "washed")]
-        qwins = scoring.qualified_wins(decisive, m["first_seen_unix"],
-                                       habitual=False, graded=graded)
-        tally_by_hk[hk] = scoring.decayed_qwin_tally(qwins, now)
+    lf_tally = referrer_recruit_tallies(signals, meta, now, recruit_hks)
 
-    scores = scoring.referrer_scores(pairs, tally_by_hk)
+    if not config.referrer_multicomp_active(now):
+        scores = scoring.referrer_scores(pairs, lf_tally)
+        return scoring.referrer_weights(scores, uid_by_hotkey)
+
+    # Multi-competition era. Each competition is normalized over its OWN FULL
+    # field, not over the recruits — a recruit's credit has to mean "this much
+    # of that competition", so the denominator is every participant in it.
+    # The LF field is therefore rebuilt for all hotkeys with journal history,
+    # not only for recruits.
+    lf_field = referrer_recruit_tallies(signals, meta, now, set(meta))
+    tallies = {"lf": lf_field}
+    for comp, field in (extra_tallies or {}).items():
+        tallies[comp] = field
+    shares = scoring.referrer_shares(config.comp_weights_as_of(now))
+    blended = scoring.blended_recruit_tallies(tallies, shares)
+    scores = scoring.referrer_scores(pairs, blended)
     return scoring.referrer_weights(scores, uid_by_hotkey)

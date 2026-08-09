@@ -773,6 +773,11 @@ class Validator:
         # compute burns its own share (never redistributed). Dark by default —
         # config.COMBINED_WEIGHTS gates it, so mainnet is byte-identical until
         # the coordinated flip.
+        # The exact qualified set the Closers vector was built from, kept so the
+        # referrer's Closers tally uses the SAME eligibility. Recomputing it
+        # after the blend would read the combined vector instead of LF+HF and
+        # quietly rank a different field than the one that got paid.
+        closers_qual: set | None = None
         if config.combined_weights_active(now):
             vectors: dict = {"lf": w}
             try:
@@ -789,6 +794,7 @@ class Validator:
                         for vec in (w, vectors.get("hf") or {})
                         for u, wt in vec.items()
                         if wt > 0 and u != config.BURN_UID and u in hk_by_uid}
+                closers_qual = qual
                 vectors["closers"] = closers.closers_weights(
                     uid_by_hotkey, now, qualified_hks=qual)
             except Exception as e:  # noqa: BLE001
@@ -840,10 +846,36 @@ class Validator:
                             for f, t, cb in self.db.execute(
                                 "SELECT from_hk, to_hk, commit_block "
                                 "FROM referral_transfers")]
+                        # § referrer multicomp: a recruiter is paid for what
+                        # their recruits earn, and two thirds of that is not in
+                        # the signals journal. HF and Closers grade off the
+                        # public base, so their RAW tallies are gathered here
+                        # and handed to the same replay an auditor runs.
+                        # A competition that fails to compute is OMITTED, not
+                        # zeroed: omitted drops its share and rescales the rest,
+                        # zeroed would silently reprice every recruiter mid-flight
+                        # on a transient feed error.
+                        extra = {}
+                        if config.referrer_multicomp_active(now):
+                            try:
+                                extra["hf"] = _hfg.mecid1_tallies(
+                                    uid_by_hotkey, now)
+                            except Exception as e:  # noqa: BLE001
+                                print(f"  ! referrer: HF tallies unavailable, "
+                                      f"its share drops this cycle: {e}")
+                            try:
+                                extra["closers"] = closers.closers_tallies(
+                                    uid_by_hotkey, now,
+                                    qualified_hks=closers_qual)
+                            except Exception as e:  # noqa: BLE001
+                                print(f"  ! referrer: Closers tallies "
+                                      f"unavailable, its share drops this "
+                                      f"cycle: {e}")
                         hw = replay.referrer_weights_from_journal(
                             sig_rows, meta, uid_by_hotkey, now,
                             referrals=referral_rows,
-                            referral_transfers=transfer_rows)
+                            referral_transfers=transfer_rows,
+                            extra_tallies=extra)
                     else:
                         # merge-era parking: all-burn while the split ramps.
                         # Committing the HF vector here would DOUBLE-pay HF.

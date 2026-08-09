@@ -815,6 +815,43 @@ def referrer_active(now_unix: float) -> bool:
     (testnet) OR the committed arming instant has passed."""
     return REFERRER_MECID1 or (
         REFERRER_MECID1_FROM_UNIX > 0 and now_unix >= REFERRER_MECID1_FROM_UNIX)
+
+
+# ── referrer score basis: LF-only → all competitions (CONSENSUS) ─────────────
+# As armed on 2026-08-03 the referrer score was the recruit's LF decayed
+# qualified-win tally and nothing else, because that is what
+# replay.referrer_weights_from_journal could rebuild from the signals journal
+# alone. That made a recruit's HF and Closers performance worth ZERO to their
+# recruiter — the recruiter pool paid for one third of what a recruit actually
+# earns, and a recruiter who brought in an excellent HF trader scored nothing.
+#
+# From the instant below the score is the recruit's blended share across every
+# live competition: normalize each competition's RAW tallies within that
+# competition, weight by the same COMP_WEIGHTS shares mecid-0 uses, sum. Raw
+# tallies, never weight vectors — a vector carries the immunity dust floor
+# (registering idle hotkeys would pay a recruiter) and the recruit's own +10%
+# referral bonus (which would compound into the score that caused it).
+# See scoring.blended_recruit_tallies.
+#
+# CONSENSUS: every validator must flip in the same tempo, so this is a
+# committed timestamp and not an env flag. The env var is the TESTNET switch.
+# 0 = never (stay LF-only). Replays of blocks BEFORE the instant are unchanged.
+# ⚑ MAINNET: 2026-08-11 00:00:00 UTC.
+REFERRER_MULTICOMP = os.getenv("SN89_REFERRER_MULTICOMP", "0") == "1"
+REFERRER_MULTICOMP_FROM_UNIX = int(
+    os.getenv("SN89_REFERRER_MULTICOMP_FROM", "1786406400"))
+
+# Share keys that are NOT competitions and must never credit a recruit.
+# `reserve` is the referrers' own carve-out held as burn inside mecid-0;
+# scoring a recruit for it would pay the referrer pool out of itself.
+REFERRER_SCORE_EXCLUDED_COMPS = frozenset({"reserve"})
+
+
+def referrer_multicomp_active(now_unix: float) -> bool:
+    """Whether the referrer score spans all competitions at `now` (vs LF-only)."""
+    return REFERRER_MULTICOMP or (
+        REFERRER_MULTICOMP_FROM_UNIX > 0
+        and now_unix >= REFERRER_MULTICOMP_FROM_UNIX)
 COMBINED_WEIGHTS = os.getenv("SN89_COMBINED_WEIGHTS", "0") == "1"
 
 

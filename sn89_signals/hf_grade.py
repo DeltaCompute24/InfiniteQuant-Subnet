@@ -477,3 +477,17 @@ def mecid1_weights(uid_by_hk: dict, now: float | None = None,
     sync_and_grade(base, cache_dir, now)
     dec, fs, subs, graded = _history(cache_dir)
     return hf.hf_compute_weights(dec, fs, uid_by_hk, now, subs, graded)
+
+
+def mecid1_tallies(uid_by_hk: dict, now: float | None = None,
+                   base: str | None = None, cache_dir: str | None = None) -> dict:
+    """{hotkey: raw HF tally} — the same pipeline as mecid1_weights, stopping
+    one step earlier. Feeds the referrer score, which needs the tally and not
+    the floored/capped vector (see hf.hf_compute_tallies)."""
+    now = time.time() if now is None else now
+    base = base or hf.HF_PUBLIC_BASE
+    cache_dir = cache_dir or os.path.expanduser(
+        os.getenv("SN89_HF_GRADE_CACHE", "~/.sn89/hf-grade"))
+    sync_and_grade(base, cache_dir, now)
+    dec, fs, subs, graded = _history(cache_dir)
+    return hf.hf_compute_tallies(dec, fs, uid_by_hk, now, subs, graded)
