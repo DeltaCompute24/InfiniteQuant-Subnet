@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 
 import time as _time
 
-from . import config
+from . import config, sessions
 
 
 # ── statistics helpers (deterministic: only +,-,*,/ and math.sqrt — all IEEE-754
@@ -88,6 +88,21 @@ def apply_validity_filters(rows: list[GradedRow],
 
         cap, gap = config.submission_rules_as_of(r.t0_unix)
         times = per_hotkey_times.setdefault(r.hotkey, [])
+
+        # Dead horizon: an FX/metals call whose window is mostly a closed market
+        # had no chance to resolve, so grading it says nothing about the trader.
+        # Checked FIRST because it is a property of the call alone -- it does not
+        # depend on what else this hotkey submitted -- and, like every void here,
+        # it `continue`s without appending to `times`, so it consumes no quota.
+        # The class and horizon come from the BOARD as of t0, never from the
+        # miner's committed fields (config.asset_class_for's forgery note).
+        if config.fx_dead_horizon_enforced_as_of(r.t0_unix):
+            cls = config.asset_class_for(r.trade_pair, r.t0_unix)
+            if cls in sessions.SESSION_BOUND_CLASSES:
+                horizon_h = config.horizon_h_for(r.trade_pair, r.t0_unix)
+                if sessions.open_fraction(r.t0_unix, horizon_h) < config.FX_MIN_OPEN_FRACTION:
+                    r.status, r.void_reason = "void", "fx_dead_horizon"
+                    continue
 
         # ≥ gap since this hotkey's last ACCEPTED commit, minus a block-jitter
         # tolerance: T0 is the inclusion-block timestamp (12 s quantized), so an

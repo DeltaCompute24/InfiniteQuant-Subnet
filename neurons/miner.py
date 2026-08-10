@@ -41,27 +41,20 @@ import bittensor as bt
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from sn89_signals import bucket, chain, config, crypto, hf
+from sn89_signals import bucket, chain, config, crypto, hf, sessions
 from sn89_signals.schema import Signal, ValidationError, validate
 
 
 def _fx_market_closed(now_utc: float | None = None) -> bool:
-    """True when FX/metals spot markets are shut for the week. The retail FX week
-    runs Sun 17:00 -> Fri 17:00 America/New_York; anchoring on NY local time makes
-    the boundary DST-correct (= 22:00 UTC winter / 21:00 UTC summer)."""
-    from datetime import datetime, timezone
-    from zoneinfo import ZoneInfo
-    dt = datetime.fromtimestamp(
-        now_utc if now_utc is not None else time.time(), tz=timezone.utc
-    ).astimezone(ZoneInfo("America/New_York"))
-    wd, hour = dt.weekday(), dt.hour   # Mon=0 .. Sun=6
-    if wd == 5:                         # Saturday
-        return True
-    if wd == 4 and hour >= 17:          # Friday 17:00+ NY
-        return True
-    if wd == 6 and hour < 17:           # Sunday before 17:00 NY
-        return True
-    return False
+    """True when FX/metals spot markets are shut for the week.
+
+    Delegates to sn89_signals.sessions so the miner's submit-time guard and the
+    validator's dead-horizon void read ONE calendar. They were separate before
+    (this function carried its own zoneinfo copy) and a miner whose tzdata
+    disagreed with the validator's would have been rejected locally for a call
+    the chain accepted, or the reverse."""
+    return sessions.fx_market_closed(
+        now_utc if now_utc is not None else time.time())
 
 
 # ── local submission-limits guard (UX only — consensus enforcement is the
@@ -121,10 +114,23 @@ def build_signal(hotkey: str, pair: str, direction: str,
     if band is None:
         raise ValidationError(f"{pair} not on board; allowed: {sorted(bands.keys())}")
     _cls = band.get("asset_class", "")
-    if _cls in ("forex", "forex-commodities") and _fx_market_closed():
-        raise ValidationError(
-            f"{pair} rejected: FX & metals markets are closed for the weekend "
-            f"(reopen Sun ~22:00 UTC / 17:00 New York). Crypto trades 24/7.")
+    if _cls in sessions.SESSION_BOUND_CLASSES:
+        _now = time.time()
+        if _fx_market_closed(_now):
+            raise ValidationError(
+                f"{pair} rejected: FX & metals markets are closed for the weekend "
+                f"(reopen Sun ~22:00 UTC / 17:00 New York). Crypto trades 24/7.")
+        # Mirror the validator's dead-horizon void (config.FX_DEAD_HORIZON_FROM)
+        # at submit time. Without this the call is accepted, costs a commit, and
+        # is voided hours later with no explanation the trader ever sees.
+        _hz = config.class_horizon_h(_cls)
+        _open = sessions.open_fraction(_now, _hz)
+        if _open < config.FX_MIN_OPEN_FRACTION:
+            raise ValidationError(
+                f"{pair} rejected: only {_open * 100:.0f}% of the {_hz}h grade window "
+                f"falls in an open session (the FX week closes at 17:00 New York), "
+                f"so the call could not resolve and would be voided. Wait for the "
+                f"Sunday reopen, or trade crypto.")
     sig = Signal(
         trade_pair=pair,
         direction=direction.upper(),

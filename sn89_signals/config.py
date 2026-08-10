@@ -296,6 +296,46 @@ def pair_lock_lf_enforced_as_of(t0_unix: float) -> bool:
     return bool(PAIR_LOCK_LF_FROM and t0_unix >= PAIR_LOCK_LF_FROM)
 
 
+# ── Dead-horizon void: FX/metals calls with no market to resolve in ──────────
+# The miner rejects a forex/metals submission made WHILE the market is shut
+# (neurons/miner.py::_fx_market_closed), but nothing looked at where the HORIZON
+# lands. A call committed at 20:59:07 UTC on Friday 2026-08-07 -- 53 seconds
+# inside the week -- carried a 12h window that expired Saturday morning on a
+# frozen tape. Three GBPUSD calls did exactly that and graded WASHED with an MFE
+# of 0.0 bps and an MAE of 1.0 bps: not a trader being wrong about direction, a
+# trader being graded on a market that was not trading. Nine such calls since
+# 2026-06-01.
+#
+# A wash is supposed to mean the move was too small to matter. It must not also
+# mean the exchange was closed, because those two carry opposite information and
+# the efficiency term (EFFICIENCY_PRIOR_WASH) reads them identically.
+#
+# So: void when too little of the horizon falls in an open session for the call
+# to have been resolvable. Expressed as a FRACTION of the horizon rather than an
+# absolute, so it stays correct if a class horizon changes. At 0.25 a 12h FX call
+# needs 3h of open market -- the Friday-20:59 calls (1 min) void, while a Friday
+# 17:00 UTC call (4h open before the close) still grades.
+#
+# Voided, not lost: the miner did nothing wrong, so the call must not count
+# toward the daily quota, take a strike, or move a hit rate.
+#
+# NEVER retroactive -- resolved as-of the call's own t0, like the bands and the
+# hit rule, so arming it cannot re-grade a call that already scored. Committed
+# default rather than env-only: an env-only arming would make the live validator
+# enforce a rule master does not, and master IS the replay contract (rule 1b).
+# Cutover 2026-08-11T00:00:00Z, ahead of the Sunday FX reopen, so no in-flight
+# call changes rule mid-flight.
+FX_DEAD_HORIZON_FROM = int(os.getenv("SN89_FX_DEAD_HORIZON_FROM", "1786406400"))
+
+# Minimum share of a call's horizon that must fall in an open FX session.
+FX_MIN_OPEN_FRACTION = float(os.getenv("SN89_FX_MIN_OPEN_FRACTION", "0.25"))
+
+
+def fx_dead_horizon_enforced_as_of(t0_unix: float) -> bool:
+    """Whether a call at t0 is subject to the dead-horizon void."""
+    return bool(FX_DEAD_HORIZON_FROM and t0_unix >= FX_DEAD_HORIZON_FROM)
+
+
 def hit_rate_window_trades_as_of(t0_unix: float) -> int:
     """Reputation trade cap in force at t0 (mirrors bands_as_of)."""
     if HIT_RATE_WINDOW_TRADES_V2_FROM and t0_unix >= HIT_RATE_WINDOW_TRADES_V2_FROM:
