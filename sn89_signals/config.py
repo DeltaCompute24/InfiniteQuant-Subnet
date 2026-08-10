@@ -914,6 +914,23 @@ COMP_WEIGHTS_HISTORY: tuple = (
     # mecid-0. Re-add a mecid-0-relative row ONLY once the split is confirmed
     # on chain, never on a schedule.
     (1785967200, "lf:0.35,hf:0.35,closers:0.10,reserve:0.20"),
+    # ⚑ 2026-08-10 02:00:00 UTC — THE 80/20 CHAIN SPLIT FINALLY LANDED.
+    # MechanismEmissionSplit[89] = [52428, 13107], first observed at block
+    # 8810879 whose timestamp is exactly this instant. mecid-0 now carries 80%
+    # of emission and the referrers' 20% is routed on chain to mecid-1, so the
+    # `reserve` burn placeholder is retired: keeping it would burn 16% of total
+    # inside mecid-0 ON TOP of mechanism 1's 20%.
+    # These are mecid-0-RELATIVE shares. Of the TOTAL miner incentive:
+    #   LF      0.4375 x 80% = 35%
+    #   HF      0.4375 x 80% = 35%
+    #   Closers 0.1250 x 80% = 10%
+    #   Referrers            = 20%  (mecid-1, direct from the chain split)
+    # Stamped at the CONFIRMED landing instant, not scheduled. The 2026-08-04
+    # incident was the reverse: this same row scheduled ahead of a split that
+    # never landed, which paid LF and HF 43.75% of total each for four hours.
+    # If the split is ever moved back to 100/0, revert to the reserve form in
+    # the same instant or LF/HF/Closers are overpaid by 25%.
+    (1786327200, "lf:0.4375,hf:0.4375,closers:0.125"),
 )
 _COMP_ENV = os.getenv("SN89_COMP_WEIGHTS", "")
 if _COMP_ENV:
