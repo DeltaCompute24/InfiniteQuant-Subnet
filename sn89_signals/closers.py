@@ -112,29 +112,63 @@ def baseline_z(asset_class: str, action: str) -> float:
 # Entry is limited to miners already qualified on LF or HF. This is enforced at
 # INGEST as well as at payout: a vote from an unqualified miner can never be
 # paid, so accepting it only builds a public record that misleads its owner.
+# TWO sources, because there are two ways to qualify and a miner may hold only
+# one of them. LF standing carries `meets_gate` per roster row; the HF scoreboard
+# carries `qualified` per leaderboard row (the same flag behind the QUALIFIED
+# badge and the board's own n_traders_qualified). Reading only LF — which is what
+# this module did until 2026-08-10 — refused HF-qualified miners `not_qualified`
+# on a competition they were ranked in.
 STANDING_PATH = os.getenv(
     "SN89_STANDING_PATH", "/opt/iq-platform/data/live/sn89-standing-main.json")
+HF_SCOREBOARD_PATH = os.getenv(
+    "SN89_HF_SCOREBOARD_PATH",
+    "/opt/iq-platform/data/live/sn89-hf-scoreboard.json")
 QUALIFY_REFRESH_S = int(os.getenv("SN89_CLOSERS_QUALIFY_REFRESH_S", "60"))
 _qual_cache: dict = {"at": 0.0, "hks": None}
 
 
-def qualified_hotkeys(now: float | None = None) -> set | None:
-    """Hotkeys meeting the LF/HF qualification gate, or None if unknowable.
-
-    None is NOT an empty set: an unreadable standing file must not silently
-    refuse every miner, the same fail-open/closed distinction the HF lock feed
-    draws. The caller decides.
-    """
-    now = time.time() if now is None else now
-    if _qual_cache["hks"] is not None and now - _qual_cache["at"] <= QUALIFY_REFRESH_S:
-        return _qual_cache["hks"]
+def _lf_qualified_hotkeys() -> set | None:
+    """LF side of the gate, or None if the standing file is unreadable."""
     try:
         with open(STANDING_PATH, encoding="utf-8") as fh:
             roster = json.load(fh).get("roster") or []
     except (OSError, ValueError):
+        return None
+    return {r["hotkey"] for r in roster
+            if r.get("hotkey") and r.get("meets_gate")}
+
+
+def _hf_qualified_hotkeys() -> set | None:
+    """HF side of the gate, or None if the scoreboard is unreadable."""
+    try:
+        with open(HF_SCOREBOARD_PATH, encoding="utf-8") as fh:
+            board = json.load(fh).get("leaderboard") or []
+    except (OSError, ValueError):
+        return None
+    return {e["bittensor_hotkey"] for e in board
+            if e.get("bittensor_hotkey") and e.get("qualified")}
+
+
+def qualified_hotkeys(now: float | None = None) -> set | None:
+    """Hotkeys meeting the LF *or* HF qualification gate, or None if unknowable.
+
+    None is NOT an empty set: an unreadable standing file must not silently
+    refuse every miner, the same fail-open/closed distinction the HF lock feed
+    draws. The caller decides.
+
+    A PARTIAL read is treated as unknowable too. Unioning whichever half loaded
+    would silently refuse everyone who qualifies only via the half that didn't —
+    the exact failure this function was fixed for, so it must not come back as
+    an intermittent one.
+    """
+    now = time.time() if now is None else now
+    if _qual_cache["hks"] is not None and now - _qual_cache["at"] <= QUALIFY_REFRESH_S:
+        return _qual_cache["hks"]
+    lf_hks = _lf_qualified_hotkeys()
+    hf_hks = _hf_qualified_hotkeys()
+    if lf_hks is None or hf_hks is None:
         return _qual_cache["hks"]          # last good set, or None on first run
-    hks = {r["hotkey"] for r in roster
-           if r.get("hotkey") and r.get("meets_gate")}
+    hks = lf_hks | hf_hks
     _qual_cache.update(at=now, hks=hks)
     return hks
 
