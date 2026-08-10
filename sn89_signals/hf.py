@@ -711,6 +711,16 @@ HF_HIT_RATE_WINDOW_TRADES = int(os.getenv("SN89_HF_HIT_RATE_WINDOW_TRADES", "200
 # to the mecid-0 cap so both mechanisms burn the same fraction unless set otherwise.
 HF_MINER_EMISSION_CAP = float(os.getenv("SN89_HF_MINER_EMISSION_CAP",
                                         str(config.MINER_EMISSION_CAP)))
+_HF_CAP_ENV = os.getenv("SN89_HF_MINER_EMISSION_CAP", "")
+
+
+def hf_miner_emission_cap_as_of(t_unix: float) -> float:
+    """HF's cap at `t_unix`. Follows config.MINER_EMISSION_CAP_HISTORY unless an
+    explicit HF override is set (testnet), matching the module-constant default
+    it replaces — HF has never diverged from mecid-0 on this."""
+    if _HF_CAP_ENV:
+        return float(_HF_CAP_ENV)
+    return config.miner_emission_cap_as_of(t_unix)
 
 # ── HF eligibility gate (CONSENSUS) — replaces the LF elapsed-time warmup ──────
 # LF warmup is pure elapsed time: first_seen + IMMUNITY_S (8 days), regardless of
@@ -762,7 +772,7 @@ HF_RECEIPT_PUBKEY = os.getenv(
 
 
 @contextlib.contextmanager
-def hf_scoring_config():
+def hf_scoring_config(now: float | None = None):
     """Run a block with `config` carrying the HF window/cap constants, restored on
     exit. Scoped with try/finally and NEVER applied at import time, because hf.py
     is imported by the ingest — a module-level mutation of config would corrupt LF
@@ -784,7 +794,8 @@ def hf_scoring_config():
         # make hit_rate_window_trades_as_of return the HF cap for every t0
         config.HIT_RATE_WINDOW_TRADES = HF_HIT_RATE_WINDOW_TRADES
         config.HIT_RATE_WINDOW_TRADES_V2 = HF_HIT_RATE_WINDOW_TRADES
-        config.MINER_EMISSION_CAP = HF_MINER_EMISSION_CAP
+        config.MINER_EMISSION_CAP = hf_miner_emission_cap_as_of(
+            time.time() if now is None else now)
         # The HF warmup is the eligibility INSTANT, not an elapsed span. Zero the
         # LF immunity clock and hand each miner its eligible_from as first_seen, so
         # warmup_end (= first_seen + IMMUNITY_S) collapses to exactly that instant
@@ -831,7 +842,7 @@ def hf_compute_weights(decisive_by_hk: dict, first_seen_by_hk: dict,
     """
     from . import scoring
 
-    with hf_scoring_config():
+    with hf_scoring_config(now):
         states = []
         for hk, decisive in decisive_by_hk.items():
             uid = uid_by_hk.get(hk)
@@ -872,7 +883,7 @@ def hf_compute_tallies(decisive_by_hk: dict, first_seen_by_hk: dict,
     """
     from . import scoring
 
-    with hf_scoring_config():
+    with hf_scoring_config(now):
         out: dict[str, float] = {}
         for hk, decisive in decisive_by_hk.items():
             if uid_by_hk.get(hk) is None:

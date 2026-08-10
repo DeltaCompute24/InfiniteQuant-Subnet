@@ -445,7 +445,7 @@ def closers_weights(uid_by_hk: dict, now: float | None = None,
         for hk, s in _eligible_scores(per_hk, uid_by_hk, qualified_hks).items()}
 
     pool = sum(scores.values())
-    cap = config.MINER_EMISSION_CAP
+    cap = config.miner_emission_cap_as_of(now)
     if pool > 0:
         for uid, s in scores.items():
             weights[uid] = cap * (s / pool)

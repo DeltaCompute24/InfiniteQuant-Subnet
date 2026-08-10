@@ -9,6 +9,8 @@ import math
 from collections import defaultdict
 from dataclasses import dataclass, field
 
+import time as _time
+
 from . import config
 
 
@@ -531,7 +533,8 @@ def referrer_shares(comp_shares: dict[str, float]) -> dict[str, float]:
 
 
 def referrer_weights(scores: dict[str, float], uid_by_hk: dict[str, int],
-                     burn_uid: int | None = None) -> dict[int, float]:
+                     burn_uid: int | None = None,
+                     now_unix: float | None = None) -> dict[int, float]:
     """{uid: weight} for the referrer mechanism (mecid 1). Pro-rata by score,
     field capped at MINER_EMISSION_CAP like every other competition, remainder
     burns. A referrer only earns if their hotkey holds a UID — registration is
@@ -539,7 +542,8 @@ def referrer_weights(scores: dict[str, float], uid_by_hk: dict[str, int],
     burn_uid = config.BURN_UID if burn_uid is None else burn_uid
     weights: dict[int, float] = {}
     pool = sum(v for hk, v in scores.items() if uid_by_hk.get(hk) is not None)
-    cap = config.MINER_EMISSION_CAP
+    cap = config.miner_emission_cap_as_of(
+        _time.time() if now_unix is None else now_unix)
     if pool > 0:
         for hk, v in scores.items():
             uid = uid_by_hk.get(hk)
@@ -803,7 +807,7 @@ def compute_weights(states: list[MinerState], now_unix: float,
     # combined miner weight DOWN to the cap (min-scale, never up), so when the
     # field would earn less than the cap — e.g. only immune dust, nobody
     # qualified — nothing is inflated and leftovers burn exactly as before.
-    cap = config.MINER_EMISSION_CAP
+    cap = config.miner_emission_cap_as_of(now_unix)
     if cap < 1.0:
         miner_total = sum(w for u, w in weights.items() if u != burn_uid)
         if miner_total > 0:

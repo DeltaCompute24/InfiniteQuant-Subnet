@@ -34,7 +34,7 @@ class TestEmissionCap:
     OLD = NOW - config.IMMUNITY_S - 1
 
     def test_field_capped_and_burn_absorbs_the_rest(self, monkeypatch):
-        monkeypatch.setattr(config, "MINER_EMISSION_CAP", 0.20)
+        monkeypatch.setattr(config, "MINER_EMISSION_CAP_HISTORY", ((0, 0.20),))
         w = scoring.compute_weights(
             [_ms(1, self.OLD, 30, 40, [(self.NOW, 2.0)])], self.NOW)
         field = sum(v for u, v in w.items() if u != config.BURN_UID)
@@ -42,7 +42,7 @@ class TestEmissionCap:
         assert w[config.BURN_UID] == pytest.approx(0.80, abs=1e-6)
 
     def test_relative_shares_preserved_under_cap(self, monkeypatch):
-        monkeypatch.setattr(config, "MINER_EMISSION_CAP", 0.20)
+        monkeypatch.setattr(config, "MINER_EMISSION_CAP_HISTORY", ((0, 0.20),))
         w = scoring.compute_weights([
             _ms(1, self.OLD, 30, 40, [(self.NOW, 2.0)] * 6),
             _ms(2, self.OLD, 30, 40, [(self.NOW, 2.0)] * 3),
@@ -50,14 +50,14 @@ class TestEmissionCap:
         assert w[1] / w[2] == pytest.approx(2.0)          # 6:3, untouched by the cap
 
     def test_cap_disabled_is_full_passthrough(self, monkeypatch):
-        monkeypatch.setattr(config, "MINER_EMISSION_CAP", 1.0)
+        monkeypatch.setattr(config, "MINER_EMISSION_CAP_HISTORY", ((0, 1.0),))
         w = scoring.compute_weights(
             [_ms(1, self.OLD, 30, 40, [(self.NOW, 2.0)])], self.NOW)
         assert w[1] > 0.99
 
     def test_cap_never_inflates_a_weak_field(self, monkeypatch):
         # only immune dust, no earners → the cap must NOT scale dust UP to 20%.
-        monkeypatch.setattr(config, "MINER_EMISSION_CAP", 0.20)
+        monkeypatch.setattr(config, "MINER_EMISSION_CAP_HISTORY", ((0, 0.20),))
         w = scoring.compute_weights(
             [_ms(1, self.NOW - DAY, 0, 0, [])], self.NOW)   # immune, no qwins
         field = sum(v for u, v in w.items() if u != config.BURN_UID)
@@ -96,7 +96,7 @@ class TestNoCliff:
     NOW = 200 * DAY
 
     def test_fallen_miner_keeps_earning_off_banked_qwins(self, monkeypatch):
-        monkeypatch.setattr(config, "MINER_EMISSION_CAP", 1.0)
+        monkeypatch.setattr(config, "MINER_EMISSION_CAP_HISTORY", ((0, 1.0),))
         assert not scoring._qualifies(5, 12)          # 42% now — below the gate
         fallen = _ms(1, self.NOW - 60 * DAY, 5, 12,   # currently UNqualified …
                      [(self.NOW - 1 * DAY, 2.0), (self.NOW - 2 * DAY, 2.0)])  # … banked WOLF wins
@@ -106,7 +106,7 @@ class TestNoCliff:
         assert w[1] > w[2]                            # 2 recent WOLF wins > 1 base win
 
     def test_more_recent_qwins_earn_more(self, monkeypatch):
-        monkeypatch.setattr(config, "MINER_EMISSION_CAP", 1.0)
+        monkeypatch.setattr(config, "MINER_EMISSION_CAP_HISTORY", ((0, 1.0),))
         recent = _ms(1, self.NOW - 60 * DAY, 9, 12, [(self.NOW - 1 * DAY, 1.0)])
         old = _ms(2, self.NOW - 60 * DAY, 9, 12,
                   [(self.NOW - 0.8 * config.EMISSION_DECAY_S, 1.0)])   # nearly decayed out
@@ -115,7 +115,7 @@ class TestNoCliff:
 
     def test_qwin_fully_decayed_out_earns_nothing_from_pool(self, monkeypatch):
         # a single qualified win older than EMISSION_DECAY_S contributes 0 to the pool
-        monkeypatch.setattr(config, "MINER_EMISSION_CAP", 1.0)
+        monkeypatch.setattr(config, "MINER_EMISSION_CAP_HISTORY", ((0, 1.0),))
         monkeypatch.setattr(config, "PROBATION_S", 0)     # isolate the pool math
         w = scoring.compute_weights(
             [_ms(1, self.NOW - 90 * DAY, 5, 12,
@@ -129,7 +129,7 @@ class TestProbation:
 
     @pytest.fixture(autouse=True)
     def _cap_off(self, monkeypatch):
-        monkeypatch.setattr(config, "MINER_EMISSION_CAP", 1.0)
+        monkeypatch.setattr(config, "MINER_EMISSION_CAP_HISTORY", ((0, 1.0),))
         monkeypatch.setattr(config, "PROBATION_S", int(30 * DAY))
 
     def test_warmup_qualified_no_qwin_gets_dust(self):

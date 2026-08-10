@@ -71,17 +71,24 @@ class TestReferrerScores:
         assert s == {}
 
     def test_weights_pro_rata_capped(self):
-        w = scoring.referrer_weights({A: 3.0, B: 1.0}, {A: 5, B: 7}, burn_uid=0)
-        cap = config.MINER_EMISSION_CAP
+        # Pin the instant: the cap is time-varying now, so a test that reads a
+        # module constant and calls a function that resolves as-of `time.time()`
+        # passes or fails depending on what day it is run.
+        NOW = 1_785_000_000.0
+        w = scoring.referrer_weights({A: 3.0, B: 1.0}, {A: 5, B: 7}, burn_uid=0,
+                                     now_unix=NOW)
+        cap = config.miner_emission_cap_as_of(NOW)
         assert w[5] == pytest.approx(cap * 0.75)
         assert w[7] == pytest.approx(cap * 0.25)
         assert w[0] == pytest.approx(1 - cap)
         assert sum(w.values()) == pytest.approx(1.0)
 
     def test_unregistered_referrer_earns_nothing(self):
+        NOW = 1_785_000_000.0
         # no UID → no weight; their score doesn't dilute registered referrers
-        w = scoring.referrer_weights({A: 3.0, B: 1.0}, {B: 7}, burn_uid=0)
-        assert w[7] == pytest.approx(config.MINER_EMISSION_CAP)
+        w = scoring.referrer_weights({A: 3.0, B: 1.0}, {B: 7}, burn_uid=0,
+                                     now_unix=NOW)
+        assert w[7] == pytest.approx(config.miner_emission_cap_as_of(NOW))
 
     def test_empty_field_burns(self):
         assert scoring.referrer_weights({}, {}, burn_uid=0) == {0: 1.0}

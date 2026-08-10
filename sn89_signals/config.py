@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import time as _time
 from pathlib import Path
 
 # ── Network ──────────────────────────────────────────────────────────────────
@@ -426,7 +427,53 @@ BURN_UID = 0                        # absorbs weight when nobody qualifies
 # defaults to this), so with a 50/50 emission split miners get 60%% of total.
 # Must live in master, not an env override, or external validators would burn
 # a different fraction and disagree with the chef in consensus.
-MINER_EMISSION_CAP = float(os.getenv("SN89_MINER_EMISSION_CAP", "0.60"))
+# ⚑ 2026-08-10 02:30:00 UTC: cap RETIRED (1.0 = full pass-through). The cap was
+# always temporary — it throttled payout while the two-mechanism launch and the
+# referrer carve-out were being built, precisely because an un-carved pool would
+# have paid LF/HF miners emission that was earmarked for referrers. Both landed
+# (mecid-1 = referrers armed 08-03; MechanismEmissionSplit 80/20 landed 08-10
+# 02:00), so the carve-out is now enforced by the CHAIN split rather than by
+# burning a slice of every competition. Of total miner incentive the field can
+# now receive the full 80% on mecid-0, and the referrers' 20% burns on mecid-1
+# only while no referrer scores.
+#
+# TIME-VARYING because it is CONSENSUS. Before this history existed the cap was a
+# bare constant, so every change silently rewrote the replay of every past block:
+# an auditor rebuilding a 2026-07-15 vector with today's checkout burned 60%
+# where the chain had burned 20%. The eras below are the real ones, recovered
+# from git (commit instants — the validator picked each up at its next restart,
+# so a replay near a boundary can be off by that lag; the boundaries are the best
+# public anchor available and are now at least WRITTEN DOWN rather than lost).
+MINER_EMISSION_CAP_HISTORY: tuple = (
+    (0, 1.0),                       # pre-cap: full pass-through
+    (1783854346, 0.20),             # 2026-07-12 11:05:46 UTC — cap introduced
+    (1784229593, 0.30),             # 2026-07-16 19:19:53 UTC
+    (1784834456, 0.60),             # 2026-07-23 19:20:56 UTC — two-mechanism launch
+    (1786329000, 1.00),             # 2026-08-10 02:30:00 UTC — retired, see above
+)
+_CAP_ENV = os.getenv("SN89_MINER_EMISSION_CAP", "")
+if _CAP_ENV:                        # TESTNET override only
+    MINER_EMISSION_CAP_HISTORY = ((0, float(_CAP_ENV)),)
+
+
+def miner_emission_cap_as_of(t_unix: float) -> float:
+    """The miner emission cap in force at `t_unix`. Callers that hold a `now`
+    MUST use this rather than the module constant, or they will replay history
+    with today's cap."""
+    cap = MINER_EMISSION_CAP_HISTORY[0][1]
+    for eff, v in MINER_EMISSION_CAP_HISTORY:
+        if t_unix >= eff:
+            cap = v
+    return cap
+
+
+# Current-era value, resolved AT IMPORT. Display and legacy callers only — every
+# scoring path resolves as-of instead, and this one goes stale the moment a
+# long-lived process crosses an era boundary.
+# Deliberately NOT as_of(2**62) (the COMP_WEIGHTS idiom): a constant that reports
+# a cap scheduled for the future reads as the live one and would have had this
+# file claiming 100% pass-through while the chain was still burning 40%.
+MINER_EMISSION_CAP = miner_emission_cap_as_of(_time.time())
 STRIKE_LIMIT = 3                    # consistency failures in 30d ⇒ zeroed 30d
 STRIKE_WINDOW_S = 30 * 24 * 3600
 

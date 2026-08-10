@@ -60,7 +60,7 @@ def lit(monkeypatch):
 def _no_emission_cap(monkeypatch):
     # Shares are easier to hand-check without the burn cap; the cap interaction
     # has its own test class below (which re-enables it).
-    monkeypatch.setattr(config, "MINER_EMISSION_CAP", 1.0)
+    monkeypatch.setattr(config, "MINER_EMISSION_CAP_HISTORY", ((0, 1.0),))
 
 
 # ── on-chain payload codec ─────────────────────────────────────────────────────
@@ -266,7 +266,7 @@ class TestBonusMath:
 # ── emission-cap interaction: bonuses stay inside the pool ─────────────────────
 class TestEmissionCap:
     def test_zero_sum_within_cap(self, lit, monkeypatch):
-        monkeypatch.setattr(config, "MINER_EMISSION_CAP", 0.30)
+        monkeypatch.setattr(config, "MINER_EMISSION_CAP_HISTORY", ((0, 0.30),))
         states = [_state("A", 1), _state("B", 2), _state("D", 3)]
         w_ref = scoring.compute_weights(states, NOW, referral_pairs=[("A", "B")])
         w_no = scoring.compute_weights(states, NOW)
