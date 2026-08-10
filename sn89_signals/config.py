@@ -923,10 +923,19 @@ def referrer_active(now_unix: float) -> bool:
 # CONSENSUS: every validator must flip in the same tempo, so this is a
 # committed timestamp and not an env flag. The env var is the TESTNET switch.
 # 0 = never (stay LF-only). Replays of blocks BEFORE the instant are unchanged.
-# ⚑ MAINNET: 2026-08-11 00:00:00 UTC.
+# ⚑ MAINNET: 2026-08-10 03:45:00 UTC.
+#
+# Pulled forward from 2026-08-11 00:00 (Whit, 08-10 03:26). The day's runway had
+# been for announcing the flip, and it bought nothing: the flip is a NO-OP on
+# current data. Measured immediately before arming — 0 of 42 valid recruits hold
+# a tally in ANY of the three competitions, so referrer_scores is empty and
+# mecid-1 commits burn=1.000 whichever basis is in force. Nothing to coordinate
+# while no recruiter can be paid either way; the only cost of a validator that
+# has not pulled master is its own vtrust, and chef holds ~73% of permitted
+# stake so consensus follows the flip regardless.
 REFERRER_MULTICOMP = os.getenv("SN89_REFERRER_MULTICOMP", "0") == "1"
 REFERRER_MULTICOMP_FROM_UNIX = int(
-    os.getenv("SN89_REFERRER_MULTICOMP_FROM", "1786406400"))
+    os.getenv("SN89_REFERRER_MULTICOMP_FROM", "1786333500"))
 
 # Share keys that are NOT competitions and must never credit a recruit.
 # `reserve` is the referrers' own carve-out held as burn inside mecid-0;
