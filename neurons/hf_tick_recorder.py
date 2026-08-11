@@ -43,9 +43,39 @@ POLL_MS = int(os.getenv("SN89_HF_TICK_POLL_MS", "50"))
 # same series, so a pair missing here is a pair that cannot be graded. The four
 # crosses added by fxexpand17 (AUDNZD/GBPCAD/NZDCHF/NZDJPY) had NO tick coverage
 # at all until 2026-07-23 — absent from the tick-bus seed list while being graded.
-LF_BOARD = ["AUDNZD", "AUDUSD", "BTCUSD", "ETHUSD", "EURUSD", "GBPCAD", "GBPUSD",
-            "NZDCHF", "NZDJPY", "NZDUSD", "SOLUSD", "USDCAD", "USDCHF", "USDJPY",
-            "XAGUSD", "XAUUSD", "XRPUSD"]
+# Last-resort list, used ONLY if the board cannot be read. A recorder that starts with
+# no assets is worse than one with a stale list. Do not maintain this by hand — the
+# live set comes from the board below.
+LF_BOARD_FALLBACK = ["AUDNZD", "AUDUSD", "BTCUSD", "ETHUSD", "EURUSD", "GBPCAD",
+                     "GBPUSD", "NZDCHF", "NZDJPY", "NZDUSD", "SOLUSD", "TAOUSD",
+                     "USDCAD", "USDCHF", "USDJPY", "XAGUSD", "XAUUSD", "XRPUSD"]
+
+
+def _lf_board() -> list:
+    """The LIVE board, not a copy of it.
+
+    A hardcoded list here is a second source of truth for "what is on the board", and it
+    has drifted twice: the fxexpand17 crosses went untracked 2026-07-21 → 07-23, and
+    TAOUSD was listed on 2026-08-11 with no tick coverage at all. Both are invisible —
+    the pair is fully live everywhere a human looks and simply cannot be graded.
+
+    Union with the fallback on purpose: a pair dropped from the board keeps recording, so
+    in-flight calls that still resolve to it through bands_as_of can finish grading.
+    """
+    try:
+        from sn89_signals import config
+        live = list((config.load_bands() or {}).get("bands", {}).keys())
+        if live:
+            return sorted(set(live) | set(LF_BOARD_FALLBACK))
+        print("[hf-ticks] WARNING board read returned no pairs — using fallback list",
+              flush=True)
+    except Exception as e:  # noqa: BLE001
+        print(f"[hf-ticks] WARNING board unreadable ({e}) — using fallback list",
+              flush=True)
+    return sorted(LF_BOARD_FALLBACK)
+
+
+LF_BOARD = _lf_board()
 ASSETS = [a.strip().upper() for a in os.getenv(
     "SN89_HF_TICK_ASSETS",
     ",".join(sorted(set(hf.HF_BOARD_V1) | set(LF_BOARD)))).split(",") if a.strip()]
