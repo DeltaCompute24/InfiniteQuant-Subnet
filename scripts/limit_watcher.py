@@ -140,13 +140,15 @@ def _seq_path(hk: str) -> str:
 
 
 def next_seq(hk: str) -> int:
-    p = _seq_path(hk)
-    try:
-        s = json.load(open(p))["seq"] + 1
-    except Exception:  # noqa: BLE001
-        s = int(time.time())
-    json.dump({"seq": s}, open(p, "w"))
-    return s
+    """Shares hf.next_submit_seq with the self-hosted miner — see that docstring.
+
+    This used to seed from int(time.time()) and then increment by 1 per call, so a
+    hotkey's counter drifted BEHIND wall clock by however long it had been in use
+    (~9.5 days when this was found). Only the seed was time-based; every step after
+    it was +1. That is why fixing the miner alone would have flipped the lockout onto
+    this path instead of clearing it.
+    """
+    return hf.next_submit_seq(_seq_path(hk))
 
 
 async def fire_ws(kp: Keypair, payload: dict) -> dict:

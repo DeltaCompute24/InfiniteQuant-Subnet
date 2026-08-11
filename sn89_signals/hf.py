@@ -375,6 +375,56 @@ def canonical_json(obj) -> str:
     return json.dumps(obj, sort_keys=True, separators=(",", ":"))
 
 
+def next_submit_seq(path: str) -> int:
+    """The per-hotkey submission counter, floored at wall clock (MICROSECONDS).
+
+    The ingest's replay gate is `seq <= last_seq[hotkey] -> stale_seq`, and it keeps
+    ONE scalar per hotkey. That is fine for one signer and a permanent lockout for two,
+    because nothing reconciles their counters. A hotkey really can have two: the trader's
+    self-hosted `neurons/miner.py` AND our dashboard path (`scripts/limit_watcher.py`),
+    which signs on their behalf. Before 2026-08-11 those seeded from `0` and from
+    `int(time.time())` respectively, so the instant a trader used the dashboard, `last_seq`
+    jumped to ~1.79e9 and every submission from their own miner was refused FOREVER — the
+    client would need ~1.78 billion submissions to climb back. Measured: 9 hotkeys, 45
+    rejections, and every one of them had used both paths.
+
+    Flooring at wall clock is what makes independent signers safe: each one lands near
+    `now` regardless of how many calls it has made, so neither can strand the other.
+    `max(prev + 1, ...)` keeps it strictly increasing even if the clock steps backwards,
+    which is the property the ingest actually requires.
+
+    MICROSECONDS, not seconds, so two signers collide only inside the same microsecond
+    instead of the same second. A collision is now a transient that clears on the next
+    submission rather than a wedge.
+
+    It also self-heals both sides on first use after this ships: a stale small counter and
+    a web counter days behind wall clock both jump to `now`. Fixing only one signer would
+    simply have moved the lockout to the other — the web counters were ~9.5 days behind
+    `now` when this was found, so a client seeded at `now` would have locked out the
+    dashboard instead.
+
+    `seq` is formatted as a decimal string into the signing bytes with no width bound
+    (`submit_signing_bytes`), so the larger magnitude changes nothing on the wire.
+    """
+    prev = -1
+    try:
+        with open(path, encoding="utf-8") as fh:
+            prev = int(json.load(fh).get("seq", -1))
+    except (OSError, ValueError, TypeError, AttributeError):
+        pass                    # missing or corrupt -> the wall-clock floor covers us
+    seq = max(prev + 1, int(time.time() * 1_000_000))
+    d = os.path.dirname(path)
+    if d:
+        os.makedirs(d, exist_ok=True)
+    # Atomic: a torn write used to leave a truncated file, and the old readers treated
+    # that as "start from 0" — which is exactly the lockout this function exists to stop.
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump({"seq": seq}, fh)
+    os.replace(tmp, path)
+    return seq
+
+
 def submit_signing_bytes(hk: str, seq: int, nonce: str, payload: dict,
                          ts_miner: int) -> bytes:
     return (SUBMIT_DOMAIN + f"{hk}|{int(seq)}|{nonce}|".encode()

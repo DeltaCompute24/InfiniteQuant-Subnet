@@ -413,8 +413,16 @@ class Ingest:
             return reject("not_registered")
 
         # 3. replay / equivocation — seq is strictly increasing per hotkey
+        #
+        # Carry the floor in the reason (`stale_seq:<last_seq>`), so a client can see
+        # what it has to clear and jump its counter instead of retrying the same value
+        # forever. Bare "stale_seq" told a miner nothing actionable, and the one case
+        # that matters is unrecoverable without it: two signers on one hotkey, where the
+        # floor is ~1.79e9 and the client is counting from 1. Parameterised reasons are
+        # already the convention here (daily_cap:30, min_gap:250ms) and every consumer
+        # matches on the part before ':'.
         if seq <= self.last_seq.get(hk, -1):
-            return reject("stale_seq")
+            return reject(f"stale_seq:{self.last_seq.get(hk, -1)}")
         if abs(t_recv_ms - ts_miner) > hf.MAX_CLOCK_SKEW_MS:
             return reject("clock_skew")
 

@@ -199,19 +199,14 @@ def _hf_seq_path(hotkey: str) -> str:
 
 def _hf_next_seq(hotkey: str) -> int:
     """Strictly-increasing per-hotkey sequence — the ingest rejects a stale seq,
-    so this must never go backwards. Persisted locally."""
-    p = _hf_seq_path(hotkey)
-    seq = 0
-    try:
-        with open(p, encoding="utf-8") as fh:
-            seq = int(json.load(fh).get("seq", 0))
-    except (OSError, ValueError):
-        pass
-    seq += 1
-    os.makedirs(os.path.dirname(p), exist_ok=True)
-    with open(p, "w", encoding="utf-8") as fh:
-        json.dump({"seq": seq}, fh)
-    return seq
+    so this must never go backwards. Persisted locally.
+
+    Delegates to hf.next_submit_seq so this miner and the dashboard signing path
+    share ONE rule. They used to disagree (0-based here, epoch-based there), and
+    because the ingest keeps a single last_seq per hotkey, using the dashboard once
+    locked this miner out permanently. See hf.next_submit_seq for the full account.
+    """
+    return hf.next_submit_seq(_hf_seq_path(hotkey))
 
 
 def submit_hf(wallet: "bt.Wallet", pair: str, direction: str) -> dict:
