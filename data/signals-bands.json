@@ -1,7 +1,7 @@
 {
- "version": "volnorm-equalwash40-20260808",
+ "version": "volnorm-equalwash40-tao165-20260811",
  "vol_window_days": 30,
- "note": "Scheduled 45d structural-wash recalibration (scripts/recalibrate_bands.py, LF target 40%, 7pp deadband), effective 2026-08-08T00:00:00Z. SOLUSD 159 -> 134 (structural wash 52.2% -> 40.1%), XRPUSD 140 -> 123 (49.0% -> 40.1%), USDJPY 14 -> 16 (31.2% -> 38.8%). The other 14 pairs were inside the deadband and are unchanged. Structural wash is the probability a path never travels the band either way inside the horizon, measured on 45d of 1m bars -- a property of price alone, so it tracks volatility regime and not miner selectivity. Values are copied from the history entry now in force, never recomputed here.",
+ "note": "Adds TAOUSD (crypto) at 165 bps symmetric, effective 2026-08-11T03:00:00Z, matching history entry volnorm-equalwash40-tao165-20260811. Band solved on recalibrate_bands.py's own 45d calendar window (2026-06-26 -> 2026-08-10) at the LF 40% structural-wash target, 8h crypto horizon: raw 165.40 -> 165, wash 39.74% on 4,170 samples. Re-listing a pair culled 2026-06-05 for a band <=1x its median hourly range; that reason no longer holds -- TAO's band/median-hourly-range is now 1.95x, inside the incumbent crypto spread of 1.81-1.98x. LF only: HF needs a graded-substrate spread in HF_TYPICAL_SPREAD_BPS and none is recorded, so band_spread_ratio returns None and blocks the listing by design.",
  "bands": {
   "BTCUSD": {
    "asset_class": "crypto",
@@ -87,6 +87,11 @@
    "asset_class": "forex",
    "sl_bps": 33,
    "tp_bps": 33
+  },
+  "TAOUSD": {
+   "asset_class": "crypto",
+   "sl_bps": 165,
+   "tp_bps": 165
   }
  },
  "refreshed_at": "2026-07-21T18:45:00Z"

@@ -62,9 +62,9 @@ your weight ∝ (your qualified wins × tier, each decaying linearly to 0 over 7
 
 | Class | Pairs |
 |---|---|
-| Crypto | BTCUSD · ETHUSD · SOLUSD · XRPUSD |
+| Crypto | BTCUSD · ETHUSD · SOLUSD · XRPUSD · TAOUSD |
 | Metals | XAUUSD · XAGUSD |
-| Forex | AUDUSD · EURUSD · GBPUSD · NZDUSD · USDCAD · USDCHF · USDJPY |
+| Forex | AUDUSD · EURUSD · GBPUSD · NZDUSD · USDCAD · USDCHF · USDJPY · AUDNZD · GBPCAD · NZDCHF · NZDJPY |
 
 Bands are per-asset, volatility-scaled, symmetric 1:1. A signal is graded against the band in force **at its commit block** (`data/signals-bands.json` + `data/signals-bands-history.json`) — a band update never changes an in-flight signal.
 
