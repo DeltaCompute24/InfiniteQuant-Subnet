@@ -56,6 +56,13 @@ GRADES_DB = os.getenv("SN89_CLOSERS_GRADES_DB",
 GRADES_EXPORT = os.getenv("SN89_CLOSERS_GRADES_EXPORT",
                           "/opt/iq-platform/data/live/sn89-closers-grades.json")
 EXPORT_EVERY_S = float(os.getenv("SN89_CLOSERS_EXPORT_EVERY_S", "30"))
+# Per-tenant feed tokens. An LF order commits on chain, and the commitment points
+# at a blob URL the validator must be able to FETCH — so signing is only half the
+# job. The signer map deliberately holds no token (it is a key-path map, mode 600
+# for that reason), so the transport is looked up here, per tenant, exactly as
+# multiplexer.py does before its own submit().
+TENANTS_PATH = os.getenv(
+    "SN89_TENANTS", "/opt/iq-platform/data/live/sn89-managed-main/tenants.json")
 
 DDL = """
 CREATE TABLE IF NOT EXISTS sn89_limit_orders (
@@ -117,6 +124,17 @@ def load_signers() -> dict:
         return {}
 
 
+def load_feed_tokens() -> dict:
+    """tenant -> feed_token, for the LF blob upload. Reloaded on the same cycle
+    as the signer map so a newly enrolled tenant can submit without a restart."""
+    try:
+        tenants = json.load(open(TENANTS_PATH))
+    except Exception:  # noqa: BLE001
+        return {}
+    return {name: t["feed_token"] for name, t in tenants.items()
+            if isinstance(t, dict) and t.get("feed_token")}
+
+
 def keypair_for(hk: str, signers: dict) -> Keypair | None:
     ent = signers.get(hk)
     if not ent:
@@ -165,7 +183,7 @@ async def fire_ws(kp: Keypair, payload: dict) -> dict:
         return json.loads(await ws.recv())
 
 
-def fire_lf(hk: str, signers: dict, payload: dict) -> dict:
+def fire_lf(hk: str, signers: dict, payload: dict, feed_tokens: dict) -> dict:
     """On-chain LF commit via the normal miner path (build_signal + submit).
     Requires a wallet-name signer entry (bt.Wallet signs the extrinsic)."""
     ent = signers.get(hk) or {}
@@ -183,15 +201,29 @@ def fire_lf(hk: str, signers: dict, payload: dict) -> dict:
     if not hk_name:
         return {"kind": "error", "reason": "lf_signer_has_no_hotkey_name"}
     w = bt.Wallet(name=ent["wallet"], hotkey=hk_name)
+    # submit() encrypts the blob, uploads it, and commits the URL on chain. With
+    # no transport configured bucket.upload() raises "no blob transport" AFTER the
+    # wallet loads — which is what every LF order did from 2026-08-08 (when the
+    # hotkey-name fix unmasked it) to 2026-08-12. This service has no R2 creds and
+    # must NOT use SN89_BLOB_DIR: /opt/sn89-blobs is not what the relay serves, so
+    # that path publishes blobs no validator can fetch — silently worse than the
+    # rejection. Publish through the owner relay as the tenant, same as the
+    # multiplexer. Single-threaded fire loop, so mutating the global is race-free.
+    token = feed_tokens.get(ent.get("tenant") or "")
+    if not token:
+        return {"kind": "error",
+                "reason": f"lf_no_feed_token_for_tenant:{ent.get('tenant')}"}
+    from sn89_signals import config as _sn89_config
+    _sn89_config.RELAY_TOKEN = token
     sig = build_signal(w.hotkey.ss58_address, payload["trade_pair"],
                        payload["direction"], comment="iq-limit")
     return {"kind": "lf.commit", **submit(w, sig)}
 
 
-def fire(row: sqlite3.Row, signers: dict) -> dict:
+def fire(row: sqlite3.Row, signers: dict, feed_tokens: dict) -> dict:
     payload = json.loads(row["payload"])
     if row["kind"] == "lf":
-        return fire_lf(row["hotkey"], signers, payload)
+        return fire_lf(row["hotkey"], signers, payload, feed_tokens)
     kp = keypair_for(row["hotkey"], signers)
     if kp is None:
         return {"kind": "error", "reason": "no_signer_for_hotkey"}
@@ -266,6 +298,7 @@ def main() -> None:
                 (NETWORK_SCOPE,)).fetchall()
             if open_rows:
                 signers = load_signers()
+                feed_tokens = load_feed_tokens()
                 try:
                     px = ticks()
                 except Exception:  # noqa: BLE001
@@ -279,7 +312,7 @@ def main() -> None:
                     if not due(row, px):
                         continue
                     try:
-                        res = fire(row, signers)
+                        res = fire(row, signers, feed_tokens)
                     except Exception as e:  # noqa: BLE001
                         res = {"kind": "error", "reason": f"{type(e).__name__}: {e}"}
                     ok = res.get("kind") in ("hf.receipt", "lf.commit")
