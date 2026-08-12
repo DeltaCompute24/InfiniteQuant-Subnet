@@ -29,11 +29,30 @@ T_ARMED_SUN_DEAD = _ts("2026-08-16T00:00:00Z")
 T_ARMED_SUN_OPEN = _ts("2026-08-16T22:00:00Z")
 T_ARMED_MIDWEEK = _ts("2026-08-12T09:00:00Z")
 
+# The forex pair the post-cutover fixtures fire on. It is a NAME and not a literal
+# because the board narrows over time and these tests are about the session calendar,
+# not about any one pair: the fxmacro3-20260813 narrowing dropped GBPUSD and both armed
+# tests below started failing on a void reason that had nothing to do with the calendar.
+# The historical rows keep GBPUSD — it was on the board on 2026-08-07 and rewriting a
+# fixture that reproduces a real incident would defeat the point of it.
+PAIR_LIVE = "USDCHF"
+PAIR_HISTORICAL = "GBPUSD"
+
 
 def test_fixtures_are_the_right_side_of_the_cutover():
     assert T_FRI_2059 < config.FX_DEAD_HORIZON_FROM
     for t in (T_ARMED_FRI_2059, T_ARMED_SUN_DEAD, T_ARMED_SUN_OPEN, T_ARMED_MIDWEEK):
         assert t >= config.FX_DEAD_HORIZON_FROM
+
+
+def test_fixture_pairs_are_on_the_board_when_they_fire():
+    """Guards the stranding above: a fixture pair that has left the board voids for
+    the wrong reason, and the failure names a calendar bug that isn't there."""
+    for t in (T_ARMED_FRI_2059, T_ARMED_SUN_DEAD, T_ARMED_SUN_OPEN, T_ARMED_MIDWEEK):
+        board = config.bands_as_of(t)
+        assert PAIR_LIVE in board, f"{PAIR_LIVE} left the board before {t}"
+        assert board[PAIR_LIVE]["asset_class"] == "forex"
+    assert PAIR_HISTORICAL in config.bands_as_of(T_FRI_2059)
 
 
 # ── the calendar ─────────────────────────────────────────────────────────────
@@ -76,13 +95,13 @@ def _row(pair, t0, hk="hkA"):
 
 
 def test_dead_horizon_voids_after_the_cutover():
-    (out,) = scoring.apply_validity_filters([_row("GBPUSD", T_ARMED_FRI_2059)])
+    (out,) = scoring.apply_validity_filters([_row(PAIR_LIVE, T_ARMED_FRI_2059)])
     assert out.status == "void"
     assert out.void_reason == "fx_dead_horizon"
 
 
 def test_a_live_session_call_is_untouched():
-    (out,) = scoring.apply_validity_filters([_row("GBPUSD", T_ARMED_MIDWEEK)])
+    (out,) = scoring.apply_validity_filters([_row(PAIR_LIVE, T_ARMED_MIDWEEK)])
     assert out.status == "ok" and out.void_reason is None
 
 
@@ -97,7 +116,7 @@ def test_forward_only_never_regrades_history():
     exactly as they graded — arming a rule cannot rewrite a settled journal."""
     # Distinct hotkeys, as the real three were — one hotkey firing three commits
     # a second apart would void on min_spacing for unrelated reasons.
-    rows = [_row("GBPUSD", T_FRI_2059 + i, hk=f"hk{i}") for i in range(3)]
+    rows = [_row(PAIR_HISTORICAL, T_FRI_2059 + i, hk=f"hk{i}") for i in range(3)]
     out = scoring.apply_validity_filters(rows)
     assert all(r.status == "ok" for r in out)
 
@@ -108,8 +127,8 @@ def test_dead_horizon_consumes_no_daily_quota():
     live one after the 21:00Z reopen — same UTC day, so the quota is shared."""
     cap, gap = config.submission_rules_as_of(T_ARMED_SUN_DEAD)
     step = max(gap, 3600)
-    dead = [_row("GBPUSD", T_ARMED_SUN_DEAD + i * step) for i in range(cap)]
-    live = _row("GBPUSD", T_ARMED_SUN_OPEN)
+    dead = [_row(PAIR_LIVE, T_ARMED_SUN_DEAD + i * step) for i in range(cap)]
+    live = _row(PAIR_LIVE, T_ARMED_SUN_OPEN)
     assert int(live.t0_unix // 86400) == int(dead[0].t0_unix // 86400)
 
     out = scoring.apply_validity_filters(dead + [live])

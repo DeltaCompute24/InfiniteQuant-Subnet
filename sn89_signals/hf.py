@@ -80,6 +80,12 @@ HF_TYPICAL_SPREAD_BPS = {
     # UPPER end of the factor range. Erring wide is the safe direction here: it makes
     # every band_spread_ratio a floor rather than a best case.
     "TAOUSD": 3.80, "HYPEUSD": 3.00,
+    # Added 2026-08-12 for the v4 FX narrowing. This one IS a direct measurement, not an
+    # estimate: FX carries real top-of-book (bid + ask) in the anchored corpus, unlike the
+    # trades-only crypto rows above. p75 over 14d of sealed windows with the rollover
+    # excluded (p50 0.570), taking the upper quartile because the whole point of the gate
+    # is that the listing survives a bad spread day and not merely a median one.
+    "AUDUSD": 0.85,
 }
 MIN_BAND_SPREAD_RATIO = 8.0
 
@@ -142,10 +148,37 @@ HF_BOARD_V3 = dict(
 )
 HF_V3_FROM = int(os.getenv("SN89_HF_V3_FROM", "1786500000"))   # 2026-08-12T02:00:00Z
 
+# v4 — the FX narrowing, mirroring the LF fxmacro3-20260813 entry. EURUSD, GBPUSD and
+# USDJPY leave the board; AUDUSD joins. The LF board keeps three forex pairs and HF keeps
+# ONE, and that asymmetry is the spread gate doing its job rather than an oversight.
+#
+# Solved on the same 45d calendar window as LF, 14% structural-wash target, against
+# spreads measured over 14d of SEALED anchored windows with the FX rollover (20:55-21:20
+# UTC) excluded. The three departing pairs are the control: the solver returns 5.00 / 5.20
+# / 4.14 against a listed 5.0 / 6.0 / 4.0, and the measured spread p50 reproduces the
+# recorded table at 0.82x / 0.89x / 1.28x, so its answer for AUDUSD is trustworthy.
+#
+#   AUDUSD   8.4 bps @ 7200s   wash 14.0%   9.9x spread   <- listed
+#   USDCAD   4.7 bps @ 7200s   wash 14.0%   7.3x spread   <- HELD, under the 8.0x gate
+#   USDCHF   7.5 bps @ 7200s   wash 14.0%   7.6x spread   <- HELD, under the 8.0x gate
+#
+# USDCAD and USDCHF clear only on a LONGER clock (4h: 10.1x and 10.0x), which is the
+# TAOUSD-v3 remedy and was the tempting one. It was declined: those ratios hold on the
+# spread p50 and both pairs fail at EVERY HF-length horizon on the p75, and USDCHF's
+# spread p90 is 4.94 bps against a 0.99 p50 — a tail fat enough that the gate is right to
+# refuse it. A pair listed on the strength of the estimator you happened to pick is a pair
+# whose outcomes are microstructure. Revisit if a dedicated pass gives either a defensible
+# p50; until then they are LF-only, and LF is where their 12h horizon suits them anyway.
+HF_BOARD_V4 = {k: v for k, v in HF_BOARD_V3.items()
+               if k not in ("EURUSD", "GBPUSD", "USDJPY")}
+HF_BOARD_V4["AUDUSD"] = (8.4, 8.4, 7200, "forex")
+HF_V4_FROM = int(os.getenv("SN89_HF_V4_FROM", "1786579200"))   # 2026-08-13T00:00:00Z
+
 HF_BANDS_HISTORY = (
     (HF_LAUNCH_FROM, HF_BOARD_V1),
     (HF_V2_FROM, HF_BOARD_V2),
     (HF_V3_FROM, HF_BOARD_V3),
+    (HF_V4_FROM, HF_BOARD_V4),
 )
 
 

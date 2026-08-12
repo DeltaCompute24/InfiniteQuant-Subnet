@@ -939,5 +939,67 @@
     "tp_bps": 184
    }
   }
+ },
+ {
+  "version": "fxmacro3-20260813",
+  "effective_from_unix": 1786579200,
+  "note": "Forex narrowed 11 -> 3: keeps AUDUSD, USDCHF and USDCAD, drops EURUSD, GBPUSD, USDJPY, NZDUSD, NZDCHF, AUDNZD, GBPCAD and NZDJPY. Selection is by MACRO CHARACTER, not by calibration: the three retained pairs each track a hard asset -- AUDUSD the commodity complex, USDCHF the safe-haven bid that also drives gold, USDCAD crude -- so the forex board now expresses the same macro views as the metals and crypto rows rather than the carry-trade and rate-differential structure the JPY and NZD crosses trade on. NO BAND VALUE CHANGES: the three retained pairs keep 28 / 26 / 20 bps exactly as calibrated by volnorm-equalwash40-hype184-20260812, and crypto and metals are untouched, so this entry drops rows and changes no number. Dropped pairs keep grading normally for every call committed before this entry's effective_from -- bands_as_of resolves each call against the board in force at its own t0.",
+  "bands": {
+   "BTCUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 105,
+    "tp_bps": 105
+   },
+   "ETHUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 138,
+    "tp_bps": 138
+   },
+   "SOLUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 134,
+    "tp_bps": 134
+   },
+   "XRPUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 123,
+    "tp_bps": 123
+   },
+   "XAUUSD": {
+    "asset_class": "forex-commodities",
+    "sl_bps": 96,
+    "tp_bps": 96
+   },
+   "XAGUSD": {
+    "asset_class": "forex-commodities",
+    "sl_bps": 195,
+    "tp_bps": 195
+   },
+   "USDCHF": {
+    "asset_class": "forex",
+    "sl_bps": 26,
+    "tp_bps": 26
+   },
+   "USDCAD": {
+    "asset_class": "forex",
+    "sl_bps": 20,
+    "tp_bps": 20
+   },
+   "AUDUSD": {
+    "asset_class": "forex",
+    "sl_bps": 28,
+    "tp_bps": 28
+   },
+   "TAOUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 165,
+    "tp_bps": 165
+   },
+   "HYPEUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 184,
+    "tp_bps": 184
+   }
+  }
  }
 ]
