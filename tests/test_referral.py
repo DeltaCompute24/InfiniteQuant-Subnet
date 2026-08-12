@@ -155,9 +155,9 @@ class TestPairNoCopy:
 
     def test_overlap_episodes_trip_without_sharp_lag(self):
         # follows ~1h behind (outside COPY_SHARP_LAG_S) but inside the leader's
-        # live 8h horizon, on 3 distinct occasions ⇒ overlap trigger.
+        # live 8h horizon, on REFERRAL_PAIR_OVERLAP_EPISODES distinct occasions ⇒ overlap trigger.
         rows = []
-        for i in range(3):
+        for i in range(config.REFERRAL_PAIR_OVERLAP_EPISODES):
             t = NOW - 2 * DAY + i * 10 * HOUR
             rows += [_row("A", t), _row("B", t + HOUR)]
         assert scoring.referral_pair_suspended_until(rows, "A", "B", NOW) is not None

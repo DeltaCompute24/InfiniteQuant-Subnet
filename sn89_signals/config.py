@@ -696,7 +696,7 @@ REFERRAL_MAX_RECRUITS = int(os.getenv("SN89_REFERRAL_MAX_RECRUITS", "0"))
 REFERRAL_PAIR_SHARP_EPISODES = int(os.getenv("SN89_REFERRAL_PAIR_SHARP_EPISODES", "2"))
                                     # sharp (≤COPY_SHARP_LAG_S) follow episodes either
                                     # direction within the pair ⇒ suspend
-REFERRAL_PAIR_OVERLAP_EPISODES = int(os.getenv("SN89_REFERRAL_PAIR_OVERLAP_EPISODES", "3"))
+REFERRAL_PAIR_OVERLAP_EPISODES = int(os.getenv("SN89_REFERRAL_PAIR_OVERLAP_EPISODES", "4"))
                                     # live-overlap (mark_copies) episodes either
                                     # direction within the pair ⇒ suspend
 REFERRAL_PAIR_WINDOW_S = int(os.getenv("SN89_REFERRAL_PAIR_WINDOW_S", str(30 * 24 * 3600)))
