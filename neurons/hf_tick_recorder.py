@@ -79,6 +79,14 @@ LF_BOARD = _lf_board()
 ASSETS = [a.strip().upper() for a in os.getenv(
     "SN89_HF_TICK_ASSETS",
     ",".join(sorted(set(hf.HF_BOARD_V1) | set(LF_BOARD)))).split(",") if a.strip()]
+# ADDITIVE, unlike SN89_HF_TICK_ASSETS which replaces the list above. Use this to record a
+# CANDIDATE pair before it is listed: the HF gate needs its typical spread measured on this
+# very corpus, so a pair that is not recording cannot be measured and cannot be listed --
+# and post-2026-08-11 the list derives from the board, which makes that circular.
+# Recording an unlisted pair grades nothing and gates nothing; it only produces evidence.
+ASSETS = sorted(set(ASSETS) | {a.strip().upper() for a in
+                               os.getenv("SN89_HF_TICK_EXTRA", "").split(",")
+                               if a.strip()})
 STALE_MS = int(os.getenv("SN89_HF_TICK_STALE_MS", "30000"))
 # A tick is filed under ITS OWN src_ts, so one whose timestamp predates the current
 # window can still arrive after that window ended (feed lag). Sealing on the boundary
