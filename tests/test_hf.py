@@ -40,7 +40,13 @@ class TestBoard:
         assert hf.hf_bands_as_of(hf.HF_LAUNCH_FROM) is hf.HF_BOARD_V1
         assert hf.hf_bands_as_of(hf.HF_V2_FROM - 1) is hf.HF_BOARD_V1
         assert hf.hf_bands_as_of(hf.HF_V2_FROM) is hf.HF_BOARD_V2
-        assert hf.hf_bands_as_of(2_000_000_000) is hf.HF_BOARD_V2
+        # Walk whatever versions exist rather than naming the newest: pinning
+        # HF_BOARD_V2 here made adding V3 fail a test about the MECHANISM, which is
+        # the same mistake as the ancestor described above, one version smaller.
+        for eff, board in hf.HF_BANDS_HISTORY:
+            assert hf.hf_bands_as_of(eff) is board
+            assert hf.hf_bands_as_of(eff - 1) is not board
+        assert hf.hf_bands_as_of(2_000_000_000) is hf.HF_BANDS_HISTORY[-1][1]
 
     def test_every_board_version_clears_the_spread_floor(self):
         # A band may only ever be narrowed to a level where the outcome is still

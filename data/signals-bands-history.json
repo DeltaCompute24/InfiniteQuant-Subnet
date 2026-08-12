@@ -837,5 +837,107 @@
     "tp_bps": 165
    }
   }
+ },
+ {
+  "version": "volnorm-equalwash40-hype184-20260812",
+  "effective_from_unix": 1786500000,
+  "note": "Adds HYPEUSD (crypto) at 184 bps symmetric. Band solved with scripts/recalibrate_bands.py's own solve_band/excursions over its calendar-aligned 45d window, LF target 40% structural wash, crypto horizon 8h: raw 183.94 -> 184, structural wash 40.07% on 4,220 samples, 45.0d of 45d coverage. Deadband and rate-limit do not apply to a new listing (both are defined against a current band). Re-lists a pair cut in the 2026-06-11 LIQUIDITY cull, so the volatility recheck used for TAOUSD does not transfer; the cull reason was re-tested directly and no longer holds. On the graded venue allowlist HYPE now runs 760 trades/h across three venues (Coinbase 798, Kraken 321, Bitstamp 113 in a sampled hour, 100% allowlisted), with allowlisted inter-tick p90 9.56s and max 55.6s, and 98.3% 1m bar coverage over the window -- better than TAOUSD on every one of those measures (646/h, p90 19.17s, max 90.1s, 97.2%). It is worse on one: the largest price move inside a bar-coverage hole is 58.3% of band vs TAOUSD's 49.1%. Both sit a clear tier below BTC/ETH/SOL/XRP, which run 8,756-29,650 allowlisted trades/h at p90 under 1.4s.",
+  "bands": {
+   "BTCUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 105,
+    "tp_bps": 105
+   },
+   "ETHUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 138,
+    "tp_bps": 138
+   },
+   "SOLUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 134,
+    "tp_bps": 134
+   },
+   "XRPUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 123,
+    "tp_bps": 123
+   },
+   "XAUUSD": {
+    "asset_class": "forex-commodities",
+    "sl_bps": 96,
+    "tp_bps": 96
+   },
+   "XAGUSD": {
+    "asset_class": "forex-commodities",
+    "sl_bps": 195,
+    "tp_bps": 195
+   },
+   "EURUSD": {
+    "asset_class": "forex",
+    "sl_bps": 20,
+    "tp_bps": 20
+   },
+   "GBPUSD": {
+    "asset_class": "forex",
+    "sl_bps": 23,
+    "tp_bps": 23
+   },
+   "USDJPY": {
+    "asset_class": "forex",
+    "sl_bps": 16,
+    "tp_bps": 16
+   },
+   "USDCHF": {
+    "asset_class": "forex",
+    "sl_bps": 26,
+    "tp_bps": 26
+   },
+   "USDCAD": {
+    "asset_class": "forex",
+    "sl_bps": 20,
+    "tp_bps": 20
+   },
+   "AUDUSD": {
+    "asset_class": "forex",
+    "sl_bps": 28,
+    "tp_bps": 28
+   },
+   "NZDUSD": {
+    "asset_class": "forex",
+    "sl_bps": 36,
+    "tp_bps": 36
+   },
+   "NZDCHF": {
+    "asset_class": "forex",
+    "sl_bps": 40,
+    "tp_bps": 40
+   },
+   "AUDNZD": {
+    "asset_class": "forex",
+    "sl_bps": 26,
+    "tp_bps": 26
+   },
+   "GBPCAD": {
+    "asset_class": "forex",
+    "sl_bps": 25,
+    "tp_bps": 25
+   },
+   "NZDJPY": {
+    "asset_class": "forex",
+    "sl_bps": 33,
+    "tp_bps": 33
+   },
+   "TAOUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 165,
+    "tp_bps": 165
+   },
+   "HYPEUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 184,
+    "tp_bps": 184
+   }
+  }
  }
 ]

@@ -72,6 +72,14 @@ HF_BOARD_V1 = {
 HF_TYPICAL_SPREAD_BPS = {
     "XAUUSD": 0.61, "BTCUSD": 0.91, "ETHUSD": 1.81, "SOLUSD": 2.56,
     "XRPUSD": 1.32, "EURUSD": 0.53, "GBPUSD": 0.67, "USDJPY": 0.49,
+    # Added 2026-08-12 for the V3 listing. CONSERVATIVE (upper-bound) estimates, not
+    # direct measurements: measuring our anchored corpus reproduces the eight values
+    # above only to within -100%/+297%, so a raw number from it does not belong in this
+    # table. Instead all crypto pairs were measured on ONE window and calibrated against
+    # SOLUSD/XRPUSD (the thinnest incumbents, hence the honest comparators), taking the
+    # UPPER end of the factor range. Erring wide is the safe direction here: it makes
+    # every band_spread_ratio a floor rather than a best case.
+    "TAOUSD": 3.80, "HYPEUSD": 3.00,
 }
 MIN_BAND_SPREAD_RATIO = 8.0
 
@@ -112,9 +120,32 @@ HF_LAUNCH_FROM = int(os.getenv("SN89_HF_LAUNCH_FROM", "1784764800"))   # 2026-07
 HF_BOARD_V2 = dict(HF_BOARD_V1, XAUUSD=(10.0, 10.0, 1800, "forex-commodities"))
 HF_V2_FROM = int(os.getenv("SN89_HF_V2_FROM", "1786147200"))          # 2026-08-08T00:00:00Z
 
+# v3 — lists TAOUSD and HYPEUSD, both at the 7200s FX-style horizon.
+#
+# TAOUSD does NOT fit at 1800s and this is the load-bearing detail: its 14%-target band
+# is 25.8 bps, clearing 8x spread needs 30.4 bps, and 30.4 washes 22.4% — past the 7pp
+# deadband around the target. No 30-minute band satisfies both gates, which is the spread
+# gate correctly saying the pair is too spread-heavy for that clock. The board's own
+# precedent is the FX majors, on 7200s for exactly this reason.
+#
+# At 7200s, on the 45d window, both hit the target and clear with room:
+#   TAOUSD   53.1 bps  wash 14.01%  14.0x spread
+#   HYPEUSD  62.6 bps  wash 13.98%  20.9x spread
+#
+# HYPEUSD would also clear at 1800s (28.3 bps, 9.4x) but its spread is estimated from 61
+# anchored ticks, and 9.4x is too near the 8.0x gate to rest on an estimate. Revisit once
+# it has a measured p50.
+HF_BOARD_V3 = dict(
+    HF_BOARD_V2,
+    TAOUSD=(53.1, 53.1, 7200, "crypto"),
+    HYPEUSD=(62.6, 62.6, 7200, "crypto"),
+)
+HF_V3_FROM = int(os.getenv("SN89_HF_V3_FROM", "1786500000"))   # 2026-08-12T02:00:00Z
+
 HF_BANDS_HISTORY = (
     (HF_LAUNCH_FROM, HF_BOARD_V1),
     (HF_V2_FROM, HF_BOARD_V2),
+    (HF_V3_FROM, HF_BOARD_V3),
 )
 
 
