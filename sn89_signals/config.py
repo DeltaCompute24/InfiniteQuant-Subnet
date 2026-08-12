@@ -560,7 +560,24 @@ COPY_PENALTY = os.getenv("SN89_COPY_PENALTY", "loss")
 # escape it — and an honest miner who only occasionally lands second on a
 # crowded trade is NOT penalized.
 COPY_HABITUAL_RATE = float(os.getenv("SN89_COPY_HABITUAL_RATE", "0.5"))
-COPY_MIN_COPIES = int(os.getenv("SN89_COPY_MIN_COPIES", "5"))
+COPY_MIN_COPIES = int(os.getenv("SN89_COPY_MIN_COPIES", "8"))
+                                    # need at least this many copied trades in the window
+                                    # before the rate gate can fire. 2026-08-12: 5 -> 8.
+                                    # The rate gate alone reads high on a crowded board —
+                                    # 22 hotkeys currently sit above COPY_HABITUAL_RATE and
+                                    # only one carries a shadow signature — so the floor is
+                                    # what keeps a small sample from being decisive. At 5, a
+                                    # miner with 7 copies in 10 decisive trades is penalised
+                                    # off a sample too thin to separate a copyist from a
+                                    # trader on a 13-pair board. Verified on the live journal:
+                                    # the flagged set is 1 at 5..7 and 0 at 8..11, so 8 costs
+                                    # no other detection today. NOTE the tradeoff this buys:
+                                    # a copier is now invisible until its 8th copy, and the
+                                    # key this cut cleared (5EvUpf, 11 sharp episodes vs
+                                    # 5Gja5c, median follow lag 24s, min 12s = one block,
+                                    # never once leading) would have been caught at 5. This
+                                    # is a deliberate widening of the benefit of the doubt,
+                                    # not a finding that the pair was innocent.
 COPY_PENALTY_TTL_S = int(os.getenv("SN89_COPY_PENALTY_TTL_S", str(2 * 24 * 3600)))
                                     # The flag is a LOUD, SHORT-LIVED WARNING, not a 30-day
                                     # scarlet letter. Detection still weighs COPY_WINDOW_S of

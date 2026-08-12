@@ -22,40 +22,51 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from sn89_signals import config, scoring   # noqa: E402
 
 
+# Counts are DERIVED from the live thresholds, never hardcoded: these cases test
+# the gate SEMANTICS (which of the two gates must agree), not one calibration.
+# They used to bake in COPY_MIN_COPIES=5 and all four broke on the 2026-08-12
+# retune to 8 — a threshold move should not look like a scoring regression.
+MINC = config.COPY_MIN_COPIES          # copies floor
+HAB = (MINC, MINC * 2)                 # at the floor, rate 0.50 -> habitual
+UNDER = (MINC - 1, MINC)               # one under the floor at a HIGHER rate
+
+
 class TestIsPenalisedCopier:
     def test_rate_gate_alone_does_not_strip(self, monkeypatch):
         # habitual by rate but no 1:1 shadow fingerprint -> honest crowd, no strip
         monkeypatch.setattr(config, "COPY_REQUIRE_SHADOW", True)
-        assert scoring.is_habitual_copier(5, 10) is True
-        assert scoring.is_penalised_copier(5, 10, False) is False
+        assert scoring.is_habitual_copier(*HAB) is True
+        assert scoring.is_penalised_copier(*HAB, False) is False
 
     def test_both_gates_strip(self, monkeypatch):
         monkeypatch.setattr(config, "COPY_REQUIRE_SHADOW", True)
-        assert scoring.is_penalised_copier(5, 10, True) is True
+        assert scoring.is_penalised_copier(*HAB, True) is True
 
     def test_shadow_alone_does_not_strip(self, monkeypatch):
         # a sharp signature but a low landing-second rate is not enough
         monkeypatch.setattr(config, "COPY_REQUIRE_SHADOW", True)
-        assert scoring.is_habitual_copier(1, 10) is False
-        assert scoring.is_penalised_copier(1, 10, True) is False
+        assert scoring.is_habitual_copier(1, MINC * 2) is False
+        assert scoring.is_penalised_copier(1, MINC * 2, True) is False
 
     def test_legacy_rate_only_when_lever_off(self, monkeypatch):
         monkeypatch.setattr(config, "COPY_REQUIRE_SHADOW", False)
-        assert scoring.is_penalised_copier(5, 10, False) is True
+        assert scoring.is_penalised_copier(*HAB, False) is True
 
     def test_penalty_off_short_circuits(self, monkeypatch):
         monkeypatch.setattr(config, "COPY_PENALTY", "off")
-        assert scoring.is_penalised_copier(10, 10, True) is False
+        assert scoring.is_penalised_copier(MINC * 2, MINC * 2, True) is False
 
     def test_below_min_copies_never_strips(self, monkeypatch):
         monkeypatch.setattr(config, "COPY_REQUIRE_SHADOW", True)
-        # 4 copies is under COPY_MIN_COPIES(5) even at a 0.8 rate
-        assert scoring.is_penalised_copier(4, 5, True) is False
+        # one copy under the floor, and at a rate ABOVE COPY_HABITUAL_RATE, so
+        # only the floor can be what refuses it
+        assert (UNDER[0] / UNDER[1]) > config.COPY_HABITUAL_RATE
+        assert scoring.is_penalised_copier(*UNDER, True) is False
 
     def test_deterministic(self, monkeypatch):
         monkeypatch.setattr(config, "COPY_REQUIRE_SHADOW", True)
         for _ in range(5):
-            assert scoring.is_penalised_copier(7, 10, True) is True
+            assert scoring.is_penalised_copier(*HAB, True) is True
 
 
 class TestSybilSprayStillMarked:
