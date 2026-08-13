@@ -869,11 +869,140 @@ def hf_eligible_from(sub_ts_ms) -> float | None:
     makes the later-satisfied of the two thresholds true.
     """
     days = set()
-    for i, t_ms in enumerate(sorted(int(t) for t in sub_ts_ms), start=1):
+    for i, t_ms in enumerate(sorted(_sub_ts(s) for s in sub_ts_ms), start=1):
         days.add(int(t_ms) // 86_400_000)          # UTC day index
         if i >= HF_QUALIFY_MIN_SUBMISSIONS and len(days) >= HF_QUALIFY_MIN_TRADING_DAYS:
             return t_ms / 1000.0
     return None
+
+
+def _sub_ts(s) -> int:
+    """t0_ms out of a submission record, which comes in two shapes.
+
+    Since the diversity gate (below) a record is `(t0_ms, pair, direction)`; before
+    it, and in every caller that only needs the clock, it is a bare t0_ms. Both are
+    accepted so a producer that has no direction to give (an old grade cache mid
+    rebuild) still computes the SAME eligibility instant as one that does — the
+    volume gate never depended on pair or direction and must not start now.
+    """
+    return int(s[0] if isinstance(s, (tuple, list)) else s)
+
+
+# ── HF submission-diversity gate (CONSENSUS) ─────────────────────────────────
+# A hotkey that submits the same direction on the same handful of pairs forever is
+# not forecasting, it is holding an opinion and being paid per hour for restating
+# it. On a 30/day cadence that is the cheapest loop on the mechanism: a cron that
+# fires LONG BTCUSD every hour rides any up-tape into a passing hit rate without
+# ever taking the other side of anything.
+#
+# It cannot be caught by the edge gate. The Wilson floor asks whether a miner wins,
+# and in a trending tape a frozen miner does win — measured 2026-08-12, the two
+# largest offenders sat at ranks 1 and 2 of the board on 65.4% and 64.9% hit rate,
+# together holding 38% of the HF pool, across 378 and 300 submissions of which ZERO
+# were SHORT. So diversity is a separate axis from accuracy and needs its own gate.
+#
+# The rule, deliberately loose (Whit, 2026-08-12): a miner must take BOTH sides some
+# of the time, and how much "some" is scales with how narrow its universe is. A
+# miner covering the whole board can be lopsided — that is a house view across many
+# instruments, and it is still eight independent decisions. A miner on two pairs
+# that has never once gone the other way has made one decision and repeated it.
+#
+#   distinct pairs   minimum minority-direction share
+#   <= 2             HF_DIVERSITY_FLOOR_NARROW   (0.20)
+#   3-4              HF_DIVERSITY_FLOOR_MID      (0.12)
+#   5-6              HF_DIVERSITY_FLOOR_WIDE     (0.06)
+#   >= 7             HF_DIVERSITY_FLOOR_BROAD    (0.03)
+#
+# minority-direction share = min(#LONG, #SHORT) / n, over accepted submissions in
+# the trailing HF_DIVERSITY_WINDOW_S. Below HF_DIVERSITY_MIN_SUBS in that window the
+# gate does not apply at all — a low-volume miner has not had the chance to be
+# two-sided, and the ratio is noise at small n anyway.
+#
+# CALIBRATION (30d of anchored windows, 2026-08-12, all 31 hotkeys with >= 20 subs):
+# six keys sit at 0.0-4.4% minority share; the remaining twenty-five sit at 15-50%.
+# Nothing occupies the interval between. The floors are placed inside that empty
+# band on purpose, so the gate is insensitive to where exactly it is set and no
+# honest miner is anywhere near it.
+#
+# Failing is REVERSIBLE and carries no elimination — weight is zero for as long as
+# the trailing window is one-sided and returns by itself once the miner starts
+# taking the other side. That matches HF's no-cliff design: a bad HF miner decays to
+# zero rather than being cut. It is also why the window is trailing and not
+# all-time: a miner that reforms should be able to earn again without re-registering.
+HF_DIVERSITY_ENABLED = os.getenv("SN89_HF_DIVERSITY_ENABLED", "1") == "1"
+HF_DIVERSITY_WINDOW_S = int(os.getenv("SN89_HF_DIVERSITY_WINDOW_S", str(30 * 86400)))
+HF_DIVERSITY_MIN_SUBS = int(os.getenv("SN89_HF_DIVERSITY_MIN_SUBS", "40"))
+HF_DIVERSITY_FLOOR_NARROW = float(os.getenv("SN89_HF_DIVERSITY_FLOOR_NARROW", "0.20"))
+HF_DIVERSITY_FLOOR_MID = float(os.getenv("SN89_HF_DIVERSITY_FLOOR_MID", "0.12"))
+HF_DIVERSITY_FLOOR_WIDE = float(os.getenv("SN89_HF_DIVERSITY_FLOOR_WIDE", "0.06"))
+HF_DIVERSITY_FLOOR_BROAD = float(os.getenv("SN89_HF_DIVERSITY_FLOOR_BROAD", "0.03"))
+
+
+def hf_diversity_floor(n_pairs: int) -> float:
+    """The minimum minority-direction share demanded of a miner covering `n_pairs`
+    distinct pairs. Monotonically non-increasing in breadth."""
+    if n_pairs <= 2:
+        return HF_DIVERSITY_FLOOR_NARROW
+    if n_pairs <= 4:
+        return HF_DIVERSITY_FLOOR_MID
+    if n_pairs <= 6:
+        return HF_DIVERSITY_FLOOR_WIDE
+    return HF_DIVERSITY_FLOOR_BROAD
+
+
+def hf_diversity(subs, now: float) -> dict:
+    """Diversity verdict for ONE hotkey over the trailing window.
+
+    `subs` is the accepted-submission list — `(t0_ms, pair, direction)` records. The
+    returned dict is the whole audit trail, so the validator log, the public board
+    and the watcher all quote identical numbers rather than three reconstructions:
+
+        {"n", "pairs", "long", "short", "share", "floor", "applies", "ok"}
+
+    PURE / deterministic in the submissions and `now`, like every other consensus
+    function here — `now` enters only as the trailing-window edge, and validators
+    already agree on the weight-cycle clock to well inside a 30-day window.
+
+    `n` counts only records that actually carry a direction. Records that do not —
+    the legacy bare-timestamp shape, or a grade-cache row written before the
+    `direction` column existed — are skipped entirely rather than counted as
+    neither side, because counting them would DEPRESS an honest miner's share and
+    fail it on nothing but the age of a cache. A half-migrated validator therefore
+    measures a smaller window, never a wronger one, and once `n` falls below
+    HF_DIVERSITY_MIN_SUBS the gate reports `applies=False` and abstains. (This is
+    not a way out for a miner: direction is a required, signed payload field that
+    `validate_submission` rejects a submission without, so an untyped record can
+    only ever be OUR bookkeeping, never a miner's choice.)
+    """
+    cutoff_ms = (now - HF_DIVERSITY_WINDOW_S) * 1000.0
+    pairs, longs, shorts = set(), 0, 0
+    for s in subs or ():
+        if not isinstance(s, (tuple, list)) or len(s) < 3:
+            continue
+        t_ms, pair, direction = s[0], s[1], s[2]
+        if int(t_ms) < cutoff_ms:
+            continue
+        d = str(direction or "").upper()
+        if d == "LONG":
+            longs += 1
+        elif d == "SHORT":
+            shorts += 1
+        else:
+            continue                              # untyped: not a measurement
+        if pair:
+            pairs.add(str(pair))
+    n = longs + shorts
+    share = (min(longs, shorts) / n) if n else 0.0
+    floor = hf_diversity_floor(len(pairs))
+    applies = HF_DIVERSITY_ENABLED and n >= HF_DIVERSITY_MIN_SUBS
+    return {"n": n, "pairs": len(pairs), "long": longs, "short": shorts,
+            "share": share, "floor": floor, "applies": applies,
+            "ok": (not applies) or share >= floor}
+
+
+def hf_diversity_ok(subs, now: float) -> bool:
+    """`hf_diversity(...)["ok"]` — the gate as the weight path consumes it."""
+    return bool(hf_diversity(subs, now)["ok"])
 
 MECID_1 = 1
 
@@ -939,9 +1068,15 @@ def hf_compute_weights(decisive_by_hk: dict, first_seen_by_hk: dict,
     submissions across >= HF_QUALIFY_MIN_TRADING_DAYS distinct UTC days). A miner not
     yet eligible earns nothing; once eligible, wins from that instant on can earn.
 
-    `subs_by_hk` maps hotkey -> list of accepted-submission timestamps (ms), the
-    thing eligibility is computed from — the FULL accepted set (wash/void included),
-    not just decisive outcomes.
+    `subs_by_hk` maps hotkey -> list of accepted submissions as
+    `(t0_ms, pair, direction)`, the thing eligibility is computed from — the FULL
+    accepted set (wash/void included), not just decisive outcomes. It carries pair
+    and direction because the diversity gate reads them; the volume gate reads only
+    the timestamp and still accepts a bare-timestamp list (see `_sub_ts`).
+
+    TWO gates run over it, and a miner must clear both to hold any weight:
+    `hf_eligible_from` (has it participated enough) and `hf_diversity_ok` (does it
+    take both sides, at a threshold scaled to how many pairs it trades).
 
     What is deliberately NOT run here (unlike mecid 0): copy detection, referrals,
     and elimination re-derivation. Signed real-time submissions have no timelock-copy
@@ -963,9 +1098,12 @@ def hf_compute_weights(decisive_by_hk: dict, first_seen_by_hk: dict,
             uid = uid_by_hk.get(hk)
             if uid is None:
                 continue
-            eligible = hf_eligible_from(subs_by_hk.get(hk, []))
+            subs = subs_by_hk.get(hk, [])
+            eligible = hf_eligible_from(subs)
             if eligible is None:
                 continue                         # < 50 subs or < 8 trading days → no weight
+            if not hf_diversity_ok(subs, now):
+                continue                         # one-sided on a narrow universe → no weight
             rep_won, rep_dec, won_all, _won_orig, _copies, tw = scoring.score_inputs(
                 decisive, eligible, now)
             qwins = scoring.qualified_wins(
@@ -990,9 +1128,12 @@ def hf_compute_tallies(decisive_by_hk: dict, first_seen_by_hk: dict,
     dust floor and the probation floor, and paying a recruiter for those would
     make registering idle hotkeys profitable.
 
-    Same eligibility gate as the vector — a miner below HF_QUALIFY_MIN_SUBMISSIONS
-    or HF_QUALIFY_MIN_TRADING_DAYS is absent, not zero — so the two cannot
-    disagree about who is a participant. Runs inside hf_scoring_config for the
+    Same two gates as the vector — a miner below HF_QUALIFY_MIN_SUBMISSIONS or
+    HF_QUALIFY_MIN_TRADING_DAYS, or failing the diversity floor, is absent rather
+    than zero — so the two cannot disagree about who is a participant. The
+    diversity gate belongs here for the same reason the eligibility gate does:
+    without it a recruiter would be paid for recruits running an always-long cron,
+    which is exactly the behaviour the gate exists to stop being profitable. Runs inside hf_scoring_config for the
     same reason every other HF caller does: the LF constants would produce a
     different tally than the vector was built from.
     """
@@ -1003,8 +1144,11 @@ def hf_compute_tallies(decisive_by_hk: dict, first_seen_by_hk: dict,
         for hk, decisive in decisive_by_hk.items():
             if uid_by_hk.get(hk) is None:
                 continue
-            eligible = hf_eligible_from(subs_by_hk.get(hk, []))
+            subs = subs_by_hk.get(hk, [])
+            eligible = hf_eligible_from(subs)
             if eligible is None:
+                continue
+            if not hf_diversity_ok(subs, now):
                 continue
             qwins = scoring.qualified_wins(
                 decisive, eligible, habitual=False,

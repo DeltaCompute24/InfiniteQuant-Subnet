@@ -129,6 +129,32 @@ verifies the receipt against the published ingest key, and appends it to
 `~/.sn89/hf_receipts_<hotkey>.jsonl` (keep these — they are your fraud-proof). A
 strictly-increasing sequence per hotkey is tracked in `~/.sn89/hf_seq_<hotkey>.json`.
 
+**Two gates decide whether an HF win earns anything.** Both are computed from the
+published windows, so you can check either one yourself.
+
+*Participation.* 50 accepted submissions across 8 distinct UTC days. Wins before you
+clear it are warmup and pay nothing. Wins after it pay normally.
+
+*Direction diversity.* You must take both sides some of the time, and how often
+depends on how many pairs you trade. Over a trailing 30 days, the smaller of your
+LONG and SHORT counts must be at least this share of your calls:
+
+| distinct pairs | minimum minority-direction share |
+|---|---|
+| 2 or fewer | 20% |
+| 3 to 4 | 12% |
+| 5 to 6 | 6% |
+| 7 or more | 3% |
+
+Below 40 calls in the window the diversity rule does not apply.
+
+A hotkey that fails it earns zero for as long as it fails. This is reversible and it
+is not an elimination: start taking the other side and your weight returns on its
+own, with no re-registration. A miner covering the whole board is allowed to be
+lopsided, because a house view across eight instruments is still eight separate
+decisions. A hotkey on two pairs that has never once gone the other way has made one
+decision and repeated it, and the mechanism pays for forecasts.
+
 ### Closers — vote on the network's open positions
 
 The third competition pays for exit timing: the network publishes its OPEN

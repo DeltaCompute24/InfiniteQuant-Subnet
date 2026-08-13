@@ -30,7 +30,14 @@ _UA = {"User-Agent": "sn89-validator/1.0"}
 # forever. v2: the incomplete-tick-series wash bug below. v3: the same-mechanism
 # open-position gate (hf.check_pair_open) — it voids calls already written as graded,
 # so every validator must re-derive rather than apply it to new calls only.
-GRADER_VERSION = 3
+# v4 (2026-08-12): `grades` gained `direction`, which hf.hf_diversity reads. The bump
+# is what makes the diversity gate a CONSENSUS change rather than a per-validator
+# one — an in-place ALTER leaves historical rows with a NULL direction, so two
+# validators would measure the same miner over different typed-submission sets
+# depending on when each upgraded. Clearing the rows forces both to rebuild the full
+# history from the published windows and converge. The rebuild is local: receipts and
+# ticks are separate caches and are NOT dropped, so nothing is refetched.
+GRADER_VERSION = 4
 
 # A window is published shortly AFTER it closes, so a call whose horizon has only
 # just elapsed is graded against a series that is still arriving. Wait this long
@@ -195,12 +202,15 @@ def _db(cache_dir: str) -> sqlite3.Connection:
     c.execute("CREATE TABLE IF NOT EXISTS grades ("
               "key TEXT PRIMARY KEY, hk TEXT, t0_ms INTEGER, pair TEXT, status TEXT, "
               "open_until_ms INTEGER)")
-    # `open_until_ms` is v3. A GRADER_VERSION bump clears the ROWS but CREATE TABLE
-    # IF NOT EXISTS leaves an existing table's SHAPE alone, so an upgraded validator
-    # needs the column added explicitly or every insert below fails.
-    if not any(r[1] == "open_until_ms"
-               for r in c.execute("PRAGMA table_info(grades)")):
+    # `open_until_ms` is v3, `direction` is v4 (the diversity gate). A GRADER_VERSION
+    # bump clears the ROWS but CREATE TABLE IF NOT EXISTS leaves an existing table's
+    # SHAPE alone, so an upgraded validator needs each column added explicitly or
+    # every insert below fails.
+    have_cols = {r[1] for r in c.execute("PRAGMA table_info(grades)")}
+    if "open_until_ms" not in have_cols:
         c.execute("ALTER TABLE grades ADD COLUMN open_until_ms INTEGER")
+    if "direction" not in have_cols:
+        c.execute("ALTER TABLE grades ADD COLUMN direction TEXT")
     c.execute("CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT)")
     row = c.execute("SELECT v FROM meta WHERE k='grader_version'").fetchone()
     have = int(row[0]) if row else 0
@@ -428,30 +438,41 @@ def _resolve_pending(db, base: str, tick_dir: str, row, now_ms: int,
     # held-until from the grade makes the two impossible to drift apart, which is
     # the failure that would void legal calls.
     held = int(t0_ms) if g["status"] == "void" else int(g["exit_ms"])
-    db.execute("INSERT OR REPLACE INTO grades VALUES (?,?,?,?,?,?)",
-               (key, hk, int(t0_ms), pair, g["status"], int(held)))
+    # Named columns, not positional: `grades` now has two columns that arrived by
+    # ALTER (open_until_ms, direction), so their ORDER on an upgraded validator is
+    # whatever that validator's history happened to be. A bare VALUES(...) would bind
+    # direction into open_until_ms on some nodes and not others.
+    db.execute("INSERT OR REPLACE INTO grades "
+               "(key, hk, t0_ms, pair, status, open_until_ms, direction) "
+               "VALUES (?,?,?,?,?,?,?)",
+               (key, hk, int(t0_ms), pair, g["status"], int(held), direction))
     db.execute("DELETE FROM pending WHERE key=?", (key,))
 
 
 def _history(cache_dir: str):
     """(decisive_by_hk, first_seen_by_hk, submissions_by_hk, graded_by_hk).
 
-    submissions_by_hk carries EVERY resolved submission's t0_ms (won/lost/wash/
-    void) — the HF eligibility gate counts accepted participation, not just
+    submissions_by_hk carries EVERY resolved submission (won/lost/wash/void) as
+    `(t0_ms, pair, direction)` — the HF gates count accepted participation, not just
     decisive outcomes. Resolved-only (not the ephemeral `pending` table) so the
     set is deterministic from the published windows and every validator computes
     the same eligibility instant; a call's horizon is at most 2h, so the lag is
     immaterial to an 8-trading-day gate.
+
+    pair and direction ride along for hf.hf_diversity. They are part of the SIGNED
+    payload, so a replaying validator reconstructs exactly this tuple from the
+    published windows — the diversity verdict is as reproducible as the grade.
     """
     db = _db(cache_dir)
     dec: dict = {}
     fs: dict = {}
     subs: dict = {}
     graded: dict = {}
-    for hk, t0_ms, status in db.execute("SELECT hk, t0_ms, status FROM grades"):
+    for hk, t0_ms, status, pair, direction in db.execute(
+            "SELECT hk, t0_ms, status, pair, direction FROM grades"):
         t0 = t0_ms / 1000.0
         fs[hk] = min(fs.get(hk, t0), t0)
-        subs.setdefault(hk, []).append(int(t0_ms))
+        subs.setdefault(hk, []).append((int(t0_ms), pair, direction))
         if status in ("won", "lost", "wash"):
             # graded (not void): what scoring.efficiency_multiplier prices. Note HF
             # writes 'wash', LF writes 'washed'.

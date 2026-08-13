@@ -282,7 +282,9 @@ def _refusals() -> dict:
 
 def _grades():
     """Returns (status_by_key, rows, held_by_key) from the first readable grade
-    cache: status_by_key = {'hk:seq': status}; rows = [(hk, t0_ms, status), ...];
+    cache: status_by_key = {'hk:seq': status}; rows = [(hk, t0_ms, status, pair,
+    direction), ...] — pair and direction ride along for hf.hf_diversity, so the
+    board's diversity verdict comes from the same rows the validator gated on;
     held_by_key = {'hk:seq': open_until_ms} — the resolving touch for a decisive
     call, the horizon for a wash, which is where the path walk stops."""
     for db in GRADE_DBS:
@@ -291,7 +293,8 @@ def _grades():
         try:
             c = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
             by_key = {k: s for k, s in c.execute("SELECT key, status FROM grades")}
-            rows = list(c.execute("SELECT hk, t0_ms, status FROM grades"))
+            rows = list(c.execute(
+                "SELECT hk, t0_ms, status, pair, direction FROM grades"))
             held = {k: v for k, v in c.execute(
                 "SELECT key, open_until_ms FROM grades WHERE open_until_ms IS NOT NULL")}
             c.close()
@@ -345,12 +348,13 @@ def _identity():
 
 
 def _submissions_by_hk(grades_rows) -> dict:
-    """hotkey -> [t0_ms of every resolved submission] (won/lost/wash/void), the
-    accepted-submission set the HF eligibility gate counts. Resolved-only, so it
-    matches the validator's own source exactly (hf_grade._history)."""
+    """hotkey -> [(t0_ms, pair, direction) of every resolved submission]
+    (won/lost/wash/void), the accepted-submission set the HF gates count.
+    Resolved-only and in the same tuple shape, so it matches the validator's own
+    source exactly (hf_grade._history) and both gates read identical input."""
     subs: dict = {}
-    for hk, t0_ms, _status in grades_rows:
-        subs.setdefault(hk, []).append(int(t0_ms))
+    for hk, t0_ms, _status, pair, direction in grades_rows:
+        subs.setdefault(hk, []).append((int(t0_ms), pair, direction))
     return subs
 
 
@@ -362,7 +366,7 @@ def _outcome_history(grades_rows):
     dec: dict = {}
     graded: dict = {}
     fs: dict = {}
-    for hk, t0_ms, status in grades_rows:
+    for hk, t0_ms, status, _pair, _direction in grades_rows:
         t0 = t0_ms / 1000.0
         fs[hk] = min(fs.get(hk, t0), t0)
         if status in ("won", "lost", "wash"):
@@ -774,8 +778,16 @@ def main() -> int:
     # disagree with the number the validator applied (trap-1 discipline).
     gate_by_hk = {}
     for hk, ts in subs_by_hk.items():
-        days = sorted({int(t) // 86_400_000 for t in ts})
+        days = sorted({int(hf._sub_ts(t)) // 86_400_000 for t in ts})
+        # The diversity gate is the SECOND thing a trader cannot infer from the
+        # board: a frozen miner's hit rate looks fine, so without this its weight
+        # simply vanishes with no stated reason. Same trap-1 discipline as above —
+        # call hf.hf_diversity rather than recounting, so the board cannot quote a
+        # share the validator did not gate on.
+        div = hf.hf_diversity(ts, now)
         gate_by_hk[hk] = {
+            "diversity": div,
+            "diversity_ok": bool(div["ok"]),
             "submissions": len(ts),
             "submissions_required": hf.HF_QUALIFY_MIN_SUBMISSIONS,
             "trading_days": len(days),

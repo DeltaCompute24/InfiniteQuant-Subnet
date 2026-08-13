@@ -1630,3 +1630,148 @@ class TestRejectLog:
         ing._reject_dir = str(tmp_path / "nope" / "\0bad")
         out = ing.handle(self._frame(miner))
         assert out["kind"] == "hf.reject" and out["reason"] == "not_registered"
+
+
+def _div_subs(now, n, pairs, short_n=0, days=30, start_days_ago=25):
+    """`n` submissions as (t0_ms, pair, direction) spread over `days` UTC days
+    ending `start_days_ago - days` ago, cycling through `pairs`, of which the first
+    `short_n` are SHORT and the rest LONG."""
+    out = []
+    for i in range(n):
+        t = now - (start_days_ago - (i * days / max(n, 1))) * 86400
+        out.append((int(t * 1000), pairs[i % len(pairs)],
+                    "SHORT" if i < short_n else "LONG"))
+    return out
+
+
+class TestHFDiversityFloor:
+    """The floor is a step function of breadth, and must never reward narrowing."""
+
+    def test_tiers(self):
+        assert hf.hf_diversity_floor(1) == hf.HF_DIVERSITY_FLOOR_NARROW
+        assert hf.hf_diversity_floor(2) == hf.HF_DIVERSITY_FLOOR_NARROW
+        assert hf.hf_diversity_floor(3) == hf.HF_DIVERSITY_FLOOR_MID
+        assert hf.hf_diversity_floor(4) == hf.HF_DIVERSITY_FLOOR_MID
+        assert hf.hf_diversity_floor(6) == hf.HF_DIVERSITY_FLOOR_WIDE
+        assert hf.hf_diversity_floor(7) == hf.HF_DIVERSITY_FLOOR_BROAD
+        assert hf.hf_diversity_floor(13) == hf.HF_DIVERSITY_FLOOR_BROAD
+
+    def test_monotonic_non_increasing_in_breadth(self):
+        """Dropping a pair must never LOWER the bar — otherwise the cheapest
+        response to the gate is to trade fewer instruments, which is backwards."""
+        floors = [hf.hf_diversity_floor(p) for p in range(1, 15)]
+        assert all(a >= b for a, b in zip(floors, floors[1:]))
+
+
+class TestHFDiversity:
+    NOW = 1_760_000_000.0
+
+    def test_frozen_long_on_few_pairs_fails(self):
+        """The behaviour the gate was built for: 5Ehtiqp, 378 LONG / 0 SHORT on 4
+        pairs, ranked #1 on the board at the time."""
+        d = hf.hf_diversity(_div_subs(self.NOW, 378, ["BTCUSD", "SOLUSD", "ETHUSD", "XRPUSD"]),
+                            self.NOW)
+        assert d["applies"] and not d["ok"]
+        assert d["short"] == 0 and d["share"] == 0.0 and d["pairs"] == 4
+
+    def test_frozen_short_fails_identically(self):
+        """The rule is about one-sidedness, not about being long. A mirrored
+        all-SHORT miner must fail on the same numbers."""
+        subs = _div_subs(self.NOW, 128, ["SOLUSD", "XRPUSD", "ETHUSD"], short_n=128)
+        d = hf.hf_diversity(subs, self.NOW)
+        assert d["applies"] and not d["ok"] and d["long"] == 0
+
+    def test_two_sided_miner_passes(self):
+        subs = _div_subs(self.NOW, 300, ["BTCUSD", "ETHUSD", "XAUUSD"], short_n=120)
+        d = hf.hf_diversity(subs, self.NOW)
+        assert d["applies"] and d["ok"] and d["share"] == pytest.approx(0.4)
+
+    def test_breadth_buys_lopsidedness(self):
+        """Identical 5% minority share: FAILS on 3 pairs, PASSES on 8. This is the
+        whole design — a house view across the board is still many decisions."""
+        narrow = hf.hf_diversity(
+            _div_subs(self.NOW, 200, ["BTCUSD", "ETHUSD", "SOLUSD"], short_n=10), self.NOW)
+        broad = hf.hf_diversity(
+            _div_subs(self.NOW, 200, ["BTCUSD", "ETHUSD", "SOLUSD", "XRPUSD", "XAUUSD",
+                                      "EURUSD", "GBPUSD", "USDJPY"], short_n=10), self.NOW)
+        assert narrow["share"] == broad["share"] == pytest.approx(0.05)
+        assert not narrow["ok"] and broad["ok"]
+
+    def test_low_volume_miner_is_exempt(self):
+        """Under MIN_SUBS the ratio is noise and the miner has not had the chance
+        to be two-sided — abstain rather than fail it."""
+        subs = _div_subs(self.NOW, hf.HF_DIVERSITY_MIN_SUBS - 1, ["BTCUSD"])
+        d = hf.hf_diversity(subs, self.NOW)
+        assert not d["applies"] and d["ok"]
+
+    def test_gate_is_trailing_not_all_time(self):
+        """A reformed miner earns again without re-registering: an all-LONG history
+        that has aged out of the window stops counting against it."""
+        old = [(int((self.NOW - 200 * 86400 + i * 3600) * 1000), "BTCUSD", "LONG")
+               for i in range(400)]
+        assert hf.hf_diversity(old, self.NOW)["applies"] is False
+        recent = _div_subs(self.NOW, 100, ["BTCUSD", "ETHUSD"], short_n=40,
+                           days=20, start_days_ago=20)
+        assert hf.hf_diversity(old + recent, self.NOW)["ok"]
+
+    def test_untyped_records_are_skipped_not_counted_against(self):
+        """A legacy grade-cache row (direction NULL) must not depress an honest
+        miner's share — half-migrated means a SMALLER window, never a wronger one."""
+        good = _div_subs(self.NOW, 100, ["BTCUSD", "ETHUSD"], short_n=40)
+        legacy = [(t, p, None) for t, p, _ in
+                  _div_subs(self.NOW, 400, ["BTCUSD", "ETHUSD"])]
+        d = hf.hf_diversity(good + legacy, self.NOW)
+        assert d["n"] == 100 and d["share"] == pytest.approx(0.4) and d["ok"]
+
+    def test_bare_timestamps_abstain(self):
+        """The pre-diversity submission shape. Must not fail every miner on a
+        producer that has nothing to give."""
+        d = hf.hf_diversity([int((self.NOW - 86400) * 1000)] * 200, self.NOW)
+        assert not d["applies"] and d["ok"] and d["n"] == 0
+
+    def test_env_kill_switch(self, monkeypatch):
+        subs = _div_subs(self.NOW, 378, ["BTCUSD", "SOLUSD"])
+        assert not hf.hf_diversity(subs, self.NOW)["ok"]
+        monkeypatch.setattr(hf, "HF_DIVERSITY_ENABLED", False)
+        assert hf.hf_diversity(subs, self.NOW)["ok"]
+
+
+class TestHFDiversityGatesWeights:
+    """The gate as the weight path applies it: a frozen miner with a WINNING record
+    earns nothing, and burn absorbs it."""
+    NOW = 1_760_000_000.0
+    PAIRS = ["BTCUSD", "SOLUSD", "ETHUSD", "XRPUSD"]
+
+    def _winning_decisive(self):
+        return [(self.NOW - (60 - i) * 3600, True, False) for i in range(60)]
+
+    def _eligible(self, short_n):
+        """Clears hf_eligible_from (>=50 subs / >=8 days) either way; only the
+        direction mix differs."""
+        return _div_subs(self.NOW, 120, self.PAIRS, short_n=short_n)
+
+    def test_frozen_miner_earns_nothing(self):
+        w = hf.hf_compute_weights({'A': self._winning_decisive()},
+                                  {'A': self.NOW - 40 * 86400}, {'A': 10}, self.NOW,
+                                  {'A': self._eligible(0)})
+        assert w.get(10, 0.0) == 0.0
+        assert w.get(0, 0.0) > 0.0                      # burns instead
+
+    def test_same_record_two_sided_earns(self):
+        """Identical decisive history — only the direction mix changes. Proves the
+        zero above is the diversity gate and not the edge gate."""
+        w = hf.hf_compute_weights({'A': self._winning_decisive()},
+                                  {'A': self.NOW - 40 * 86400}, {'A': 10}, self.NOW,
+                                  {'A': self._eligible(48)})
+        assert w.get(10, 0.0) > config.DUST_WEIGHT
+
+    def test_tallies_gate_matches_the_vector(self):
+        """The referrer pool must not pay for a frozen recruit either — if the two
+        disagreed, recruiting always-long crons would still be profitable."""
+        frozen = hf.hf_compute_tallies({'A': self._winning_decisive()},
+                                       {'A': self.NOW - 40 * 86400}, {'A': 10}, self.NOW,
+                                       {'A': self._eligible(0)})
+        ok = hf.hf_compute_tallies({'A': self._winning_decisive()},
+                                   {'A': self.NOW - 40 * 86400}, {'A': 10}, self.NOW,
+                                   {'A': self._eligible(48)})
+        assert 'A' not in frozen and ok.get('A', 0.0) > 0.0
