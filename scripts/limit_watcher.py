@@ -135,6 +135,100 @@ def load_feed_tokens() -> dict:
             if isinstance(t, dict) and t.get("feed_token")}
 
 
+# ── LF submission rows ───────────────────────────────────────────────────────
+# A workspace LF order used to commit on chain and exist NOWHERE else: no
+# signals_submissions row, and comment="iq-limit", which reconcile.sh's
+# `plaintext LIKE '%iq-follow%'` filter cannot match. So the call came back from
+# the chain unattributable — it never appeared in the trader's history, never
+# counted in their W/L, never got a result message, and never got an entry
+# receipt. Zero LF workspace calls had EVER been graded when this was written.
+#
+# The row is created HERE, at fire time, not when the order is placed: a resting
+# limit order can wait hours, and t0 is the commit, not the click.
+DAY_CAP = int(os.getenv("SN89_LF_DAY_CAP", "3"))
+MIN_GAP_MINUTES = float(os.getenv("SN89_LF_MIN_GAP_MIN", "60"))
+COMMIT_MAP_PATH = os.getenv("SN89_COMMIT_MAP",
+                            "/opt/iq-platform/data/live/sn89-commit-map.jsonl")
+
+
+def signals_user_for_hotkey(con: sqlite3.Connection, hk: str):
+    r = con.execute("SELECT id FROM signals_users WHERE sn89_hotkey = ?",
+                    (hk,)).fetchone()
+    return r["id"] if r else None
+
+
+def quota_block(con: sqlite3.Connection, uid: int):
+    """The bot's DAY_CAP and MIN_GAP, applied to this lane too.
+
+    Mirrors submissionsToday() / minGapBlock() in iq-signals-bot. Both lanes now
+    write signals_submissions, so they share one quota per miner — which is what
+    the chain already enforced: over-quota calls come back void (`daily_quota`,
+    `min_spacing`) having spent a commit. Refusing here costs the trader nothing
+    and tells them why."""
+    n = con.execute(
+        "SELECT COUNT(*) FROM signals_submissions WHERE signals_user_id = ? "
+        "AND submitted_at >= strftime('%Y-%m-%dT00:00:00.000Z','now') "
+        "AND status NOT IN ('rejected','failed')", (uid,)).fetchone()[0]
+    if n >= DAY_CAP:
+        return f"lf_daily_cap:{n}/{DAY_CAP}"
+    r = con.execute(
+        "SELECT submitted_at FROM signals_submissions WHERE signals_user_id = ? "
+        "AND status NOT IN ('rejected','failed') "
+        "ORDER BY submitted_at DESC LIMIT 1", (uid,)).fetchone()
+    if r and r["submitted_at"]:
+        try:
+            last = time.mktime(time.strptime(r["submitted_at"][:19],
+                                             "%Y-%m-%dT%H:%M:%S")) - time.timezone
+        except ValueError:
+            return None
+        mins = (time.time() - last) / 60.0
+        if mins < MIN_GAP_MINUTES:
+            return f"lf_min_gap:{MIN_GAP_MINUTES - mins:.0f}min"
+    return None
+
+
+def create_submission(con: sqlite3.Connection, uid: int, sig) -> int:
+    """Insert the row this call will be graded and reported against.
+
+    Band values come off the SIGNAL, never off a second board read: the signal is
+    what gets committed, so anything else could disagree with what the validator
+    grades. entry_price stays NULL on purpose — the anchored entry is a function
+    of the commit block and is supplied by iq-sn89-lf-receipt once the tick window
+    seals. A fire-time guess here is the number that manufactured the Jeremiah
+    dispute on 2026-08-03."""
+    cur = con.execute(
+        "INSERT INTO signals_submissions "
+        "(signals_user_id, asset, asset_class, direction, entry_method, "
+        " tp_bps, sl_bps, horizon_hours, status, venue_mode, mechanism, "
+        " raw_input, submitted_at) "
+        "VALUES (?,?,?,?,'MARKET',?,?,?,'fired','paper',0,?, "
+        "        strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+        (uid, sig.trade_pair, sig.asset_class, sig.direction,
+         int(sig.tp_bps), int(sig.sl_bps), int(sig.horizon_h),
+         "workspace-lf"))
+    con.commit()
+    return int(cur.lastrowid)
+
+
+def record_commit(sub_id: int, hk: str, sig, res: dict) -> None:
+    """Append the submission -> commitment mapping iq-sn89-lf-receipt reads.
+
+    Same file and shape the multiplexer writes. Without this line the receipt
+    service cannot tell which t0_ms (and so which anchored entry) belongs to this
+    call, and the trader gets no entry and no replay chart. Never raises: a
+    bookkeeping failure must not turn a landed commit into a reported error."""
+    try:
+        rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+               "submission_id": sub_id, "tenant": None, "hotkey": hk,
+               "asset": sig.trade_pair, "direction": sig.direction,
+               "mechanism": 0, "commitment": res.get("commitment"),
+               "ok": bool(res.get("ok")), "source": "limit_watcher"}
+        with open(COMMIT_MAP_PATH, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec) + "\n")
+    except Exception as e:  # noqa: BLE001
+        log(f"  ⚠ commit-map write failed for #{sub_id}: {e}")
+
+
 def keypair_for(hk: str, signers: dict) -> Keypair | None:
     ent = signers.get(hk)
     if not ent:
@@ -183,9 +277,14 @@ async def fire_ws(kp: Keypair, payload: dict) -> dict:
         return json.loads(await ws.recv())
 
 
-def fire_lf(hk: str, signers: dict, payload: dict, feed_tokens: dict) -> dict:
+def fire_lf(hk: str, signers: dict, payload: dict, feed_tokens: dict,
+            con: sqlite3.Connection) -> dict:
     """On-chain LF commit via the normal miner path (build_signal + submit).
-    Requires a wallet-name signer entry (bt.Wallet signs the extrinsic)."""
+    Requires a wallet-name signer entry (bt.Wallet signs the extrinsic).
+
+    Also creates the signals_submissions row and stamps `iq-follow:<id>` so the
+    call is attributable everywhere the Telegram lane is — history, W/L, grading,
+    entry receipt, replay chart. See the section comment above create_submission."""
     ent = signers.get(hk) or {}
     if not ent.get("wallet"):
         return {"kind": "error", "reason": "lf_needs_wallet_signer"}
@@ -215,15 +314,46 @@ def fire_lf(hk: str, signers: dict, payload: dict, feed_tokens: dict) -> dict:
                 "reason": f"lf_no_feed_token_for_tenant:{ent.get('tenant')}"}
     from sn89_signals import config as _sn89_config
     _sn89_config.RELAY_TOKEN = token
+
+    uid = signals_user_for_hotkey(con, hk)
+    if uid is None:
+        return {"kind": "error", "reason": "lf_hotkey_not_linked_to_signals_account"}
+    blocked = quota_block(con, uid)
+    if blocked:
+        return {"kind": "error", "reason": blocked}
+
+    # build_signal validates the pair against the board and refuses a call that
+    # would void (pair off board, FX weekend, dead horizon) — so it runs BEFORE
+    # the row is created. A rejected call must not consume a daily slot.
     sig = build_signal(w.hotkey.ss58_address, payload["trade_pair"],
-                       payload["direction"], comment="iq-limit")
-    return {"kind": "lf.commit", **submit(w, sig)}
+                       payload["direction"])
+    sub_id = create_submission(con, uid, sig)
+    # Signal is a plain dataclass and commitment() hashes current field values,
+    # so stamping the comment here (after the id exists) is what gets committed.
+    sig.comment = f"iq-follow:{sub_id}"
+    try:
+        res = submit(w, sig)
+    except Exception as e:  # noqa: BLE001
+        con.execute("UPDATE signals_submissions SET status='failed', "
+                    "fire_error=?, updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') "
+                    "WHERE id=?", (f"{type(e).__name__}: {e}", sub_id))
+        con.commit()
+        raise
+    if not res.get("ok"):
+        con.execute("UPDATE signals_submissions SET status='failed', "
+                    "fire_error=?, updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') "
+                    "WHERE id=?", (json.dumps(res)[:500], sub_id))
+        con.commit()
+        return {"kind": "error", "reason": "lf_submit_failed", **res}
+    record_commit(sub_id, hk, sig, res)
+    return {"kind": "lf.commit", "submission_id": sub_id, **res}
 
 
-def fire(row: sqlite3.Row, signers: dict, feed_tokens: dict) -> dict:
+def fire(row: sqlite3.Row, signers: dict, feed_tokens: dict,
+         con: sqlite3.Connection) -> dict:
     payload = json.loads(row["payload"])
     if row["kind"] == "lf":
-        return fire_lf(row["hotkey"], signers, payload, feed_tokens)
+        return fire_lf(row["hotkey"], signers, payload, feed_tokens, con)
     kp = keypair_for(row["hotkey"], signers)
     if kp is None:
         return {"kind": "error", "reason": "no_signer_for_hotkey"}
@@ -312,7 +442,7 @@ def main() -> None:
                     if not due(row, px):
                         continue
                     try:
-                        res = fire(row, signers, feed_tokens)
+                        res = fire(row, signers, feed_tokens, c)
                     except Exception as e:  # noqa: BLE001
                         res = {"kind": "error", "reason": f"{type(e).__name__}: {e}"}
                     ok = res.get("kind") in ("hf.receipt", "lf.commit")
