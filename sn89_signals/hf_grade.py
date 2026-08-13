@@ -419,8 +419,10 @@ def _resolve_pending(db, base: str, tick_dir: str, row, now_ms: int,
     except hf.HFRejected:
         if early:
             return          # a void costs the miner nothing to learn at the horizon
-        db.execute("INSERT OR REPLACE INTO grades VALUES (?,?,?,?,?,?)",
-                   (key, hk, int(t0_ms), pair, "void", int(t0_ms)))
+        db.execute("INSERT OR REPLACE INTO grades "
+                   "(key, hk, t0_ms, pair, status, open_until_ms, direction) "
+                   "VALUES (?,?,?,?,?,?,?)",
+                   (key, hk, int(t0_ms), pair, "void", int(t0_ms), direction))
         db.execute("DELETE FROM pending WHERE key=?", (key,))
         return
     g = hf.grade(pair, direction, entry, tp, sl, int(t0_ms), horizon_s, ticks)
