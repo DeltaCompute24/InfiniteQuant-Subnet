@@ -1,7 +1,7 @@
 {
- "version": "volnorm-equalwash40-hype184-20260812",
+ "version": "fxmacro3-20260813",
  "vol_window_days": 30,
- "note": "Adds HYPEUSD (crypto) at 184 bps symmetric, effective 2026-08-12T02:00:00Z, matching history entry volnorm-equalwash40-hype184-20260812. Band solved on recalibrate_bands.py's own 45d calendar window (2026-06-26 -> 2026-08-10) at the LF 40% structural-wash target, 8h crypto horizon: raw 165.40 -> 184, wash 39.74% on 4,170 samples. Re-listing a pair culled 2026-06-05 for a band <=1x its median hourly range; that reason no longer holds -- TAO's band/median-hourly-range is now 1.95x, inside the incumbent crypto spread of 1.81-1.98x. LF only: HF needs a graded-substrate spread in HF_TYPICAL_SPREAD_BPS and none is recorded, so band_spread_ratio returns None and blocks the listing by design.",
+ "note": "Forex narrowed 11 -> 3, effective 2026-08-13T00:00:00Z, matching history entry fxmacro3-20260813. Keeps AUDUSD, USDCHF and USDCAD; drops EURUSD, GBPUSD, USDJPY, NZDUSD, NZDCHF, AUDNZD, GBPCAD and NZDJPY. Selection is by MACRO CHARACTER, not by calibration: the three retained pairs each track a hard asset -- AUDUSD the commodity complex, USDCHF the safe-haven bid that also drives gold, USDCAD crude -- so the forex board expresses the same macro views as the metals and crypto rows rather than the carry and rate-differential structure the JPY and NZD crosses trade on. NO BAND VALUE CHANGES: the three retained pairs keep 28 / 26 / 20 bps exactly as calibrated by volnorm-equalwash40-hype184-20260812, and crypto and metals are untouched. HF v4 mirrors this at the same instant with AUDUSD only -- USDCHF and USDCAD solve under the 8x band/spread gate on every HF-length horizon at the spread p75, so they are LF-only.",
  "bands": {
   "BTCUSD": {
    "asset_class": "crypto",
@@ -33,21 +33,6 @@
    "sl_bps": 195,
    "tp_bps": 195
   },
-  "EURUSD": {
-   "asset_class": "forex",
-   "sl_bps": 20,
-   "tp_bps": 20
-  },
-  "GBPUSD": {
-   "asset_class": "forex",
-   "sl_bps": 23,
-   "tp_bps": 23
-  },
-  "USDJPY": {
-   "asset_class": "forex",
-   "sl_bps": 16,
-   "tp_bps": 16
-  },
   "USDCHF": {
    "asset_class": "forex",
    "sl_bps": 26,
@@ -62,31 +47,6 @@
    "asset_class": "forex",
    "sl_bps": 28,
    "tp_bps": 28
-  },
-  "NZDUSD": {
-   "asset_class": "forex",
-   "sl_bps": 36,
-   "tp_bps": 36
-  },
-  "NZDCHF": {
-   "asset_class": "forex",
-   "sl_bps": 40,
-   "tp_bps": 40
-  },
-  "AUDNZD": {
-   "asset_class": "forex",
-   "sl_bps": 26,
-   "tp_bps": 26
-  },
-  "GBPCAD": {
-   "asset_class": "forex",
-   "sl_bps": 25,
-   "tp_bps": 25
-  },
-  "NZDJPY": {
-   "asset_class": "forex",
-   "sl_bps": 33,
-   "tp_bps": 33
   },
   "TAOUSD": {
    "asset_class": "crypto",

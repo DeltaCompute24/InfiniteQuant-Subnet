@@ -64,7 +64,7 @@ your weight ∝ (your qualified wins × tier, each decaying linearly to 0 over 7
 |---|---|
 | Crypto | BTCUSD · ETHUSD · SOLUSD · XRPUSD · TAOUSD · HYPEUSD |
 | Metals | XAUUSD · XAGUSD |
-| Forex | AUDUSD · EURUSD · GBPUSD · NZDUSD · USDCAD · USDCHF · USDJPY · AUDNZD · GBPCAD · NZDCHF · NZDJPY |
+| Forex | AUDUSD · USDCHF · USDCAD |
 
 Bands are per-asset, volatility-scaled, symmetric 1:1. A signal is graded against the band in force **at its commit block** (`data/signals-bands.json` + `data/signals-bands-history.json`) — a band update never changes an in-flight signal.
 
@@ -198,12 +198,12 @@ series — the alias table is committed in
 
 | Pair | TP / SL | Horizon |
 |---|---|---|
-| XAUUSD | ±12 bps | 30 min |
+| XAUUSD | ±10 bps | 30 min |
 | BTCUSD | ±19 bps | 30 min |
 | ETHUSD / SOLUSD / XRPUSD | ±24 bps | 30 min |
-| EURUSD | ±5 bps | 120 min |
-| GBPUSD | ±6 bps | 120 min |
-| USDJPY | ±4 bps | 120 min |
+| AUDUSD | ±8.4 bps | 120 min |
+| TAOUSD | ±53.1 bps | 120 min |
+| HYPEUSD | ±62.6 bps | 120 min |
 
 Fewer pairs than LF by design: a pair is listed only if its band clears ≈8× the
 typical spread at the HF horizon — below that the outcome is microstructure, not
