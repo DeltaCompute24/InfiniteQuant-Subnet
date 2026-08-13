@@ -1775,3 +1775,70 @@ class TestHFDiversityGatesWeights:
                                    {'A': self.NOW - 40 * 86400}, {'A': 10}, self.NOW,
                                    {'A': self._eligible(48)})
         assert 'A' not in frozen and ok.get('A', 0.0) > 0.0
+
+
+class TestHFSubmissionsTableIsUnfiltered:
+    """`submissions` must record what the miner CALLED, not what we could grade.
+
+    Regression for 2026-08-12: sync_and_grade dropped every call whose pair was not
+    on the as-of board, and when forex narrowed that erased 14 of 5EoLdj8t's 16
+    SHORTs against only 17 of its 89 LONGs — a direction-correlated filter. Its true
+    15.2% minority share measured as 2.7% and the diversity gate zeroed an honest
+    miner. Anything asking what a miner did must read above the board filter.
+    """
+
+    def _cache(self, tmp_path, monkeypatch, receipts):
+        import json as _json
+        from sn89_signals import hf_grade
+
+        def fake_fetch(url, timeout=15.0):
+            if url.endswith("index.json"):
+                return _json.dumps({"windows": [1_000_000]})
+            if url.endswith("receipts.jsonl"):
+                return "\n".join(_json.dumps(r) for r in receipts)
+            return None
+
+        monkeypatch.setattr(hf_grade, "_fetch_text", fake_fetch)
+        # Board carries BTCUSD only — the delisted-pair case, exactly.
+        monkeypatch.setattr(hf, "hf_bands_as_of", lambda t: {"BTCUSD": (19.0, 19.0, 1800, "crypto")})
+        hf_grade.sync_and_grade("http://x", str(tmp_path), 1_000.0)
+        return hf_grade._db(str(tmp_path))
+
+    def _rcpt(self, seq, pair, direction, t0_ms):
+        return {"submit": {"hk": "A", "seq": seq,
+                           "payload": {"trade_pair": pair, "direction": direction}},
+                "receipt": {"grid_t0_ms": t0_ms}}
+
+    def test_offboard_pairs_are_still_recorded_as_submissions(self, tmp_path, monkeypatch):
+        receipts = ([self._rcpt(i, "BTCUSD", "LONG", 1_000_000 + i * 1000) for i in range(5)]
+                    + [self._rcpt(100 + i, "USDJPY", "SHORT", 1_000_000 + i * 1000)
+                       for i in range(5)])
+        db = self._cache(tmp_path, monkeypatch, receipts)
+        subs = list(db.execute("SELECT pair, direction FROM submissions"))
+        assert len(subs) == 10, "off-board calls must still be recorded"
+        assert sum(1 for _, d in subs if d == "SHORT") == 5
+        # ...while `grades`/`pending` legitimately only carry the gradeable ones.
+        pend = list(db.execute("SELECT pair FROM pending"))
+        assert {p for p, in pend} == {"BTCUSD"}
+        db.close()
+
+    def test_history_subs_come_from_submissions_not_grades(self, tmp_path, monkeypatch):
+        from sn89_signals import hf_grade
+        receipts = ([self._rcpt(i, "BTCUSD", "LONG", 1_000_000 + i * 1000) for i in range(5)]
+                    + [self._rcpt(100 + i, "USDJPY", "SHORT", 1_000_000 + i * 1000)
+                       for i in range(5)])
+        self._cache(tmp_path, monkeypatch, receipts).close()
+        _dec, _fs, subs, _graded = hf_grade._history(str(tmp_path))
+        dirs = [d for _, _, d in subs["A"]]
+        assert dirs.count("SHORT") == 5 and dirs.count("LONG") == 5
+
+    def test_the_5eoldj8t_shape_passes_the_gate(self, tmp_path, monkeypatch):
+        """The real numbers: 89 LONG / 16 SHORT over 8 pairs is a 15.2% minority
+        share and must PASS. Reading `grades` instead measured 2.7% and failed it."""
+        now = 1_760_000_000.0
+        true_subs = _div_subs(now, 105, ["BTCUSD", "ETHUSD", "SOLUSD", "XRPUSD",
+                                         "XAUUSD", "EURUSD", "GBPUSD", "USDJPY"],
+                              short_n=16)
+        d = hf.hf_diversity(true_subs, now)
+        assert d["applies"] and d["ok"]
+        assert d["share"] == pytest.approx(16 / 105, abs=1e-6)

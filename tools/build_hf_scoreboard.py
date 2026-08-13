@@ -293,13 +293,22 @@ def _grades():
         try:
             c = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
             by_key = {k: s for k, s in c.execute("SELECT key, status FROM grades")}
-            rows = list(c.execute(
-                "SELECT hk, t0_ms, status, pair, direction FROM grades"))
+            rows = list(c.execute("SELECT hk, t0_ms, status FROM grades"))
+            # Submissions come from `submissions`, NOT `grades` — the board must
+            # apply the same gate input the validator did (hf_grade._history), and
+            # `grades` is a board-filtered, direction-correlated subset of what a
+            # miner called. A pre-v5 cache has no such table; fall back so the page
+            # still renders rather than 500s mid-upgrade.
+            try:
+                subs_rows = list(c.execute(
+                    "SELECT hk, t0_ms, pair, direction FROM submissions"))
+            except sqlite3.Error:
+                subs_rows = [(hk, t, None, None) for hk, t, _ in rows]
             held = {k: v for k, v in c.execute(
                 "SELECT key, open_until_ms FROM grades WHERE open_until_ms IS NOT NULL")}
             c.close()
             _publish_grade_db(db)
-            return by_key, rows, held
+            return by_key, rows, held, subs_rows
         except sqlite3.Error:
             continue
     return {}, [], {}
@@ -353,7 +362,7 @@ def _submissions_by_hk(grades_rows) -> dict:
     Resolved-only and in the same tuple shape, so it matches the validator's own
     source exactly (hf_grade._history) and both gates read identical input."""
     subs: dict = {}
-    for hk, t0_ms, _status, pair, direction in grades_rows:
+    for hk, t0_ms, pair, direction in grades_rows:
         subs.setdefault(hk, []).append((int(t0_ms), pair, direction))
     return subs
 
@@ -366,7 +375,7 @@ def _outcome_history(grades_rows):
     dec: dict = {}
     graded: dict = {}
     fs: dict = {}
-    for hk, t0_ms, status, _pair, _direction in grades_rows:
+    for hk, t0_ms, status in grades_rows:
         t0 = t0_ms / 1000.0
         fs[hk] = min(fs.get(hk, t0), t0)
         if status in ("won", "lost", "wash"):
@@ -761,12 +770,12 @@ def _n_submitters_last_days(days: int = 3) -> int:
 def main() -> int:
     now = time.time()
     calls = _accepted_calls()
-    grades, grade_rows, held_by_key = _grades()
+    grades, grade_rows, held_by_key, subs_rows = _grades()
     hk2uid, names = _identity()
     # HF eligibility (>=50 accepted submissions across >=8 distinct UTC trading
     # days) — the same gate the validator applies; the qualified badge must not
     # claim a miner is qualified before it can actually earn.
-    subs_by_hk = _submissions_by_hk(grade_rows)
+    subs_by_hk = _submissions_by_hk(subs_rows)
     eligible_from = {hk: hf.hf_eligible_from(ts) for hk, ts in subs_by_hk.items()}
     eligible_by_hk = {hk: v is not None for hk, v in eligible_from.items()}
     # ...and the PROGRESS toward it, not just the verdict. This gate is the one

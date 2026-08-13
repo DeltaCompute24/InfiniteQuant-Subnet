@@ -37,7 +37,10 @@ _UA = {"User-Agent": "sn89-validator/1.0"}
 # depending on when each upgraded. Clearing the rows forces both to rebuild the full
 # history from the published windows and converge. The rebuild is local: receipts and
 # ticks are separate caches and are NOT dropped, so nothing is refetched.
-GRADER_VERSION = 4
+# v5 (2026-08-12): `submissions` — every ACCEPTED submission, recorded before the
+# board check, because `grades` is a biased sample of what a miner actually called
+# (see the table's own comment). Backfilling it needs the window walk to run again.
+GRADER_VERSION = 5
 
 # A window is published shortly AFTER it closes, so a call whose horizon has only
 # just elapsed is graded against a series that is still arriving. Wait this long
@@ -211,6 +214,24 @@ def _db(cache_dir: str) -> sqlite3.Connection:
         c.execute("ALTER TABLE grades ADD COLUMN open_until_ms INTEGER")
     if "direction" not in have_cols:
         c.execute("ALTER TABLE grades ADD COLUMN direction TEXT")
+    # Every ACCEPTED submission, independent of whether it can be graded.
+    #
+    # `grades` is NOT the set of calls a miner made — it is the subset we could
+    # score, and that subset is filtered by `pair not in board`, which is a
+    # DIRECTION-CORRELATED filter in practice. When forex narrowed on 2026-08-12,
+    # rebuilding the cache silently erased every USDJPY/GBPUSD/EURUSD call ever
+    # made. For 5EoLdj8t that deleted 14 of its 16 SHORTs and only 17 of its 89
+    # LONGs, turning a genuine 15.2% minority share into a measured 2.7% and
+    # zeroing an honest miner on the diversity gate.
+    #
+    # So anything asking "what did this miner CHOOSE to call" — the diversity gate,
+    # the participation gate — must read this table, and only outcome scoring may
+    # read `grades`. Populated from the published receipts before any board lookup,
+    # so it stays as replayable as everything else here.
+    c.execute("CREATE TABLE IF NOT EXISTS submissions ("
+              "key TEXT PRIMARY KEY, hk TEXT, t0_ms INTEGER, pair TEXT, "
+              "direction TEXT)")
+    c.execute("CREATE INDEX IF NOT EXISTS submissions_hk ON submissions(hk)")
     c.execute("CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT)")
     row = c.execute("SELECT v FROM meta WHERE k='grader_version'").fetchone()
     have = int(row[0]) if row else 0
@@ -219,6 +240,7 @@ def _db(cache_dir: str) -> sqlite3.Connection:
         # The tick cache is untouched — it is the raw feed, not a derivation.
         c.execute("DELETE FROM grades")
         c.execute("DELETE FROM pending")
+        c.execute("DELETE FROM submissions")
         c.execute("DELETE FROM windows_seen")
         c.execute("INSERT OR REPLACE INTO meta VALUES ('grader_version',?)",
                   (str(GRADER_VERSION),))
@@ -321,6 +343,14 @@ def sync_and_grade(base: str, cache_dir: str, now: float) -> None:
                 continue        # closers competition — graded by closers.py, not HF
             pair = p.get("trade_pair")
             t0_ms = rcpt.get("grid_t0_ms")
+            # Record WHAT THE MINER CALLED before deciding whether we can grade it.
+            # Everything below this line filters — by board membership, by horizon,
+            # by tick availability — and those filters correlate with the pair, which
+            # correlates with the direction. Anything measuring miner BEHAVIOUR has to
+            # be sampled here, above the filters, or it measures our coverage instead.
+            if t0_ms:
+                db.execute("INSERT OR REPLACE INTO submissions VALUES (?,?,?,?,?)",
+                           (key, hk, int(t0_ms), pair, p.get("direction")))
             board = hf.hf_bands_as_of(t0_ms / 1000.0) if t0_ms else None
             if not board or pair not in board:
                 continue
@@ -454,27 +484,34 @@ def _resolve_pending(db, base: str, tick_dir: str, row, now_ms: int,
 def _history(cache_dir: str):
     """(decisive_by_hk, first_seen_by_hk, submissions_by_hk, graded_by_hk).
 
-    submissions_by_hk carries EVERY resolved submission (won/lost/wash/void) as
-    `(t0_ms, pair, direction)` — the HF gates count accepted participation, not just
-    decisive outcomes. Resolved-only (not the ephemeral `pending` table) so the
-    set is deterministic from the published windows and every validator computes
-    the same eligibility instant; a call's horizon is at most 2h, so the lag is
-    immaterial to an 8-trading-day gate.
+    submissions_by_hk carries EVERY ACCEPTED submission as `(t0_ms, pair,
+    direction)`, read from `submissions` and NOT from `grades`. Both HF gates ask
+    what the miner did, so both must see everything it was allowed to do:
 
-    pair and direction ride along for hf.hf_diversity. They are part of the SIGNED
-    payload, so a replaying validator reconstructs exactly this tuple from the
-    published windows — the diversity verdict is as reproducible as the grade.
+      - participation (`hf_eligible_from`) counts accepted calls, wash and void
+        included. It always said so; reading `grades` quietly made it "calls we
+        could score", which is smaller and shrinks whenever the board changes.
+      - diversity (`hf_diversity`) needs the direction mix, and the `grades` filter
+        is direction-correlated — see the `submissions` table comment for the
+        forex-narrowing case that zeroed an honest miner.
+
+    Deterministic from the published windows either way, so every validator reaches
+    the same eligibility instant and the same diversity verdict.
+
+    Outcome scoring (dec/graded/fs) still reads `grades`: those genuinely are the
+    calls we could score, and an ungradeable call has no outcome to contribute.
     """
     db = _db(cache_dir)
     dec: dict = {}
     fs: dict = {}
     subs: dict = {}
     graded: dict = {}
-    for hk, t0_ms, status, pair, direction in db.execute(
-            "SELECT hk, t0_ms, status, pair, direction FROM grades"):
+    for hk, t0_ms, pair, direction in db.execute(
+            "SELECT hk, t0_ms, pair, direction FROM submissions"):
+        subs.setdefault(hk, []).append((int(t0_ms), pair, direction))
+    for hk, t0_ms, status in db.execute("SELECT hk, t0_ms, status FROM grades"):
         t0 = t0_ms / 1000.0
         fs[hk] = min(fs.get(hk, t0), t0)
-        subs.setdefault(hk, []).append((int(t0_ms), pair, direction))
         if status in ("won", "lost", "wash"):
             # graded (not void): what scoring.efficiency_multiplier prices. Note HF
             # writes 'wash', LF writes 'washed'.
