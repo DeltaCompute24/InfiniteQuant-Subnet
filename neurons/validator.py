@@ -895,6 +895,17 @@ class Validator:
     def run(self):
         print(f"SN89 validator · netuid={config.NETUID} · network={config.NETWORK} "
               f"· db={config.DB_PATH}")
+        # Consensus preflight: a validator whose timelock cannot open the
+        # format the live fleet seals grades ZERO LF reveals and burns LF's
+        # whole share, with no error anywhere — the only symptom is falling
+        # vtrust. Log-only; it never touches the vector.
+        try:
+            sys.path.insert(0, os.path.join(os.path.dirname(
+                os.path.dirname(os.path.abspath(__file__))), "tools"))
+            import check_timelock
+            check_timelock.warn_if_broken()
+        except Exception:  # noqa: BLE001 — a preflight must never stop the loop
+            pass
         for w_ in (self.wallet, self.cosign_wallet):
             if w_ is None:
                 continue

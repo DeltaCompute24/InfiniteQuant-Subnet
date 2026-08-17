@@ -310,14 +310,38 @@ bash run.sh validator --wallet.name myvali --wallet.hotkey vali    # auto-update
 
 State: `~/.sn89/validator.db`. Grading is deterministic — same chain + same market data ⇒ same weights. **Run the current release**: grading code is consensus; a stale validator diverges and loses VTRUST.
 
-### Timelock version compatibility
+### Timelock version compatibility — READ THIS IF VTRUST IS FALLING
 
-`timelock==0.0.1.dev0` (this repo's pin) and `0.0.2.dev0` produce incompatible ciphertexts. The validator opens both via a sidecar venv holding the *other* version:
+Two mutually-unreadable drand-tlock ciphertext formats exist:
+
+| `timelock_wasm_wrapper` | `W_time` | status |
+|---|---|---|
+| **0.3.0** (vendored here) | **245 B** | **consensus — what the live fleet seals** |
+| 0.0.2 (PyPI's newest) | 261 B | legacy — some self-hosted miners |
+
+`pip install -r requirements.txt` installs the consensus version from
+`vendor/timelock/`. Check any install:
+
+```bash
+python tools/check_timelock.py
+```
+
+LF is the only competition gated on opening a reveal, and a validator that
+cannot open the consensus format **fails silently**: reveals never open, no
+miner reaches `QUALIFY_MIN_DECISIVE` inside the 7-day `EMISSION_DECAY_S`
+window, the LF earner set empties, and `combine()`'s dead-share rule burns
+LF's entire share. The only symptom is falling vtrust. If yours is falling,
+run the command above first.
+
+To also open **legacy** reveals (needed to replay history), add the sidecar:
 
 ```bash
 python3.10 -m venv .venv-tl001 && .venv-tl001/bin/pip install "timelock==0.0.1.dev0"
 export SN89_TLD_FALLBACK_PYTHON=$PWD/.venv-tl001/bin/python
 ```
+
+A blob that opens under **either** version is graded normally; only one that
+fails both is voided.
 
 ### Delegate via child-key (recommended)
 

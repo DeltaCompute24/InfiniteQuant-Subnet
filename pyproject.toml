@@ -24,7 +24,8 @@ dependencies = [
     "bittensor-wallet==4.0.1",
     "async-substrate-interface==2.0.2",
     "cyscale==0.3.3",
-    "timelock==0.0.1.dev0",
+    "timelock",
+    "timelock_wasm_wrapper",
     "cryptography>=42.0",
     "requests>=2.31",
 ]
@@ -34,6 +35,14 @@ dependencies = [
 # validators and relay/local-disk miners do not.
 miner = ["boto3>=1.34"]
 dev = ["pytest>=8.0"]
+
+# Consensus-critical: resolve timelock from the vendored wheels, never PyPI.
+# PyPI's timelock_wasm_wrapper tops out at 0.0.2, whose ciphertext format the
+# live fleet cannot read (and which cannot read the fleet's). See
+# requirements.txt and tools/check_timelock.py.
+[tool.uv.sources]
+timelock = { path = "vendor/timelock/timelock-0.0.2.dev0-py3-none-any.whl" }
+timelock_wasm_wrapper = { path = "vendor/timelock/timelock_wasm_wrapper-0.3.0-cp310-cp310-manylinux_2_34_x86_64.whl" }
 
 [tool.uv]
 # This repo is run in place (neurons/ + sn89_signals/ via sys.path), not built
