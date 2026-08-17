@@ -21,8 +21,17 @@ cyscale==0.3.3
 # The compiled wheel is cp310 manylinux x86_64. On any other platform, build
 # timelock_wasm_wrapper 0.3.0 from https://github.com/ideal-lab5/timelock —
 # check_timelock.py will tell you plainly if you are on the wrong format.
-./vendor/timelock/timelock_wasm_wrapper-0.3.0-cp310-cp310-manylinux_2_34_x86_64.whl
-./vendor/timelock/timelock-0.0.2.dev0-py3-none-any.whl
+./vendor/timelock/timelock_wasm_wrapper-0.3.0-cp310-cp310-manylinux_2_34_x86_64.whl ; sys_platform == "linux" and platform_machine == "x86_64"
+./vendor/timelock/timelock-0.0.2.dev0-py3-none-any.whl ; sys_platform == "linux" and platform_machine == "x86_64"
+# Off cp310-manylinux-x86_64 the compiled wheel above is unusable, and an
+# unmarked path requirement fails the WHOLE install ("not a supported wheel
+# on this platform") -- run.sh logs that and continues, so the neuron would
+# keep running on stale deps. Fall back to the PyPI legacy so the neuron at
+# least starts; tools/check_timelock.py, which the validator calls at
+# startup, then says plainly that LF cannot be graded on this box.
+# Written as De Morgan, NOT `not (...)`: pip's vendored packaging rejects the
+# `not (...)` marker form with InvalidMarker, which aborts the entire install.
+timelock==0.0.1.dev0 ; sys_platform != "linux" or platform_machine != "x86_64"
 cryptography>=42.0
 requests>=2.31
 # miner upload path only
