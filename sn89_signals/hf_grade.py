@@ -71,13 +71,28 @@ EARLY_DECISIVE = os.getenv("SN89_HF_EARLY_DECISIVE", "1") == "1"
 EARLY_MIN_SPAN_S = int(os.getenv("SN89_HF_EARLY_MIN_SPAN_S", "60"))
 
 
-def _fetch_text(url: str, timeout: float = 15.0) -> str | None:
-    try:
-        req = urllib.request.Request(url, headers=_UA)
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return r.read().decode("utf-8")
-    except Exception:      # noqa: BLE001 — a missing/late window is normal
-        return None
+def _fetch_text(url: str, timeout: float = 15.0, attempts: int = 1) -> str | None:
+    """Fetch a URL as text, or None.
+
+    `attempts` defaults to 1 because the common caller is _cached_receipts, where
+    a missing or late window is NORMAL and expected — retrying there would add a
+    backoff to every one of the ~480 windows in the lock horizon that legitimately
+    does not exist yet.
+
+    index.json is the opposite case: it always exists, and a single transient
+    failure makes load_hf_lock_rows raise, which SKIPS the caller's whole LF grade
+    cycle. One dropped connection should not cost a cycle, so that call retries.
+    """
+    for i in range(max(1, attempts)):
+        try:
+            req = urllib.request.Request(url, headers=_UA)
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return r.read().decode("utf-8")
+        except Exception:  # noqa: BLE001 — a missing/late window is normal
+            if i + 1 >= max(1, attempts):
+                return None
+            time.sleep(0.5 * (2 ** i))
+    return None
 
 
 def _receipt_cache_dir() -> str:
@@ -151,7 +166,11 @@ def load_hf_lock_rows(base: str, since_ms: int) -> list:
     the LF side sat unenforced while the bot told users it was locked. The caller
     must treat a raise as "cannot decide yet" and leave the call sealed.
     """
-    idx = _fetch_text(base.rstrip("/") + "/index.json")
+    # Retry: a single blip here skips the entire LF grade cycle (see the
+    # caller in validator.grade_revealed). Still fails closed after the
+    # retries -- the raise below is the guarantee, this only stops one
+    # dropped connection from costing a cycle.
+    idx = _fetch_text(base.rstrip("/") + "/index.json", attempts=3)
     if idx is None:
         raise hf.HFLockFeedError(f"index.json unreachable at {base}")
     try:
