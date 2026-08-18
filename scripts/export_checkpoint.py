@@ -57,12 +57,32 @@ def main():
         ]
     except sqlite3.OperationalError:   # DB predates the referrals table
         referrals = []
+    # The (now, vector) the validator ACTUALLY committed from, newest first.
+    #
+    # `now_unix` above is EXPORT time, not the instant any committed vector was
+    # computed, so replaying at it reproduces the committed weights only by
+    # luck. replay is bit-for-bit deterministic in (journal, now), so handing
+    # the auditor the real `now` turns the comparison from a race against the
+    # 72-minute tempo into an exact, repeatable check. Missing on a validator
+    # that has not yet written the table -- an auditor must treat absence as
+    # "cannot pin the instant", never as an empty list of commits.
+    try:
+        commits = [
+            {"block": b, "now_unix": nu, "combined": bool(cmb),
+             "weights": json.loads(vec)}
+            for b, nu, vec, cmb in con.execute(
+                "SELECT block, now_unix, vector, combined FROM weight_commits "
+                "ORDER BY block DESC LIMIT 20")]
+    except sqlite3.OperationalError:  # validator predates weight_commits
+        commits = None
     con.close()
+
 
     cp_out = {
         "schema": 1, "netuid": config.NETUID, "network": config.NETWORK,
         "now_unix": now, "generated_at_ms": int(now * 1000),
         "signals": signals, "meta": meta, "referrals": referrals,
+        "weight_commits": commits,
     }
 
     if "--chain" in args:

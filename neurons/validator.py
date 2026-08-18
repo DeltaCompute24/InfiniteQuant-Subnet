@@ -829,6 +829,41 @@ class Validator:
         if any_ok:
             self._last_weights_block = block
 
+        # Record the EXACT (now, vector) this commit was computed from, so the
+        # audit is deterministic instead of a race against the tempo.
+        #
+        # export_checkpoint stamps `now_unix = time.time()` at EXPORT time, which
+        # is not the instant this vector was computed. replay is bit-for-bit
+        # deterministic in (journal, now) -- three runs 90s apart move 0 uids by
+        # >1e-3, measured 2026-08-18 -- so the ONLY reason an auditor could not
+        # reproduce the committed vector was that they had no way to learn which
+        # `now` to replay at. Four alignment attempts got the worst delta from
+        # 0.116 to 0.0055 and could never reach the 1e-3 tolerance, because the
+        # missing input was this number, not a better guess at the clock.
+        #
+        # Append-only and additive: nothing here feeds the vector, so it cannot
+        # change consensus. Bounded to the last 200 rows -- an auditor checks
+        # recent commits, and unbounded growth in the validator DB is its own
+        # hazard.
+        if any_ok:
+            try:
+                self.db.execute(
+                    "CREATE TABLE IF NOT EXISTS weight_commits ("
+                    "block INTEGER PRIMARY KEY, now_unix REAL NOT NULL, "
+                    "vector TEXT NOT NULL, combined INTEGER NOT NULL)")
+                self.db.execute(
+                    "INSERT OR REPLACE INTO weight_commits "
+                    "(block, now_unix, vector, combined) VALUES (?,?,?,?)",
+                    (int(block), float(now),
+                     json.dumps({str(u): v for u, v in w.items()}),
+                     int(config.combined_weights_active(now))))
+                self.db.execute(
+                    "DELETE FROM weight_commits WHERE block NOT IN "
+                    "(SELECT block FROM weight_commits ORDER BY block DESC LIMIT 200)")
+                self.db.commit()
+            except Exception as e:  # noqa: BLE001 — bookkeeping must never stop a commit
+                print(f"  ! weight_commits record failed (weights unaffected): {e}")
+
         # ── mechanism 1 (HF) — same signers, same tempo, graded from PUBLIC logs ──
         # Wrapped so ANY HF failure is isolated: mecid 0 already committed above and
         # is never affected. Graded off HF_PUBLIC_BASE, so every validator computes
