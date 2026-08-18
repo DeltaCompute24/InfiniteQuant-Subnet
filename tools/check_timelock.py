@@ -100,6 +100,13 @@ def warn_if_broken(emit=print) -> None:
     """Startup guard for the validator. Log-only: never changes the vector."""
     try:
         if sealed_len(sys.executable) == CONSENSUS_W_TIME_LEN:
+            # Say so. A check that only speaks on failure cannot be told apart
+            # from a check that never ran -- which is exactly what an empty
+            # grep for "TIMELOCK FORMAT MISMATCH" meant while this very function
+            # sat on disk unloaded for five days, because the validator process
+            # predated it. One positive line makes a restart self-evidencing.
+            emit("  \u2713 timelock opener on the consensus format "
+                 "(%dB W_time)" % CONSENSUS_W_TIME_LEN)
             return
         fb = os.getenv("SN89_TLD_FALLBACK_PYTHON", "")
         if fb and os.path.exists(fb) and sealed_len(fb) == CONSENSUS_W_TIME_LEN:

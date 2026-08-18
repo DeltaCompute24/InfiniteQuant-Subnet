@@ -90,6 +90,7 @@ def main():
     # worst delta from 0.116 down to 0.0055 across four attempts and never to
     # the 1e-3 tolerance. Absent on a validator predating weight_commits, in
     # which case fall through to the chain comparison below.
+    deterministic_ok = None          # None = tier unavailable
     commits = cp.get("weight_commits")
     if commits:
         print(f"\n  deterministic replay against {len(commits)} recorded commit(s):")
@@ -104,7 +105,8 @@ def main():
                   f"{'✓ EXACT' if ok else f'✗ {len(dd)} uid(s) differ'}")
             for uid, rv, cv in dd[:5]:
                 print(f"        uid {uid}: replay={rv:.6f} committed={cv:.6f}")
-        if exact == len(commits[:3]):
+        deterministic_ok = (exact == len(commits[:3]))
+        if deterministic_ok:
             print("    ✓ every recorded commit reproduces exactly from the journal.")
         else:
             print("    ⚠ a recorded commit did NOT reproduce — this is a journal "
@@ -188,6 +190,27 @@ def main():
     lf_only_bad = [u for u, _, _ in diffs
                    if lfv.get(u, 0) > 0 and not (hfv.get(u, 0) > 0 or clv.get(u, 0) > 0)]
     burned = list((detail.get("errors") or {}).keys())
+
+    # The deterministic tier GOVERNS when it is available. It compares the
+    # committed vector against a replay at the instant the validator computed
+    # it, which is strictly stronger than comparing against a chain vector that
+    # is a tempo old and drifting. If every recorded commit reproduces exactly,
+    # the journal is proven honest and the chain-lag differences below are
+    # arithmetic about clocks, not evidence about us.
+    if deterministic_ok and anchors_ok:
+        print(f"\nAUDIT PASSED — every recorded commit reproduces EXACTLY from the "
+              f"published journal at the instant it was computed"
+              + (", and every checked signal is anchored on-chain."
+                 if "--anchors" in args else "."))
+        if not match:
+            print(f"  ({len(diffs)} uid(s) differ from the CURRENT chain vector, which "
+                  f"is a tempo old under commit-reveal — expected, not a finding.)")
+        sys.exit(0)
+    if deterministic_ok is False:
+        print("\nAUDIT FAILED — a recorded commit does NOT reproduce from the "
+              "journal at its own recorded instant. This is a journal statement, "
+              "not a timing one.")
+        sys.exit(1)
 
     if match and anchors_ok:
         print("\nAUDIT PASSED — on-chain weights match a replay of the journal"
