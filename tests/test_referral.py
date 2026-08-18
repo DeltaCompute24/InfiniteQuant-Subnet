@@ -51,6 +51,24 @@ def _row(hk, t0, pair="BTCUSD", direction="LONG", status="won", horizon_h=8):
                              t0_unix=t0, status=status, horizon_h=horizon_h)
 
 
+# Pairs kept off BTCUSD/ETHUSD/SOLUSD so shadow rows never collide with the
+# base journal in TestReplayEndToEnd.
+SHADOW_PAIRS = ["XRPUSD", "XAUUSD", "EURUSD", "USDJPY", "GBPUSD", "AUDUSD"]
+
+
+def _sharp_rows(leader, follower, n, start=NOW - 5 * DAY):
+    """n SHARP follow episodes — each on its own pair, spaced well beyond
+    COPY_EPISODE_S so the collapse counts them separately. Sized off the config
+    threshold by every caller, so widening the gate never silently invalidates
+    the test the way a hardcoded 2 did (2026-08-18)."""
+    rows = []
+    for i in range(n):
+        t = start + i * 2 * HOUR
+        pair = SHADOW_PAIRS[i % len(SHADOW_PAIRS)]
+        rows += [_row(leader, t, pair=pair), _row(follower, t + 60, pair=pair)]
+    return rows
+
+
 @pytest.fixture
 def lit(monkeypatch):
     monkeypatch.setattr(config, "REFERRAL_ENABLED", True)
@@ -127,14 +145,14 @@ class TestValidity:
 
 # ── pair no-copy gate: referral_pair_suspended_until ───────────────────────────
 class TestPairNoCopy:
-    def test_two_sharp_episodes_suspend_one_does_not(self):
-        one = [_row("A", NOW - DAY), _row("B", NOW - DAY + 60)]
-        assert scoring.referral_pair_suspended_until(one, "A", "B", NOW) is None
-        two = one + [_row("A", NOW - DAY + 2 * HOUR, pair="ETHUSD"),
-                     _row("B", NOW - DAY + 2 * HOUR + 60, pair="ETHUSD")]
-        until = scoring.referral_pair_suspended_until(two, "A", "B", NOW)
-        assert until == pytest.approx(NOW - DAY + 2 * HOUR + 60
-                                      + config.REFERRAL_PAIR_TTL_S)
+    def test_sharp_episodes_trip_at_threshold_not_below(self):
+        n = config.REFERRAL_PAIR_SHARP_EPISODES
+        below = _sharp_rows("A", "B", n - 1)
+        assert scoring.referral_pair_suspended_until(below, "A", "B", NOW) is None
+        at = _sharp_rows("A", "B", n)
+        until = scoring.referral_pair_suspended_until(at, "A", "B", NOW)
+        last = max(r.t0_unix for r in at if r.hotkey == "B")
+        assert until == pytest.approx(last + config.REFERRAL_PAIR_TTL_S)
 
     def test_burst_collapses_to_one_episode(self):
         # 6 sharp follows inside COPY_EPISODE_S = ONE decision, not six.
@@ -148,9 +166,7 @@ class TestPairNoCopy:
 
     def test_either_direction_trips(self):
         # here the RECRUITER shadows the RECRUIT — still suspends
-        rows = [_row("B", NOW - DAY), _row("A", NOW - DAY + 60),
-                _row("B", NOW - DAY + 2 * HOUR, pair="ETHUSD"),
-                _row("A", NOW - DAY + 2 * HOUR + 60, pair="ETHUSD")]
+        rows = _sharp_rows("B", "A", config.REFERRAL_PAIR_SHARP_EPISODES)
         assert scoring.referral_pair_suspended_until(rows, "A", "B", NOW) is not None
 
     def test_overlap_episodes_trip_without_sharp_lag(self):
@@ -167,23 +183,17 @@ class TestPairNoCopy:
         # the trip is computed, yet the suspension has already self-cleared.
         monkeypatch.setattr(config, "REFERRAL_PAIR_WINDOW_S", int(60 * DAY))
         t = NOW - config.REFERRAL_PAIR_TTL_S - 2 * DAY
-        rows = [_row("A", t), _row("B", t + 60),
-                _row("A", t + 2 * HOUR, pair="ETHUSD"),
-                _row("B", t + 2 * HOUR + 60, pair="ETHUSD")]
+        rows = _sharp_rows("A", "B", config.REFERRAL_PAIR_SHARP_EPISODES, start=t)
         assert scoring.referral_pair_suspended_until(rows, "A", "B", NOW) is None
 
     def test_outside_window_ignored(self):
         # events older than REFERRAL_PAIR_WINDOW_S never count at all
         t = NOW - config.REFERRAL_PAIR_WINDOW_S - 2 * DAY
-        rows = [_row("A", t), _row("B", t + 60),
-                _row("A", t + 2 * HOUR, pair="ETHUSD"),
-                _row("B", t + 2 * HOUR + 60, pair="ETHUSD")]
+        rows = _sharp_rows("A", "B", config.REFERRAL_PAIR_SHARP_EPISODES, start=t)
         assert scoring.referral_pair_suspended_until(rows, "A", "B", NOW) is None
 
     def test_third_party_rows_ignored(self):
-        rows = [_row("A", NOW - DAY), _row("C", NOW - DAY + 60),
-                _row("A", NOW - DAY + 2 * HOUR, pair="ETHUSD"),
-                _row("C", NOW - DAY + 2 * HOUR + 60, pair="ETHUSD")]
+        rows = _sharp_rows("A", "C", config.REFERRAL_PAIR_SHARP_EPISODES)
         assert scoring.referral_pair_suspended_until(rows, "A", "B", NOW) is None
 
 
@@ -335,18 +345,17 @@ class TestReplayEndToEnd:
 
     def test_pair_copy_suspension_drops_bonus_keeps_base(self, lit):
         sigs = self._journal()
-        # recruit B shadows recruiter A twice, hours apart ⇒ 2 sharp episodes
-        t1, t2 = NOW - 2 * DAY, NOW - 2 * DAY + 5 * HOUR
-        sigs += [
-            {"commit_hex": "A-s1", "hotkey": "A", "t0_unix": t1,
-             "status": "washed", "plaintext": _pt("A", "XRPUSD")},
-            {"commit_hex": "B-s1", "hotkey": "B", "t0_unix": t1 + 60,
-             "status": "washed", "plaintext": _pt("B", "XRPUSD")},
-            {"commit_hex": "A-s2", "hotkey": "A", "t0_unix": t2,
-             "status": "washed", "plaintext": _pt("A", "XAUUSD")},
-            {"commit_hex": "B-s2", "hotkey": "B", "t0_unix": t2 + 60,
-             "status": "washed", "plaintext": _pt("B", "XAUUSD")},
-        ]
+        # recruit B shadows recruiter A on REFERRAL_PAIR_SHARP_EPISODES separate
+        # occasions, hours apart ⇒ the pair gate trips
+        for i in range(config.REFERRAL_PAIR_SHARP_EPISODES):
+            t = NOW - 2 * DAY + i * 5 * HOUR
+            pair = SHADOW_PAIRS[i % len(SHADOW_PAIRS)]
+            sigs += [
+                {"commit_hex": f"A-s{i}", "hotkey": "A", "t0_unix": t,
+                 "status": "washed", "plaintext": _pt("A", pair)},
+                {"commit_hex": f"B-s{i}", "hotkey": "B", "t0_unix": t + 60,
+                 "status": "washed", "plaintext": _pt("B", pair)},
+            ]
         refs = [_ref("A", "B", reg_block="valid")]
         w_sus = replay.weights_from_journal(sigs, _meta("A", "B", "D"), self.UIDS,
                                             NOW, referrals=refs)

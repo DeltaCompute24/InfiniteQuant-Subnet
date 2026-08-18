@@ -706,14 +706,20 @@ REFERRAL_MAX_RECRUITS = int(os.getenv("SN89_REFERRAL_MAX_RECRUITS", "0"))
                                     # cap). >0 keeps only the earliest N recruits
                                     # by commit_block. Total bonus is still bounded
                                     # by REFERRAL_MAX_X × own tally regardless.
-# Pair no-copy gate — deliberately STRICTER than the global copy detector
-# (the pair opted into scrutiny by pairing up; a false positive only pauses a
-# bonus, never touches base emission). Two honest same-strategy traders who
-# co-fire on news should simply not refer each other.
-REFERRAL_PAIR_SHARP_EPISODES = int(os.getenv("SN89_REFERRAL_PAIR_SHARP_EPISODES", "2"))
+# Pair no-copy gate — stricter than the global copy detector (the pair opted
+# into scrutiny by pairing up; a false positive only pauses a bonus, never
+# touches base emission), but it has to survive a THIN BOARD. The forex band
+# carries a handful of majors, so two independent traders long EURUSD in the
+# same hour is the base rate, not evidence. Widened 2026-08-18 from 2/4 to 4/8
+# after a pair tripped on exactly 2 sharp + 4 overlap episodes, every one of
+# them a LONG on a major — and the follower was the RECRUITER, while the
+# recruit it suspended had no copy signature of its own. At 4/8 the persistent
+# shadowers on the live board still trip (a 10/10 pair; one recruiter
+# sharp-following four of its own recruits); the marginal ones clear.
+REFERRAL_PAIR_SHARP_EPISODES = int(os.getenv("SN89_REFERRAL_PAIR_SHARP_EPISODES", "4"))
                                     # sharp (≤COPY_SHARP_LAG_S) follow episodes either
                                     # direction within the pair ⇒ suspend
-REFERRAL_PAIR_OVERLAP_EPISODES = int(os.getenv("SN89_REFERRAL_PAIR_OVERLAP_EPISODES", "4"))
+REFERRAL_PAIR_OVERLAP_EPISODES = int(os.getenv("SN89_REFERRAL_PAIR_OVERLAP_EPISODES", "8"))
                                     # live-overlap (mark_copies) episodes either
                                     # direction within the pair ⇒ suspend
 REFERRAL_PAIR_WINDOW_S = int(os.getenv("SN89_REFERRAL_PAIR_WINDOW_S", str(30 * 24 * 3600)))
