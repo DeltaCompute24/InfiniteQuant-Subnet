@@ -6,8 +6,10 @@ Same row shape as the LF scoreboard, from HF sources:
     accepted HF submission from ANY path (self-hosted + hosted/multiplexer).
   * outcomes        — the validator HF grade cache (won/lost/wash).
   * pool share      — the live mecid-1 weight vector (all-burn until anyone qualifies).
-  * identity        — hotkey -> signals user via tenants.json (hosted) and
-    signals_users.sn89_hotkey (self-hosted); name from signals_users.
+  * identity        — hotkey -> signals user via tenants.json (hosted),
+    signals_users.sn89_hotkey (self-hosted) and signals_user_hotkeys (every key
+    a user has EVER held, so the retired key of a re-rolled miner stays
+    attributed); name from signals_users.
 
 A trader appears the moment they submit (pending rows), and their counts fill in
 as calls resolve — no waiting for qualification to show up.
@@ -333,6 +335,7 @@ def _publish_grade_db(src: str) -> None:
 def _identity():
     """hotkey -> (signals_user_id, display_name)."""
     hk2uid: dict = {}
+    retired: set = set()
     try:
         for v in json.load(open(TENANTS)).values():
             if v.get("hotkey_ss58") and v.get("signals_user_id"):
@@ -350,10 +353,31 @@ def _identity():
             names[int(r["id"])] = nm
             if r["sn89_hotkey"]:
                 hk2uid.setdefault(r["sn89_hotkey"], int(r["id"]))
+        # signals_users.sn89_hotkey is ONE column and a re-roll overwrites it,
+        # so a trader who re-rolled loses every call made on the retired key:
+        # it falls through to the synthetic-negative-id branch below and renders
+        # as an anonymous hotkey row beside their own named one. signals_user_hotkeys
+        # already carries every key a user has ever held (active=0 for retired),
+        # so fill from it LAST — setdefault keeps the current key authoritative
+        # and this only adopts hotkeys nothing else claimed.
+        #
+        # RETIRED is returned separately and is load-bearing: rows are built per
+        # HOTKEY, and every gate, weight and decayed tally on the board is a
+        # per-hotkey fact on chain, so the two keys must NOT be merged into one
+        # row. They also cannot share `signals_user_id`, which is the row key.
+        # A retired key therefore keeps its synthetic id and only borrows the name.
+        for r in con.execute("SELECT signals_user_id, hotkey, active "
+                             "FROM signals_user_hotkeys "
+                             "ORDER BY active DESC, last_seen_utc DESC"):
+            if not r["hotkey"]:
+                continue
+            if hk2uid.setdefault(r["hotkey"], int(r["signals_user_id"])) \
+                    == int(r["signals_user_id"]) and not r["active"]:
+                retired.add(r["hotkey"])
         con.close()
     except sqlite3.Error:
         pass
-    return hk2uid, names
+    return hk2uid, names, retired
 
 
 def _submissions_by_hk(grades_rows) -> dict:
@@ -771,7 +795,7 @@ def main() -> int:
     now = time.time()
     calls = _accepted_calls()
     grades, grade_rows, held_by_key, subs_rows = _grades()
-    hk2uid, names = _identity()
+    hk2uid, names, retired_hks = _identity()
     # HF eligibility (>=50 accepted submissions across >=8 distinct UTC trading
     # days) — the same gate the validator applies; the qualified badge must not
     # claim a miner is qualified before it can actually earn.
@@ -919,7 +943,16 @@ def main() -> int:
         # the table keys rows by signals_user_id; a self-hosted miner has no user,
         # so give it a STABLE unique negative id from its hotkey (never collides
         # with real positive user ids, stable across refreshes).
-        row_id = uid or -(int(hashlib.blake2b(hk.encode(), digest_size=6).hexdigest(), 16))
+        #
+        # A RETIRED key (owner re-rolled) is named but keeps the synthetic id: it
+        # is a second row for the same person, and giving it their real uid would
+        # put two rows on the same key. Its record stays where it was earned, on
+        # the hotkey the chain gated and paid.
+        if uid and hk in retired_hks:
+            nm = f"{nm} (retired key)"
+            row_id = -(int(hashlib.blake2b(hk.encode(), digest_size=6).hexdigest(), 16))
+        else:
+            row_id = uid or -(int(hashlib.blake2b(hk.encode(), digest_size=6).hexdigest(), 16))
         won, lost = a["won"], a["lost"]
         dec = won + lost
         hit = round(100 * won / dec, 1) if dec else None
