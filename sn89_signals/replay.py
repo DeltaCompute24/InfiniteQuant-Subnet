@@ -254,3 +254,91 @@ def referrer_weights_from_journal(
     blended = scoring.blended_recruit_tallies(tallies, shares)
     scores = scoring.referrer_scores(pairs, blended)
     return scoring.referrer_weights(scores, uid_by_hotkey)
+
+
+def combined_weights_from_journal(
+    signals: list[dict],
+    meta: dict[str, dict],
+    uid_by_hotkey: dict[str, int],
+    now: float,
+    referrals: list[dict] | None = None,
+    hf_base: str | None = None,
+    cache_dir: str | None = None,
+    on_error=None,
+) -> tuple[dict[int, float], dict]:
+    """The FULL mecid-0 vector — LF + HF + Closers blended by COMP_WEIGHTS.
+
+    `weights_from_journal` above returns the LF competition alone. Since the
+    2026-08-03 combined-weights cutover that is NOT what goes on chain, so an
+    auditor comparing it against the metagraph saw every uid off by a constant
+    1/COMP_WEIGHTS["lf"] and HF/Closers-only earners reading replay=0.000. The
+    tool reported "AUDIT FAILED — the validator's record does not match the
+    chain", which to an outsider is indistinguishable from proof that we cook
+    the books. The journal was honest the whole time; the comparison was not
+    whole.
+
+    This exists so there is ONE implementation of the blend. The validator, the
+    auditor and any future follower must all call this — three hand-copies of a
+    twenty-line blend is precisely how a consensus path drifts.
+
+    Every input is PUBLIC and needs no validator role:
+      * LF      — the published checkpoint journal (this module).
+      * HF      — hf_grade.mecid1_weights, graded from the published anchored
+                  windows at hf.HF_PUBLIC_BASE.
+      * Closers — closers.closers_weights, same public window logs.
+      * shares  — config.comp_weights_as_of, a committed consensus constant.
+
+    A competition that cannot be computed contributes None and BURNS its share
+    (competitions.combine's dead-share rule) — it is never redistributed to the
+    others. That mirrors the validator exactly: a dead feed must cost its own
+    share rather than silently inflate everyone else.
+
+    Returns (weights, detail). `detail` carries the per-competition vectors, the
+    shares in force, and any errors, so a caller can say WHICH competition
+    diverged instead of only that the total did.
+    """
+    from . import closers as _closers          # local: keeps import order free
+    from . import competitions as _competitions
+    from . import hf_grade as _hf_grade
+
+    lf = weights_from_journal(signals, meta, uid_by_hotkey, now,
+                              referrals=referrals)
+    detail: dict = {"lf": lf, "hf": None, "closers": None,
+                    "shares": None, "combined": False, "errors": {}}
+
+    if not config.combined_weights_active(now):
+        # Pre-cutover replays are LF-only ON CHAIN too, so this is not a
+        # degraded answer -- it is the correct vector for that instant.
+        detail["shares"] = {"lf": 1.0}
+        return lf, detail
+
+    def _try(name, fn):
+        try:
+            return fn()
+        except Exception as e:  # noqa: BLE001 — a dead competition burns its share
+            detail["errors"][name] = f"{type(e).__name__}: {e}"
+            if on_error:
+                on_error(name, e)
+            return None
+
+    vectors: dict = {"lf": lf}
+    vectors["hf"] = _try("hf", lambda: _hf_grade.mecid1_weights(
+        uid_by_hotkey, now, base=hf_base, cache_dir=cache_dir))
+
+    # "Qualified in HF or LF" = currently earning weight in either vector,
+    # excluding burn. Built from the two vectors ABOVE and never from the blend:
+    # reading the combined vector would rank a different field than the one that
+    # actually got paid.
+    hk_by_uid = {u: h for h, u in uid_by_hotkey.items()}
+    qual = {hk_by_uid[u]
+            for vec in (lf, vectors.get("hf") or {})
+            for u, wt in vec.items()
+            if wt > 0 and u != config.BURN_UID and u in hk_by_uid}
+    vectors["closers"] = _try("closers", lambda: _closers.closers_weights(
+        uid_by_hotkey, now, base=hf_base, cache_dir=cache_dir,
+        qualified_hks=qual))
+
+    shares = config.comp_weights_as_of(now)
+    detail.update({"hf": vectors["hf"], "closers": vectors["closers"],
+                   "shares": shares, "combined": True, "qualified_n": len(qual)})
+    return _competitions.combine(vectors, shares), detail

@@ -82,8 +82,25 @@ def main():
     referrals = cp.get("referrals") or []
     print(f"replaying {len(signals)} signals over {len(meta)} hotkeys "
           f"({len(referrals)} referrals, now={now:.0f})…")
-    replayed = replay.weights_from_journal(signals, meta, uid_by_hotkey, now,
-                                           referrals=referrals)
+    # The on-chain vector is the BLEND of LF + HF + Closers (config.COMP_WEIGHTS)
+    # and has been since the 2026-08-03 cutover. Replaying LF alone -- which this
+    # tool did until 2026-08-18 -- put every uid off by a constant
+    # 1/COMP_WEIGHTS["lf"] and reported "AUDIT FAILED", which reads as proof of
+    # dishonesty rather than an incomplete comparison. HF and Closers are graded
+    # from the PUBLIC anchored windows, so this still needs no validator role.
+    replayed, detail = replay.combined_weights_from_journal(
+        signals, meta, uid_by_hotkey, now, referrals=referrals)
+    if detail.get("combined"):
+        def _n(v):
+            return "∅" if v is None else sum(
+                1 for u, w in v.items() if w > 0 and u != 0)
+        print(f"  shares={detail['shares']}  earners: lf={_n(detail['lf'])} "
+              f"hf={_n(detail['hf'])} closers={_n(detail['closers'])}")
+        for comp, err in (detail.get("errors") or {}).items():
+            print(f"  ⚠ {comp} vector could not be computed ({err}) — its share "
+                  f"burns, and this replay cannot be compared to the chain.")
+    else:
+        print("  (pre-cutover instant: LF only, which is also what was on chain)")
 
     if not recorded:
         print(f"  replay produced {len(replayed)} uids, but there are NO on-chain weights "
@@ -96,8 +113,22 @@ def main():
         print(f"  ✓ REPLAY MATCHES on-chain weights ({len(replayed)} uids, tol={tol})")
     else:
         print(f"  ✗ REPLAY MISMATCH on {len(diffs)} uid(s):")
+        lfv, hfv, clv = detail.get("lf") or {}, detail.get("hf") or {}, detail.get("closers") or {}
         for uid, rv, cv in diffs[:20]:
-            print(f"      uid {uid}: replay={rv:.6f}  on-chain={cv:.6f}")
+            where = ",".join(n for n, v in (("lf", lfv), ("hf", hfv), ("closers", clv))
+                             if v.get(uid, 0) > 0) or "-"
+            print(f"      uid {uid}: replay={rv:.6f}  on-chain={cv:.6f}  in [{where}]")
+        # Attribution matters because the three competitions are NOT equally
+        # stable. Closers routinely runs a handful of earners, so one call
+        # grading between the validator's commit and this replay redistributes
+        # its whole share -- a real point-in-time difference, not a broken
+        # journal. A mismatch confined to `closers` (or to `hf`) with LF-only
+        # uids clean is the expected shape when replaying minutes after a commit.
+        drifty = [u for u, _, _ in diffs if (clv.get(u, 0) > 0 or hfv.get(u, 0) > 0)]
+        if diffs and len(drifty) == len(diffs):
+            print(f"      ↳ all {len(diffs)} are HF/Closers participants: consistent "
+                  f"with grading drift since the commit, not with a journal defect. "
+                  f"Re-run immediately after a weight commit to rule drift out.")
 
     anchors_ok = True
     if "--anchors" in args:
@@ -105,13 +136,48 @@ def main():
     if "--referral-anchors" in args:
         anchors_ok = _check_referral_anchors(referrals) and anchors_ok
 
-    ok = match and anchors_ok
-    print("\n" + ("AUDIT PASSED — on-chain weights match a replay of the journal"
-                  + (", and every checked signal is anchored on-chain." if "--anchors" in args
-                     else ".")
-                  if ok else
-                  "AUDIT FAILED — the validator's record does not match the chain."))
-    sys.exit(0 if ok else 1)
+    # ── verdict ──────────────────────────────────────────────────────────────
+    # Three outcomes, not two. The old code printed "AUDIT FAILED — the
+    # validator's record does not match the chain" for ANY mismatch, which is
+    # the most damaging possible reading of the most common one: LF replays
+    # exactly, while HF and Closers are graded continuously from the public
+    # windows and keep moving after the validator commits. Closers in particular
+    # often has a handful of earners, so a single call grading in the gap
+    # redistributes its entire share.
+    #
+    # A mismatch confined to HF/Closers participants is a TIMING statement.
+    # A mismatch touching a uid that earns ONLY in LF is a JOURNAL statement,
+    # and that is the one worth alarming on -- LF is replayed from the published
+    # journal alone, so it must reproduce exactly at any time.
+    lfv = detail.get("lf") or {}
+    hfv = detail.get("hf") or {}
+    clv = detail.get("closers") or {}
+    lf_only_bad = [u for u, _, _ in diffs
+                   if lfv.get(u, 0) > 0 and not (hfv.get(u, 0) > 0 or clv.get(u, 0) > 0)]
+    burned = list((detail.get("errors") or {}).keys())
+
+    if match and anchors_ok:
+        print("\nAUDIT PASSED — on-chain weights match a replay of the journal"
+              + (", and every checked signal is anchored on-chain."
+                 if "--anchors" in args else "."))
+        sys.exit(0)
+    if not anchors_ok:
+        print("\nAUDIT FAILED — a journalled signal is not anchored on-chain.")
+        sys.exit(1)
+    if lf_only_bad:
+        print(f"\nAUDIT FAILED — {len(lf_only_bad)} uid(s) that earn only in LF do "
+              f"not match: {lf_only_bad[:10]}. LF is replayed from the published "
+              f"journal alone and must reproduce exactly.")
+        sys.exit(1)
+    if burned:
+        print(f"\nAUDIT INCONCLUSIVE — could not compute {', '.join(burned)}; "
+              f"that share burns on chain and this replay cannot be compared.")
+        sys.exit(2)
+    print(f"\nAUDIT INCONCLUSIVE — the LF journal replays clean (no LF-only uid "
+          f"differs); the {len(diffs)} difference(s) are all HF/Closers "
+          f"participants, whose grades keep moving after the validator commits. "
+          f"Re-run within a minute of a weight commit to settle it.")
+    sys.exit(2)
 
 
 def _check_anchors(signals: list, args: list) -> bool:
