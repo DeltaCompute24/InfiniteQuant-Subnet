@@ -500,7 +500,7 @@ def _resolve_pending(db, base: str, tick_dir: str, row, now_ms: int,
     db.execute("DELETE FROM pending WHERE key=?", (key,))
 
 
-def _history(cache_dir: str):
+def _history(cache_dir: str, as_of: float | None = None):
     """(decisive_by_hk, first_seen_by_hk, submissions_by_hk, graded_by_hk).
 
     submissions_by_hk carries EVERY ACCEPTED submission as `(t0_ms, pair,
@@ -520,6 +520,18 @@ def _history(cache_dir: str):
     Outcome scoring (dec/graded/fs) still reads `grades`: those genuinely are the
     calls we could score, and an ungradeable call has no outcome to contribute.
     """
+    # `as_of` makes this POINT-IN-TIME. A grade is not knowable until the call
+    # resolves at open_until_ms, and a submission is not knowable before its t0,
+    # so replaying a past instant against the current cache counts outcomes that
+    # had not happened yet -- the same defect that made the LF journal
+    # irreproducible (see scripts/audit_journal._journal_as_of). It cost an
+    # audit of a two-tempo-old commit 17 mismatched uids, every one of them an
+    # HF or Closers participant.
+    #
+    # This is a NO-OP for the live validator: grading only ever runs once
+    # end_ms <= now, so every stored grade already has open_until_ms <= now.
+    # It changes nothing about what goes on chain and only bites on replay.
+    cut_ms = None if as_of is None else int(as_of * 1000)
     db = _db(cache_dir)
     dec: dict = {}
     fs: dict = {}
@@ -527,8 +539,13 @@ def _history(cache_dir: str):
     graded: dict = {}
     for hk, t0_ms, pair, direction in db.execute(
             "SELECT hk, t0_ms, pair, direction FROM submissions"):
+        if cut_ms is not None and int(t0_ms) > cut_ms:
+            continue                      # not submitted yet at as_of
         subs.setdefault(hk, []).append((int(t0_ms), pair, direction))
-    for hk, t0_ms, status in db.execute("SELECT hk, t0_ms, status FROM grades"):
+    for hk, t0_ms, status, open_until_ms in db.execute(
+            "SELECT hk, t0_ms, status, open_until_ms FROM grades"):
+        if cut_ms is not None and open_until_ms and int(open_until_ms) > cut_ms:
+            continue                      # still open at as_of, so still ungraded
         t0 = t0_ms / 1000.0
         fs[hk] = min(fs.get(hk, t0), t0)
         if status in ("won", "lost", "wash"):
@@ -554,7 +571,7 @@ def mecid1_weights(uid_by_hk: dict, now: float | None = None,
     cache_dir = cache_dir or os.path.expanduser(
         os.getenv("SN89_HF_GRADE_CACHE", "~/.sn89/hf-grade"))
     sync_and_grade(base, cache_dir, now)
-    dec, fs, subs, graded = _history(cache_dir)
+    dec, fs, subs, graded = _history(cache_dir, as_of=now)
     return hf.hf_compute_weights(dec, fs, uid_by_hk, now, subs, graded)
 
 
@@ -568,5 +585,5 @@ def mecid1_tallies(uid_by_hk: dict, now: float | None = None,
     cache_dir = cache_dir or os.path.expanduser(
         os.getenv("SN89_HF_GRADE_CACHE", "~/.sn89/hf-grade"))
     sync_and_grade(base, cache_dir, now)
-    dec, fs, subs, graded = _history(cache_dir)
+    dec, fs, subs, graded = _history(cache_dir, as_of=now)
     return hf.hf_compute_tallies(dec, fs, uid_by_hk, now, subs, graded)

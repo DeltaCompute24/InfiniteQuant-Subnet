@@ -124,19 +124,23 @@ def main():
     deterministic_ok = None          # None = tier unavailable
     commits = cp.get("weight_commits")
     if commits:
-        # Only the NEWEST commit is authoritative. The LF journal can be
-        # reconstructed as-of any instant (exit_at_ms), but HF and Closers are
-        # graded from their own caches by hf_grade/closers, and those grades
-        # mutate as calls resolve with no as-of path -- so the further back a
-        # commit is, the more of its HF/Closers vector cannot be rebuilt.
-        # Measured 2026-08-19: newest commit EXACT, one tempo back 3 uids off,
-        # two tempos back 17, every one of them an HF or Closers participant.
+        # Only the NEWEST commit is authoritative, and the reason is age, not
+        # competition. All three legs are now point-in-time: LF via exit_at_ms,
+        # HF via grades.open_until_ms, Closers via the fixed CLOSERS_HORIZON_S.
+        # That took the deterministic tier from one reproducible commit to two
+        # (2026-08-19). What still degrades further back are the GATES rather
+        # than the outcomes -- HF eligibility counts distinct UTC days and the
+        # diversity gate looks back 30, so a miner can drop out of a replayed
+        # older vector entirely (uid 51: replay 0.000000 vs committed 0.061652
+        # two tempos back) even though every individual grade reconstructs.
+        # Reporting that as FAILED would repeat the error this tool has already
+        # made three times: blaming the journal for a limit of the comparison.
         # Reporting an unreconstructible old commit as FAILED would be the same
         # error this tool has already made twice: blaming the journal for a
         # limitation of the comparison. Older commits are shown for information.
         print(f"\n  deterministic replay against {len(commits)} recorded commit(s)"
-              f" — the newest is authoritative, older ones are informational"
-              f" (HF/Closers grades are not reconstructible as-of):")
+              f" — the newest is authoritative; older ones are informational and"
+              f" degrade with age:")
         exact = 0
         for rec in commits[:3]:
             rw = {int(u): float(v) for u, v in rec["weights"].items()}

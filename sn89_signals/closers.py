@@ -398,9 +398,18 @@ def _window_scores(now: float, base: str | None, cache_dir: str | None) -> dict:
     sync_and_grade(base, cache_dir, now)
     since_ms = int((now - CLOSERS_WINDOW_S) * 1000)
     db = _db(cache_dir)
+    # POINT-IN-TIME: a closers call is not knowable until it resolves, and it
+    # resolves at a FIXED horizon (grade() stamps end_ms = t0_ms +
+    # CLOSERS_HORIZON_S * 1000), so unlike HF this needs no stored timestamp.
+    # Without the filter, replaying a past instant counts calls that were still
+    # open then. No-op live -- grading only runs once end_ms <= now.
+    resolved_by_ms = int(now * 1000)
     per_hk: dict[str, list[float]] = {}
-    for hk, score, status in db.execute(
-            "SELECT hk, score, status FROM grades WHERE t0_ms >= ?", (since_ms,)):
+    for hk, score, status, t0_ms in db.execute(
+            "SELECT hk, score, status, t0_ms FROM grades WHERE t0_ms >= ?",
+            (since_ms,)):
+        if int(t0_ms) + CLOSERS_HORIZON_S * 1000 > resolved_by_ms:
+            continue                      # still open at `now`
         if status == "graded":
             per_hk.setdefault(hk, []).append(float(score))
     db.close()

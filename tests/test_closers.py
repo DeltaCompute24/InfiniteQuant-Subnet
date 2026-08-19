@@ -112,6 +112,11 @@ class TestWeightsShape:
         import sqlite3, os
         cache = str(tmp_path)
         db = closers._db(cache)
+        # t0 = now_ms, and the evaluation instant must therefore be at least one
+        # CLOSERS_HORIZON_S later: a closers call resolves at t0 + horizon, and
+        # grade() only writes a row once end_ms <= now, so a graded row whose
+        # horizon has not elapsed cannot exist in production. These fixtures
+        # used now+60s, which the point-in-time filter correctly rejects.
         now_ms = 1_800_000_000_000
         rows = []
         # hkA: 12 calls, +0.5 each → qualifies, positive
@@ -128,7 +133,7 @@ class TestWeightsShape:
         monkeypatch.setattr(closers, "sync_and_grade", lambda *a, **k: None)
         monkeypatch.setattr(closers, "CLOSERS_REQUIRE_QUALIFIED", False)
         w = closers.closers_weights({"hkA": 1, "hkB": 2, "hkC": 3},
-                                    now=now_ms / 1000 + 60, cache_dir=cache)
+                                    now=now_ms / 1000 + closers.CLOSERS_HORIZON_S + 60, cache_dir=cache)
         assert w.get(1, 0) > 0
         assert w.get(2, 0) == 0
         assert w.get(3, 0) == 0
@@ -144,10 +149,10 @@ class TestWeightsShape:
         db.commit(); db.close()
         monkeypatch.setattr(closers, "sync_and_grade", lambda *a, **k: None)
         monkeypatch.setattr(closers, "CLOSERS_REQUIRE_QUALIFIED", True)
-        w = closers.closers_weights({"hkA": 1}, now=now_ms / 1000 + 60,
+        w = closers.closers_weights({"hkA": 1}, now=now_ms / 1000 + closers.CLOSERS_HORIZON_S + 60,
                                     cache_dir=cache, qualified_hks=set())
         assert w.get(1, 0) == 0          # not HF/LF-qualified → nothing
-        w2 = closers.closers_weights({"hkA": 1}, now=now_ms / 1000 + 60,
+        w2 = closers.closers_weights({"hkA": 1}, now=now_ms / 1000 + closers.CLOSERS_HORIZON_S + 60,
                                      cache_dir=cache, qualified_hks={"hkA"})
         assert w2.get(1, 0) > 0
 
