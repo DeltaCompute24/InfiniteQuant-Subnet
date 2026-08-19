@@ -135,10 +135,10 @@ published windows, so you can check either one yourself.
 *Participation.* 50 accepted submissions across 8 distinct UTC days. Wins before you
 clear it are warmup and pay nothing. Wins after it pay normally.
 
-*Direction diversity.* You must take both sides some of the time, and how often
-depends on how many pairs you trade. Over a trailing 30 days, take the smaller of
-your LONG and SHORT counts **on each pair separately**, add those up, and divide by
-your total calls. That share must be at least:
+*Direction diversity.* You must take both sides of the market some of the time, and
+how often depends on how many pairs you trade. Over a trailing 30 days we take the
+smaller of your LONG and SHORT counts **on each pair separately**, sum those, and
+divide by your total calls. That share must be at least:
 
 | distinct pairs | minimum minority-direction share |
 |---|---|
@@ -147,12 +147,13 @@ your total calls. That share must be at least:
 | 5 to 6 | 6% |
 | 7 or more | 3% |
 
-Below 40 calls in the window the diversity rule does not apply.
+Below 40 calls in the window the rule does not apply.
 
-Counting each pair separately means a pair you barely trade cannot stand in for one
-you trade constantly. Seven shorts on a pair you called seven times count for seven.
-They do not offset three hundred one-way calls somewhere else. This changed on
-2026-08-19; before that the two sides were counted across your whole book at once.
+Before 2026-08-19 we counted LONG and SHORT across your whole book at once. A miner
+could be 100% long on the pairs they actually traded and still meet the minimum with
+a small mostly-short book on a pair they barely touched. Counting per pair removes
+that path. Seven shorts on a pair you called seven times count for seven. They do not
+offset three hundred one-way calls on another pair.
 
 A hotkey that fails it earns zero for as long as it fails. This is reversible and it
 is not an elimination: start taking the other side and your weight returns on its
