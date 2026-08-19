@@ -913,16 +913,40 @@ def _sub_ts(s) -> int:
 #   5-6              HF_DIVERSITY_FLOOR_WIDE     (0.06)
 #   >= 7             HF_DIVERSITY_FLOOR_BROAD    (0.03)
 #
-# minority-direction share = min(#LONG, #SHORT) / n, over accepted submissions in
-# the trailing HF_DIVERSITY_WINDOW_S. Below HF_DIVERSITY_MIN_SUBS in that window the
-# gate does not apply at all — a low-volume miner has not had the chance to be
-# two-sided, and the ratio is noise at small n anyway.
+# minority-direction share = SUM OVER PAIRS of min(#LONG_p, #SHORT_p), divided by n,
+# over accepted submissions in the trailing HF_DIVERSITY_WINDOW_S. Below
+# HF_DIVERSITY_MIN_SUBS in that window the gate does not apply at all — a low-volume
+# miner has not had the chance to be two-sided, and the ratio is noise at small n.
 #
-# CALIBRATION (30d of anchored windows, 2026-08-12, all 31 hotkeys with >= 20 subs):
-# six keys sit at 0.0-4.4% minority share; the remaining twenty-five sit at 15-50%.
-# Nothing occupies the interval between. The floors are placed inside that empty
-# band on purpose, so the gate is insensitive to where exactly it is set and no
-# honest miner is anywhere near it.
+# ── Why the min() is INSIDE the pair (2026-08-19) ────────────────────────────
+# It was `min(SUM LONG, SUM SHORT) / n` — one ratio over the whole hotkey — and that
+# let the minimum be satisfied on a pair the miner does not trade. Measured over 30
+# days on the coldkey 5DyPn97u… cluster (four hotkeys, 43.75% of the HF pool):
+#
+#   BTCUSD  951 calls    0 short     SOLUSD  592 calls    4 short
+#   XRPUSD   64 calls   55 short     XAU/TAO/HYPE  8 calls each, exactly 4 short
+#
+# 1,543 of 1,696 calls carried four short positions between them, while a 64-call
+# XRP book ran 86% short and three padding pairs were split precisely half and half.
+# The hotkey read 4.25% and cleared its floor; the money was one-directional.
+#
+# Summing min() per pair prices that correctly: a pair contributes only the
+# two-sidedness it actually has, so the cluster reads 0.0-0.5% instead of 4.0-4.2%.
+# It also disarms the breadth arbitrage without a second constant — a 1-call padding
+# pair now contributes min(0,1) = 0 to the numerator while still adding 1 to n, so
+# buying pair-count to reach a lower floor is a small NET COST. To lift a 500-call
+# book to the 3% floor a miner must place ~15 minority calls inside pairs it really
+# trades, which is the exposure the gate is asking for and cannot be faked cheaply.
+#
+# CALIBRATION — and why calibration is no longer the argument. The original note
+# read: "six keys sit at 0.0-4.4% and twenty-five at 15-50%, nothing in between, so
+# the gate is insensitive to where exactly it is set." That was true on 2026-08-12
+# and FALSE by 2026-08-19: the empty band filled from below the moment the gate
+# armed and its constants were public. A published threshold stops being a
+# classifier and becomes a target, so the rule has to be structurally sound rather
+# than well-placed. Under the per-pair sum the picture is (2026-08-19, 40 hotkeys
+# with >= 20 subs) four keys at 0.0-0.5% and the rest at 17.1-46.0% — a wider gap
+# than before, but the reason to trust it is the paragraph above, not the gap.
 #
 # Failing is REVERSIBLE and carries no elimination — weight is zero for as long as
 # the trailing window is one-sided and returns by itself once the miner starts
@@ -957,7 +981,13 @@ def hf_diversity(subs, now: float) -> dict:
     returned dict is the whole audit trail, so the validator log, the public board
     and the watcher all quote identical numbers rather than three reconstructions:
 
-        {"n", "pairs", "long", "short", "share", "floor", "applies", "ok"}
+        {"n", "pairs", "long", "short", "minority", "share", "floor",
+         "by_pair", "applies", "ok"}
+
+    `share` is `minority / n` where `minority` sums min(long, short) WITHIN each
+    pair — see the rule note above for why the min() sits inside the pair. `by_pair`
+    carries the per-pair (long, short) counts so an operator can see which book
+    supplied the two-sidedness without recounting from the feed.
 
     PURE / deterministic in the submissions and `now`, like every other consensus
     function here — `now` enters only as the trailing-window edge, and validators
@@ -975,7 +1005,8 @@ def hf_diversity(subs, now: float) -> dict:
     only ever be OUR bookkeeping, never a miner's choice.)
     """
     cutoff_ms = (now - HF_DIVERSITY_WINDOW_S) * 1000.0
-    pairs, longs, shorts = set(), 0, 0
+    by_pair: dict = {}
+    longs, shorts = 0, 0
     for s in subs or ():
         if not isinstance(s, (tuple, list)) or len(s) < 3:
             continue
@@ -989,15 +1020,25 @@ def hf_diversity(subs, now: float) -> dict:
             shorts += 1
         else:
             continue                              # untyped: not a measurement
-        if pair:
-            pairs.add(str(pair))
+        # Records carrying no pair keep their own bucket: they count toward `n`
+        # and toward the minority sum exactly as they did before this became a
+        # per-pair measure, but they never contribute BREADTH. Preserving that
+        # split matters because the pair field is required and signed, so an
+        # unpaired record can only ever be our own bookkeeping.
+        lp = by_pair.setdefault(str(pair) if pair else "", [0, 0])
+        lp[0 if d == "LONG" else 1] += 1
     n = longs + shorts
-    share = (min(longs, shorts) / n) if n else 0.0
+    # THE per-pair sum. min() is applied INSIDE each pair and then pooled, so a
+    # pair can only donate the two-sidedness it actually has. See the note above.
+    minority = sum(min(l, s) for l, s in by_pair.values())
+    pairs = {p for p in by_pair if p}
+    share = (minority / n) if n else 0.0
     floor = hf_diversity_floor(len(pairs))
     applies = HF_DIVERSITY_ENABLED and n >= HF_DIVERSITY_MIN_SUBS
     return {"n": n, "pairs": len(pairs), "long": longs, "short": shorts,
-            "share": share, "floor": floor, "applies": applies,
-            "ok": (not applies) or share >= floor}
+            "minority": minority, "share": share, "floor": floor,
+            "by_pair": {p: tuple(v) for p, v in sorted(by_pair.items())},
+            "applies": applies, "ok": (not applies) or share >= floor}
 
 
 def hf_diversity_ok(subs, now: float) -> bool:

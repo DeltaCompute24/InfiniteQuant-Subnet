@@ -136,8 +136,9 @@ published windows, so you can check either one yourself.
 clear it are warmup and pay nothing. Wins after it pay normally.
 
 *Direction diversity.* You must take both sides some of the time, and how often
-depends on how many pairs you trade. Over a trailing 30 days, the smaller of your
-LONG and SHORT counts must be at least this share of your calls:
+depends on how many pairs you trade. Over a trailing 30 days, take the smaller of
+your LONG and SHORT counts **on each pair separately**, add those up, and divide by
+your total calls. That share must be at least:
 
 | distinct pairs | minimum minority-direction share |
 |---|---|
@@ -147,6 +148,11 @@ LONG and SHORT counts must be at least this share of your calls:
 | 7 or more | 3% |
 
 Below 40 calls in the window the diversity rule does not apply.
+
+Counting each pair separately means a pair you barely trade cannot stand in for one
+you trade constantly. Seven shorts on a pair you called seven times count for seven.
+They do not offset three hundred one-way calls somewhere else. This changed on
+2026-08-19; before that the two sides were counted across your whole book at once.
 
 A hotkey that fails it earns zero for as long as it fails. This is reversible and it
 is not an elimination: start taking the other side and your weight returns on its

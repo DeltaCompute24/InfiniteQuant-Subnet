@@ -1842,3 +1842,97 @@ class TestHFSubmissionsTableIsUnfiltered:
         d = hf.hf_diversity(true_subs, now)
         assert d["applies"] and d["ok"]
         assert d["share"] == pytest.approx(16 / 105, abs=1e-6)
+
+
+def _book(now, spec):
+    """Submissions from an explicit per-pair book: {pair: (n_long, n_short)}.
+
+    `_div_subs` cycles its pairs round-robin, which spreads the minority direction
+    EVENLY across them — under that shape the per-hotkey and per-pair measures agree
+    exactly, which is why every test written before 2026-08-19 passes under both.
+    The gap only opens when the minority direction is CONCENTRATED in one book, so
+    these tests need to place it deliberately.
+    """
+    out, i = [], 0
+    for pair, (nl, ns) in spec.items():
+        for _ in range(nl):
+            out.append((int((now - 5 * 86400 + i) * 1000), pair, "LONG")); i += 1
+        for _ in range(ns):
+            out.append((int((now - 5 * 86400 + i) * 1000), pair, "SHORT")); i += 1
+    return out
+
+
+def _legacy_share(d):
+    """The pre-2026-08-19 measure: one min() over the whole hotkey."""
+    return (min(d["long"], d["short"]) / d["n"]) if d["n"] else 0.0
+
+
+class TestHFDiversityPerPair:
+    """min() sits INSIDE the pair, so two-sidedness cannot be bought on a book the
+    miner does not trade. Every test here fails under the per-hotkey measure."""
+
+    NOW = 1_760_000_000.0
+
+    # The real book of 5E2JyXjb… on 2026-08-19 — one of four hotkeys under coldkey
+    # 5DyPn97u…, together holding 43.75% of the HF pool.
+    CLUSTER = {"BTCUSD": (294, 0), "SOLUSD": (162, 0), "ETHUSD": (22, 0),
+               "XRPUSD": (2, 17), "XAUUSD": (0, 1), "TAOUSD": (0, 1),
+               "HYPEUSD": (0, 1)}
+
+    def test_minority_bought_on_an_untraded_pair_no_longer_counts(self):
+        d = hf.hf_diversity(_book(self.NOW, self.CLUSTER), self.NOW)
+        assert d["applies"]
+        # It cleared the gate under the old measure — this is the regression.
+        assert _legacy_share(d) == pytest.approx(0.04, abs=0.002)
+        assert _legacy_share(d) >= d["floor"]
+        # And fails under the per-pair sum: only XRPUSD is two-sided, by 2 calls.
+        assert d["minority"] == 2
+        assert d["share"] == pytest.approx(2 / 500)
+        assert not d["ok"]
+
+    def test_padding_pairs_are_a_net_cost(self):
+        """Three 1-call pairs used to cut the floor 12% -> 3%. They now also DILUTE:
+        each adds 1 to n and min(0, 1) = 0 to the numerator."""
+        bare = {k: v for k, v in self.CLUSTER.items()
+                if k not in ("XAUUSD", "TAOUSD", "HYPEUSD")}
+        d_bare = hf.hf_diversity(_book(self.NOW, bare), self.NOW)
+        d_pad = hf.hf_diversity(_book(self.NOW, self.CLUSTER), self.NOW)
+        assert d_pad["floor"] < d_bare["floor"]      # padding still buys a lower floor
+        assert d_pad["share"] < d_bare["share"]      # and now costs share to do it
+        assert not d_bare["ok"] and not d_pad["ok"]  # neither clears
+
+    def test_honest_two_sided_book_is_unaffected(self):
+        """A miner two-sided within each pair measures the same under both rules —
+        this is why the change moved 4 of 40 live hotkeys and no others."""
+        spec = {"BTCUSD": (60, 40), "ETHUSD": (30, 20), "XAUUSD": (18, 12)}
+        d = hf.hf_diversity(_book(self.NOW, spec), self.NOW)
+        assert d["share"] == pytest.approx(_legacy_share(d))
+        assert d["share"] == pytest.approx(0.4) and d["ok"]
+
+    def test_one_sided_tail_does_not_sink_a_two_sided_core(self):
+        """A real book that is lopsided on one small pair keeps earning — the rule
+        prices two-sidedness, it does not demand it everywhere."""
+        spec = {"BTCUSD": (55, 45), "ETHUSD": (30, 25), "GBPUSD": (6, 0)}
+        d = hf.hf_diversity(_book(self.NOW, spec), self.NOW)
+        assert d["minority"] == 45 + 25 + 0
+        assert d["ok"]
+
+    def test_audit_trail_is_self_consistent(self):
+        """The dict is quoted verbatim by the validator log, the public board and
+        the plagiarism watcher, so its parts must add up."""
+        d = hf.hf_diversity(_book(self.NOW, self.CLUSTER), self.NOW)
+        assert sum(l for l, _ in d["by_pair"].values()) == d["long"]
+        assert sum(s for _, s in d["by_pair"].values()) == d["short"]
+        assert d["long"] + d["short"] == d["n"]
+        assert d["minority"] == sum(min(l, s) for l, s in d["by_pair"].values())
+        assert d["pairs"] == len([p for p in d["by_pair"] if p])
+        assert d["share"] == pytest.approx(d["minority"] / d["n"])
+
+    def test_unpaired_records_count_toward_n_but_never_breadth(self):
+        """Pair is a required signed field, so an unpaired record is our own
+        bookkeeping. It must not inflate breadth into a lower floor."""
+        subs = _book(self.NOW, {"BTCUSD": (60, 40)})
+        subs += [(int((self.NOW - 4 * 86400) * 1000), "", "LONG")] * 5
+        d = hf.hf_diversity(subs, self.NOW)
+        assert d["n"] == 105 and d["pairs"] == 1
+        assert d["floor"] == hf.HF_DIVERSITY_FLOOR_NARROW
