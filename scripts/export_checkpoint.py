@@ -33,11 +33,17 @@ def main():
     now = time.time()
 
     signals = [
+        # exit_at_ms is WHEN the status became final, and without it the journal
+        # cannot be replayed as of any past instant: statuses MUTATE as calls
+        # resolve, so replaying an old `now` against today's rows counts wins
+        # that had not happened yet. Six such rows were enough to shift the
+        # normalisation of a whole commit by 11% (2026-08-19).
         {"commit_hex": ch, "hotkey": hk, "t0_unix": t0, "status": st,
-         "is_copy": int(cp or 0), "plaintext": pt, "commit_block": cb, "round": rnd}
-        for ch, hk, t0, st, cp, pt, cb, rnd in con.execute(
+         "is_copy": int(cp or 0), "plaintext": pt, "commit_block": cb,
+         "round": rnd, "exit_at_ms": ex}
+        for ch, hk, t0, st, cp, pt, cb, rnd, ex in con.execute(
             "SELECT commit_hex, hotkey, t0_unix, status, is_copy, plaintext, "
-            "commit_block, round FROM signals")
+            "commit_block, round, exit_at_ms FROM signals")
     ]
     meta = {
         hk: {"first_seen_unix": fs, "strikes": int(sk or 0)}
