@@ -64,11 +64,11 @@ your weight ∝ (your qualified wins × tier, each decaying linearly to 0 over 7
 |---|---|
 | Crypto | BTCUSD · ETHUSD · SOLUSD · XRPUSD · TAOUSD · HYPEUSD |
 | Metals | XAUUSD · XAGUSD |
-| Forex | AUDUSD · USDCHF · USDCAD |
+| Forex | AUDUSD · EURUSD · USDCAD |
 
 Bands are per-asset, volatility-scaled, symmetric 1:1. A signal is graded against the band in force **at its commit block** (`data/signals-bands.json` + `data/signals-bands-history.json`) — a band update never changes an in-flight signal.
 
-**Forex narrows to AUDUSD · USDCHF · USDCAD at 2026-08-13T00:00:00Z** (`fxmacro3-20260813`). EURUSD, GBPUSD, USDJPY, NZDUSD, NZDCHF, AUDNZD, GBPCAD and NZDJPY leave the board. The three that stay each track a hard asset — the commodity complex, the safe-haven bid and crude — so the forex board carries the same kind of view as the metals and crypto rows. Bands do not change: AUDUSD stays 28 bps, USDCHF 26, USDCAD 20. A call committed before that instant on any of the eight grades normally, on the board in force at its own commit block. On the high-frequency board the same change lists AUDUSD only.
+**Forex is AUDUSD · EURUSD · USDCAD** (`fxpoll3-20260821`). The board was rebuilt from a poll of miners: EURUSD took 71% of the vote, AUDUSD 58% and USDCAD 42%, so USDCHF leaves and EURUSD returns. Bands are AUDUSD ±28 bps, EURUSD ±17, USDCAD ±17 — EURUSD lists fresh, USDCAD tightens from ±20 because ±20 was washing over half its calls, and AUDUSD is unchanged. A call always grades on the board in force at its own commit block, so calls made on USDCHF before the change grade normally. On the high-frequency board AUDUSD remains the only forex pair: EURUSD clears the band-to-spread gate on the median and upper-quartile spread but not the 90th percentile, and a listing that depends on which estimate you pick is a listing whose outcomes are microstructure.
 
 The table above is the **low-frequency** board (mechanism 0). The **high-frequency** board (mechanism 1) is a smaller set — see *Mine — High-Frequency* below.
 
