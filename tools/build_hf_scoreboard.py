@@ -147,6 +147,63 @@ def _registered_hotkeys() -> set:
         return set()
 
 
+LF_STANDING = os.getenv("SN89_LF_STANDING",
+                        "/opt/iq-platform/data/live/sn89-standing-main.json")
+
+
+def _immune_until() -> dict:
+    """hotkey -> unix time its on-chain immunity window ends, from the LF standing.
+
+    Deregistration immunity is a property of the HOTKEY on the subnet, not of a
+    competition: the same key is immune on LF and on HF at the same instant. It is
+    published only by the LF standing builder (build_dashboard.classify), so this
+    board reads it rather than recomputing a second answer that could disagree.
+
+    Why this board needs it at all: sn89_status here was two-valued
+    (qualified / not qualified) while LF's is four-valued (immune / building /
+    qualified / struck). A trader one day into an eight-day immunity window
+    therefore read "immune" on the LF board and "not qualified" on the HF board,
+    for one account, on one page, on the same afternoon — 19 of 88 HF rows were in
+    exactly that state on 2026-08-20. Both labels were true. Together they read as
+    a broken program, and the traders asking about it were right to ask.
+
+    Missing file, missing row or a stale snapshot all degrade to "no immunity
+    known", which classifies as "building" — the pre-existing behaviour. Immunity
+    is never INVENTED here; a hotkey the LF roster has not seen is not painted as
+    immune just because this board could not read the file.
+    """
+    try:
+        with open(LF_STANDING, encoding="utf-8") as fh:
+            roster = json.load(fh).get("roster") or []
+    except Exception as e:      # noqa: BLE001 — a status label must never break the board
+        print(f"!! LF standing unreadable ({e}) — HF immunity states degrade to 'building'")
+        return {}
+    return {r["hotkey"]: float(r.get("immune_until_unix") or 0)
+            for r in roster if r.get("hotkey")}
+
+
+def _hf_status(qualified: bool, hk: str, immune_until: dict, now: float) -> str:
+    """The HF lifecycle label, in the SAME vocabulary the LF board uses.
+
+    Order matters and mirrors build_dashboard.classify: qualification is the
+    strongest claim and wins outright, then immunity, then the default. A miner
+    that qualifies DURING its immunity window is earning, and must not be
+    demoted to a warmup label — 5DSbdiac held 12.2% of the HF pool while LF-immune
+    on 2026-08-20.
+
+    There is deliberately no "struck" here. Elimination and the strike counter are
+    mecid-0 machinery; HF's no-cliff design retires a bad miner by decaying its
+    tally to zero (hf.py, hf_compute_weights) rather than by striking it. Emitting
+    a status this mechanism cannot actually reach would be a label with no
+    referent.
+    """
+    if qualified:
+        return "qualified"
+    if now < immune_until.get(hk, 0.0):
+        return "immune"
+    return "building"
+
+
 # Tier classification — identical to the LF path (classify_signals_tiers.py) and
 # the validator scoring, so an HF tier means the same thing as a main-program one.
 def _wilson_lb(won: int, n: int) -> float:
@@ -837,6 +894,7 @@ def main() -> int:
     value_by_hk = _value_by_hk(decisive_by_hk, graded_by_hk, eligible_from, now)
 
     registered = _registered_hotkeys()
+    immune_until = _immune_until()
     if not registered:
         print("!! no registered-hotkey set (chain unreachable, no cache) — "
               "REFUSING to write an unfiltered board; leaving the last snapshot")
@@ -1030,7 +1088,7 @@ def main() -> int:
             # "sealed awaiting reveal" — washes live in the per-pair breakdown.
             "sn89_won": won, "sn89_lost": lost, "sn89_sealed": 0,
             "sn89_pending": a["pending"],
-            "sn89_status": ("qualified" if qualified else "not qualified"),
+            "sn89_status": _hf_status(qualified, hk, immune_until, now),
             "sn89_tier": tier, "sn89_conf_hit_pct": conf,
             "sn89_assets": sorted(assets_by.get(hk, {}).values(),
                                   key=lambda x: -x["n"]),
