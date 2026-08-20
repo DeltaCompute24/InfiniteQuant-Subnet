@@ -1045,6 +1045,8 @@ def hf_diversity_ok(subs, now: float) -> bool:
     """`hf_diversity(...)["ok"]` — the gate as the weight path consumes it."""
     return bool(hf_diversity(subs, now)["ok"])
 
+from .integrity import integrity_ok  # noqa: E402
+
 MECID_1 = 1
 
 # ── self-hosted miner submission ─────────────────────────────────────────────
@@ -1145,6 +1147,13 @@ def hf_compute_weights(decisive_by_hk: dict, first_seen_by_hk: dict,
                 continue                         # < 50 subs or < 8 trading days → no weight
             if not hf_diversity_ok(subs, now):
                 continue                         # one-sided on a narrow universe → no weight
+            # Owner-hosted integrity verdict. ADDITIVE to the gate above, deliberately:
+            # the published floor stays exactly where it is, so a miner tuning to clear it
+            # keeps spending calls on a threshold that no longer saves them, while the
+            # detection that actually catches a coordinated cohort is not readable here.
+            # See sn89_signals/integrity.py for why the rule is not in this repo.
+            if not integrity_ok(hk, now):
+                continue                         # flagged by the integrity service
             rep_won, rep_dec, won_all, _won_orig, _copies, tw = scoring.score_inputs(
                 decisive, eligible, now)
             qwins = scoring.qualified_wins(
@@ -1191,6 +1200,8 @@ def hf_compute_tallies(decisive_by_hk: dict, first_seen_by_hk: dict,
                 continue
             if not hf_diversity_ok(subs, now):
                 continue
+            if not integrity_ok(hk, now):
+                continue                         # flagged by the integrity service
             qwins = scoring.qualified_wins(
                 decisive, eligible, habitual=False,
                 graded=(graded_by_hk or {}).get(hk))
