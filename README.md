@@ -350,6 +350,41 @@ export SN89_TLD_FALLBACK_PYTHON=$PWD/.venv-tl001/bin/python
 A blob that opens under **either** version is graded normally; only one that
 fails both is voided.
 
+### Seeding a new or damaged validator from the checkpoint
+
+A validator that starts today sees only what happens from the moment it turns on.
+There is no live catch-up by design (see `docs/single-validator-model.md`), so it
+pays LF miners nothing until each re-earns `QUALIFY_MIN_DECISIVE` from scratch —
+on observed rates 6 to 28 days, losing VTRUST throughout. The same applies to a
+validator whose journal was damaged.
+
+Seed it from the published journal instead:
+
+```bash
+sudo systemctl stop sn89-validator          # never import into a live DB
+python3 scripts/import_checkpoint.py \
+    https://partner.infinitequant.app/sn89/checkpoint.json \
+    --db ~/.sn89/validator.db --anchors 50
+sudo systemctl start sn89-validator
+```
+
+What it checks before writing anything:
+
+| tier | what it proves | how |
+|---|---|---|
+| no altered signals | the plaintext is what the miner committed | `sha256(plaintext)` vs the on-chain `commit_hex` — the commitment carries no salt, so this is checkable offline by anyone. A row that fails is refused. |
+| no fabricated signals | the commitment is really on chain | `--anchors N` reads each back at its `commit_block`. Needs an **archive node**; a pruned node returns nothing, which is reported as *unreadable*, never as a mismatch. |
+| grades | **not verified** | outcomes are imported as published. Re-grade against your own price feed before treating them as yours. |
+
+Measured 2026-08-20: 5290 of 5290 published plaintexts verify, and a journal
+imported from the public URL into an empty database reproduced the authoritative
+validator's committed vector across 71 uids with 2 differing by more than 1e-3
+(worst 0.0016, both HF participants).
+
+`first_seen_unix` — the 8-day immunity clock — is imported deliberately. It is
+observational, the instant a validator first saw a hotkey, and deriving it
+locally would restart every miner's warmup and defeat the point.
+
 ### Delegate via child-key (recommended)
 
 Skip the market-data plan — delegate to the authoritative validator:
