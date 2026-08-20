@@ -374,15 +374,35 @@ pays LF miners nothing until each re-earns `QUALIFY_MIN_DECISIVE` from scratch �
 on observed rates 6 to 28 days, losing VTRUST throughout. The same applies to a
 validator whose journal was damaged.
 
-Seed it from the published journal instead:
+This is a DELIBERATE, ONE-TIME step. `run.sh`'s auto-updater will never do it —
+it pulls code, reinstalls dependencies when `requirements.txt` changes, and
+restarts. It does not touch your journal, and should not: seeding a database is
+not something that should happen behind an operator's back.
 
 ```bash
 sudo systemctl stop sn89-validator          # never import into a live DB
+cp ~/.sn89/validator.db ~/.sn89/validator.db.bak.$(date -u +%Y%m%dT%H%M%SZ)
+
+python3 scripts/import_checkpoint.py \
+    https://partner.infinitequant.app/sn89/checkpoint.json \
+    --db ~/.sn89/validator.db --anchors 50 --dry-run   # inspect first
+
 python3 scripts/import_checkpoint.py \
     https://partner.infinitequant.app/sn89/checkpoint.json \
     --db ~/.sn89/validator.db --anchors 50
 sudo systemctl start sn89-validator
 ```
+
+Take the backup. The import updates rows in place and preserves every field it
+does not own, but an earlier version used `INSERT OR REPLACE` and nulled
+`t0_ms`, `blob_json`, `entry_price`, `outcome_bps` and `exit_reason` on every
+row it touched — caught only because it was tested against a populated journal
+rather than an empty one. A copy costs seconds.
+
+`--dry-run` verifies and reports without writing, so run it first and read the
+counts. Then watch the next weight commit: `earners: lf=` in the validator log
+should jump, because the miners whose calls were unreadable now carry their
+decayed win tallies again.
 
 What it checks before writing anything:
 
