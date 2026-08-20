@@ -1001,5 +1001,67 @@
     "tp_bps": 184
    }
   }
+ },
+ {
+  "version": "fxpoll3-20260821",
+  "effective_from_unix": 1787270400,
+  "note": "Forex board rebuilt from the MINER POLL (pair_poll_votes, poll_id fx-board-2026-08d, 24 voters, 2026-08-15..18, ballot of 14 crosses, max 3 picks each). Adds EURUSD (17 votes, 70.8% of voters), keeps AUDUSD (14) and USDCAD (10), drops USDCHF (4 votes, rank 5 of 11 pairs that drew any vote). This REVERSES half of fxmacro3-20260813, which selected by macro character and dropped EURUSD deliberately as carry/rate-differential structure rather than a hard-asset channel. That reversal is intentional and is Whit's call: miners trade the pairs they actually read. Poll integrity: 20 of the 24 voters have submitted LF calls and all 20 have submitted FX calls, and excluding the 4 non-participants does not change the ranking. Weighting the same ballot by graded FX volume instead ranks AUDUSD first and EURUSD second, with NZDUSD fourth -- the headline EURUSD/GBPUSD result is driven by lighter voters -- and that weighting was considered and set aside. BAND CHANGES, two of three: EURUSD lists at 17 bps (solver raw 17.32, wash 38.9%) and USDCAD moves 20 -> 17 bps because 20 was washing 53.5% against a 40% target, far outside the 7pp deadband, and -15% is inside the 20% per-cycle rate limit. AUDUSD is UNCHANGED at 28: it washes 43.4%, inside the deadband, so the solver itself would hold it. All solved on scripts/recalibrate_bands.py's own solver over its 45d window 2026-07-06..2026-08-20 with the hour-21 FX rollover excluded; crypto and metals are untouched. HF is NOT changed by this entry: AUDUSD stays the only FX pair on the HF board at 8.4 bps, and EURUSD is LF-ONLY -- it solves to 4.7 bps and clears the 8.0x band/spread gate on the spread p50 and p75 but reaches only 7.75x on the p90, and a listing that depends on which estimator you picked is a listing whose outcomes are microstructure (the same bar fxmacro3 applied to USDCAD and USDCHF). USDCAD 4.5 bps fails all three (7.9/4.9/2.4). Dropped USDCHF keeps grading normally for every call committed before this entry's effective_from_unix -- narrowing is the safe asymmetry, and the tick recorder unions the live board with its fallback so USDCHF ticks keep being recorded and anchored for in-flight calls.",
+  "bands": {
+   "BTCUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 105,
+    "tp_bps": 105
+   },
+   "ETHUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 138,
+    "tp_bps": 138
+   },
+   "SOLUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 134,
+    "tp_bps": 134
+   },
+   "XRPUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 123,
+    "tp_bps": 123
+   },
+   "XAUUSD": {
+    "asset_class": "forex-commodities",
+    "sl_bps": 96,
+    "tp_bps": 96
+   },
+   "XAGUSD": {
+    "asset_class": "forex-commodities",
+    "sl_bps": 195,
+    "tp_bps": 195
+   },
+   "USDCAD": {
+    "asset_class": "forex",
+    "sl_bps": 17,
+    "tp_bps": 17
+   },
+   "AUDUSD": {
+    "asset_class": "forex",
+    "sl_bps": 28,
+    "tp_bps": 28
+   },
+   "TAOUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 165,
+    "tp_bps": 165
+   },
+   "HYPEUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 184,
+    "tp_bps": 184
+   },
+   "EURUSD": {
+    "asset_class": "forex",
+    "sl_bps": 17,
+    "tp_bps": 17
+   }
+  }
  }
 ]

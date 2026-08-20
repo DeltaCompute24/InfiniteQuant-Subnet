@@ -35,7 +35,14 @@ T_ARMED_MIDWEEK = _ts("2026-08-12T09:00:00Z")
 # tests below started failing on a void reason that had nothing to do with the calendar.
 # The historical rows keep GBPUSD — it was on the board on 2026-08-07 and rewriting a
 # fixture that reproduces a real incident would defeat the point of it.
-PAIR_LIVE = "USDCHF"
+#
+# PAIR_LIVE has now stranded TWICE: GBPUSD left on the fxmacro3-20260813 narrowing, and
+# USDCHF left on fxpoll3-20260821 when the board was rebuilt from the miner poll. Pick a
+# pair the board is least likely to drop — AUDUSD survived both, and it is the only FX
+# pair that also holds an HF listing, so dropping it would be a much larger decision
+# than a re-band. The guard below is what turns the next stranding into a named failure
+# instead of a mysterious void reason.
+PAIR_LIVE = "AUDUSD"
 PAIR_HISTORICAL = "GBPUSD"
 
 
