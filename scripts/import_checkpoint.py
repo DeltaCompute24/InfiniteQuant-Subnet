@@ -140,20 +140,46 @@ def seed(db_path: str, cp: dict, signals: list) -> dict:
     db.executescript(SEED_SCHEMA)
     n_sig = n_meta = n_ref = 0
     for s in signals:
+        # ON CONFLICT DO UPDATE, never INSERT OR REPLACE.
+        #
+        # REPLACE deletes the row and reinserts it, so every column the checkpoint
+        # does not carry is silently nulled. Measured 2026-08-20 against a
+        # populated journal: t0_ms 5340 rows -> 1, blob_json 5324 -> 1,
+        # entry_price 5190 -> 0, outcome_bps 4008 -> 0, exit_reason 4053 -> 0.
+        # The whole point of this script is repairing a DAMAGED validator, and a
+        # repair that destroys the ms-precise T0 that board resolution and entry
+        # pricing key on -- plus every miner's ciphertext -- is worse than the
+        # damage. It was invisible in testing because the first test seeded an
+        # EMPTY database, where there is nothing to overwrite.
+        #
+        # So: update only the fields this file owns, and COALESCE the rest so a
+        # local value survives when the checkpoint has none.
         db.execute(
-            "INSERT OR REPLACE INTO signals (commit_hex, hotkey, round, url_tag, "
-            "first_seen_block, commit_block, t0_unix, plaintext, status, "
-            "exit_at_ms, is_copy) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO signals (commit_hex, hotkey, round, url_tag, "
+            "first_seen_block, commit_block, t0_unix, t0_ms, plaintext, status, "
+            "void_reason, exit_at_ms, is_copy) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(commit_hex) DO UPDATE SET "
+            "  status       = excluded.status, "
+            "  void_reason  = excluded.void_reason, "
+            "  plaintext    = COALESCE(excluded.plaintext, signals.plaintext), "
+            "  commit_block = COALESCE(excluded.commit_block, signals.commit_block), "
+            "  t0_ms        = COALESCE(excluded.t0_ms, signals.t0_ms), "
+            "  exit_at_ms   = COALESCE(excluded.exit_at_ms, signals.exit_at_ms), "
+            "  is_copy      = excluded.is_copy",
             (s["commit_hex"], s["hotkey"], int(s.get("round") or 0), "",
              int(s["commit_block"]) if s.get("commit_block") else 0,
-             s.get("commit_block"), float(s["t0_unix"]), s.get("plaintext"),
-             s.get("status") or "sealed", s.get("exit_at_ms"),
+             s.get("commit_block"), float(s["t0_unix"]), s.get("t0_ms"),
+             s.get("plaintext"), s.get("status") or "sealed",
+             s.get("void_reason"), s.get("exit_at_ms"),
              int(s.get("is_copy") or 0)))
         n_sig += 1
     for hk, m in (cp.get("meta") or {}).items():
+        # Same rule: eliminated_t0 lives only in the local DB and must survive.
         db.execute(
-            "INSERT OR REPLACE INTO hotkey_meta (hotkey, first_seen_unix, strikes) "
-            "VALUES (?,?,?)",
+            "INSERT INTO hotkey_meta (hotkey, first_seen_unix, strikes) "
+            "VALUES (?,?,?) ON CONFLICT(hotkey) DO UPDATE SET "
+            "  first_seen_unix = excluded.first_seen_unix, "
+            "  strikes         = excluded.strikes",
             (hk, float(m["first_seen_unix"]), int(m.get("strikes") or 0)))
         n_meta += 1
     for r in (cp.get("referrals") or []):

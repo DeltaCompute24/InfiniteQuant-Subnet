@@ -40,10 +40,14 @@ def main():
         # normalisation of a whole commit by 11% (2026-08-19).
         {"commit_hex": ch, "hotkey": hk, "t0_unix": t0, "status": st,
          "is_copy": int(cp or 0), "plaintext": pt, "commit_block": cb,
-         "round": rnd, "exit_at_ms": ex}
-        for ch, hk, t0, st, cp, pt, cb, rnd, ex in con.execute(
+         "round": rnd, "exit_at_ms": ex, "t0_ms": tms, "void_reason": vr}
+        # t0_ms is the ms-precise T0 from the commit block's Timestamp pallet and
+        # is what board-resolution and entry pricing key on; t0_unix alone loses
+        # that precision. void_reason travels with a void so an importer can heal
+        # one row without inventing a reason for another.
+        for ch, hk, t0, st, cp, pt, cb, rnd, ex, tms, vr in con.execute(
             "SELECT commit_hex, hotkey, t0_unix, status, is_copy, plaintext, "
-            "commit_block, round, exit_at_ms FROM signals")
+            "commit_block, round, exit_at_ms, t0_ms, void_reason FROM signals")
     ]
     meta = {
         hk: {"first_seen_unix": fs, "strikes": int(sk or 0)}
