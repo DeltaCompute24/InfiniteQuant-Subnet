@@ -37,6 +37,33 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from sn89_signals import hf
 
 BUS = os.getenv("IQ_TICKBUS_URL", "http://127.0.0.1:18774")
+
+# ── GRADED CRYPTO SERIES: Hyperliquid (cutover 2026-08-20, Whit) ─────────────
+# The bus serves two crypto series. Polygon's XT is an AGGREGATE of every venue,
+# published as best-bid-across-venues vs best-ask-across-venues, so it prints
+# spreads that are not tradeable at any single book. Hyperliquid is ONE real
+# book, and it is where PTN/Vanta actually scores crypto fills — so grading
+# there removes the basis between the line we grade on and the line a miner's
+# signal is executed against.
+#
+# The parameter reaches ONLY crypto: the bus falls through to Polygon for FX and
+# metals, which are not on Hyperliquid at all. So this one flag gives
+# HL-for-crypto and Polygon-for-everything-else with no per-asset branching here.
+#
+# ⚠ This was NOT safe until the same day. The HL leg subscribed to l2Book only —
+# a ~5s book-snapshot cadence giving 18 ticks/90s for EVERY pair against
+# Polygon's 315 on BTCUSD — and its `price` was the book MID, which a wick can
+# trade through without ever moving to. Grading is touch_ticks and needs
+# MIN_TOUCH_TICKS distinct ticks to TOUCH a level, so both would have pushed
+# outcomes toward WASH. The bus now also subscribes to HL `trades`: BTCUSD
+# 18 -> 152, ETHUSD 18 -> 127, HYPEUSD 18 -> 185 per 90s.
+#
+# Replay stays correct across the boundary WITHOUT an as-of constant, because
+# the tick series itself is published and Merkle-anchored per window: a replayer
+# grades off the ticks that were anchored at the time, whatever venue produced
+# them. The `s` field below makes each window say which venue that was.
+TICK_SOURCE = os.getenv("SN89_TICK_SOURCE", "hyperliquid")
+TICK_SOURCE_Q = f"?source={TICK_SOURCE}" if TICK_SOURCE else ""
 OUT_DIR = Path(os.getenv("SN89_HF_TICK_DIR", "/var/lib/sn89-hf/ticks"))
 POLL_MS = int(os.getenv("SN89_HF_TICK_POLL_MS", "50"))
 # Cover BOTH boards. Once mechanism 0 moves to touch-on-ticks it grades off this
@@ -114,7 +141,7 @@ class TickRecorder:
 
     def poll_once(self) -> int:
         try:
-            with urllib.request.urlopen(f"{BUS}/ticks", timeout=2) as r:
+            with urllib.request.urlopen(f"{BUS}/ticks{TICK_SOURCE_Q}", timeout=2) as r:
                 ticks = json.loads(r.read()).get("ticks", {})
         except Exception:
             return 0
@@ -137,7 +164,15 @@ class TickRecorder:
                 self.late += 1
                 continue
             self.last_src[a] = src
+            # `s` records WHICH venue produced this print. hf.tick_bytes hashes
+            # only ("a","t","p"), so this cannot move tick_root or any anchor —
+            # it is pure provenance. Without it the published history gives a
+            # replayer no way to tell a Polygon window from a Hyperliquid one
+            # across the 2026-08-20 cutover, which is exactly the question they
+            # would need to answer to reproduce a grade near the boundary.
             rec = {"a": a, "t": src, "p": float(price)}
+            if d.get("source"):
+                rec["s"] = str(d["source"])
             if d.get("bid") is not None:
                 rec["b"] = float(d["bid"])
             if d.get("ask") is not None:
