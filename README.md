@@ -307,15 +307,31 @@ Reveals still take 2 h; grading follows each call's horizon.
 
 Requirements:
 
-1. **Market data** — a paid [Massive](https://massive.com) (Polygon) plan: Currencies + Crypto feeds, 1-second and 1-minute aggregates. The free tier cannot grade.
-2. **Validator permit** — the hotkey must be staked into the validator set, or weight commits never reveal.
+1. **Validator permit** — the hotkey must be staked into the validator set, or weight commits never reveal.
+2. **No market-data subscription.** Nothing else is needed.
 
 ```bash
-export POLYGON_API_KEY=…
 bash run.sh validator --wallet.name myvali --wallet.hotkey vali    # auto-updater (recommended)
 ```
 
-State: `~/.sn89/validator.db`. Grading is deterministic — same chain + same market data ⇒ same weights. **Run the current release**: grading code is consensus; a stale validator diverges and loses VTRUST.
+**You do not need a market-data key.** This section used to require a paid Massive
+(Polygon) plan and `export POLYGON_API_KEY=…`, and that instruction was stale from
+2026-07-25, when the grading rule became `touch_ticks`. Grading now reads the
+Merkle-anchored tick series published at `SN89_HF_PUBLIC_BASE` over plain HTTPS with
+no authentication — `grader._grade_touch_ticks` fetches it, and the anchor on chain
+is what makes it trustworthy rather than the vendor it came from. Every validator
+therefore grades the *same* prices, which is the point: a private feed would make
+two honest validators disagree.
+
+`POLYGON_API_KEY` is now optional and affects one thing only: replaying calls whose
+t0 predates 2026-07-25, which grade under the older `close_1m` substrate and do need
+1-minute aggregates. A validator running today's board never reaches that path.
+
+There has never been a Taostats key in this package — it appears nowhere outside the
+vendored `bittensor_cli`, which only uses it as a block-explorer URL.
+
+State: `~/.sn89/validator.db`. Grading is deterministic — same chain + same anchored
+ticks ⇒ same weights. **Run the current release**: grading code is consensus; a stale validator diverges and loses VTRUST.
 
 ### Timelock version compatibility — READ THIS IF VTRUST IS FALLING
 
