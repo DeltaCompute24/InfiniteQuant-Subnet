@@ -22,6 +22,12 @@ T0 = hf.HF_LAUNCH_FROM * 1000 + 3_600_000
 HORIZON_S = 7200
 END = T0 + HORIZON_S * 1000
 SETTLE_MS = hf_grade.GRADE_SETTLE_S * 1000
+# What the EARLY probe may read up to. Deliberately a different constant from
+# SETTLE_MS: the horizon pass waits out GRADE_SETTLE_S because an unsettled tail
+# manufactures false washes, while a decisive read only needs the tick to be
+# FROZEN — which happens once its window seals, at worst ANCHOR_WINDOW_S plus the
+# recorder's seal grace after the tick's own timestamp.
+EARLY_MS = hf_grade.EARLY_SETTLE_S * 1000
 
 
 def _entry_px():
@@ -113,13 +119,33 @@ class TestEarlyDecisive:
         assert pend == 0
 
     def test_a_touch_beyond_the_settle_point_is_not_read(self, monkeypatch, cache):
-        """Only the SETTLED span may decide. A touch after it must wait."""
+        """Only a FROZEN span may decide. A touch newer than the seal must wait.
+
+        A tick still inside an unsealed window can be reordered by a late tick
+        carrying an earlier src_ts, which on a marginal call is the difference
+        between won and lost. So the probe must not read it yet.
+        """
         _seed_pending(cache)
         touch = T0 + 3_600_000
-        now = touch - 60_000 + SETTLE_MS         # settle point is BEFORE the touch
+        now = touch - 60_000 + EARLY_MS          # read bound is BEFORE the touch
         rows, pend = _run(monkeypatch, cache, _ticks(touch_at_ms=touch), now)
         assert rows == []
         assert pend == 1
+
+    def test_a_touch_older_than_the_seal_is_read(self, monkeypatch, cache):
+        """The complement, and the reason the bound is one window and not 900s.
+
+        This is the case a real trader hit on 2026-08-20: an AUDUSD SHORT decided
+        at 16:29:53 that the board did not show until ~16:50, because the probe
+        was refusing to read anything newer than 15 minutes. Once the deciding
+        tick's window is sealed there is nothing left to wait for.
+        """
+        _seed_pending(cache)
+        touch = T0 + 3_600_000
+        now = touch + 60_000 + EARLY_MS          # read bound is AFTER the touch
+        rows, pend = _run(monkeypatch, cache, _ticks(touch_at_ms=touch), now)
+        assert [r[1] for r in rows] == ["won"], rows
+        assert pend == 0
 
     def test_a_tick_gap_blocks_an_early_grade(self, monkeypatch, cache):
         """A hole could hide the FIRST touch, which is the one that decides."""

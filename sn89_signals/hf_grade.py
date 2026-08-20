@@ -69,6 +69,24 @@ EARLY_DECISIVE = os.getenv("SN89_HF_EARLY_DECISIVE", "1") == "1"
 # Don't probe a call until it has this much SETTLED series behind it — a call
 # submitted seconds ago has nothing to read and would refetch windows every tempo.
 EARLY_MIN_SPAN_S = int(os.getenv("SN89_HF_EARLY_MIN_SPAN_S", "60"))
+# How far behind NOW the early probe may READ. This is not GRADE_SETTLE_S, and the
+# difference is the whole point.
+#
+# GRADE_SETTLE_S is 15 minutes because a series that is still arriving produces
+# false WASHES — 41 of the 42 misgrades in the 07-24..07-26 corpus were exactly
+# that. A DECISIVE read has no such exposure: hf.grade walks in time order and
+# returns at the first level to take MIN_TOUCH_TICKS touches, so a truncated
+# series can only ever MISS a touch, never invent one. The early path already
+# refuses to write wash or void, so it was carrying a 15-minute margin against a
+# failure mode it cannot have.
+#
+# What a decisive read actually needs is the newest SEALED window: ANCHOR_WINDOW_S
+# plus the recorder's SEAL_GRACE_MS, after which the window's contents are frozen
+# and cannot be reordered by a late tick carrying an earlier src_ts. That bound is
+# ~185 s, not 900. Measured 2026-08-20 on a real trader's calls: a call decided at
+# 16:29:53 did not appear until ~16:50, and the trader reported the chart as broken
+# because it kept rendering a position that had already won.
+EARLY_SETTLE_S = int(os.getenv("SN89_HF_EARLY_SETTLE_S", str(hf.ANCHOR_WINDOW_S + 5)))
 
 
 def _fetch_text(url: str, timeout: float = 15.0, attempts: int = 1) -> str | None:
@@ -400,13 +418,20 @@ def sync_and_grade(base: str, cache_dir: str, now: float) -> None:
     # so a call is only ever handled by one pass. The t0 bound skips calls too fresh
     # to have any readable series yet.
     if EARLY_DECISIVE:
-        settled_to = now_ms - GRADE_SETTLE_S * 1000
+        # The PARTITION between the two passes stays keyed on GRADE_SETTLE_S, so a
+        # call is still handled by exactly one of them and this remains the exact
+        # complement of the `due` query above.
+        partition = now_ms - GRADE_SETTLE_S * 1000
+        # What the probe READS is a separate question from which rows it owns, and
+        # conflating the two is what made a decided call invisible for 15 minutes.
+        # walk_to is the newest frozen window; see EARLY_SETTLE_S.
+        walk_to = now_ms - EARLY_SETTLE_S * 1000
         early = db.execute(
             "SELECT key, hk, t0_ms, pair, direction, end_ms FROM pending "
             "WHERE end_ms > ? AND t0_ms <= ? ORDER BY t0_ms, key",
-            (settled_to, settled_to - EARLY_MIN_SPAN_S * 1000)).fetchall()
+            (partition, walk_to - EARLY_MIN_SPAN_S * 1000)).fetchall()
         for row in early:
-            _resolve_pending(db, base, tick_dir, row, now_ms, walk_to=settled_to)
+            _resolve_pending(db, base, tick_dir, row, now_ms, walk_to=walk_to)
 
     db.commit()
     db.close()
