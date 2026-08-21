@@ -101,7 +101,13 @@ def weights_from_journal(
         for s in signals:
             if s["hotkey"] == hk and s["status"] in ("won", "lost"):
                 cp = is_copy_by_commit.get(s["commit_hex"], bool(s.get("is_copy", 0)))
-                decisive.append((s["t0_unix"], s["status"] == "won", bool(cp)))
+                # 4th element = journaled resolution time (exit_at_ms -> seconds).
+                # qualified_wins needs it to build a CAUSAL as-of window; without
+                # it every row falls back to legacy treatment. None is honest here
+                # and is handled as "unknown" rather than guessed either way.
+                _ex = s.get("exit_at_ms")
+                decisive.append((s["t0_unix"], s["status"] == "won", bool(cp),
+                                 (float(_ex) / 1000.0) if _ex else None))
         rep_won, rep_dec, won_all, won_orig, copies, td = scoring.score_inputs(
             decisive, m["first_seen_unix"], now)
         # copy penalty: shadow-gated, and a LOUD SHORT-LIVED warning — it bites only
@@ -177,8 +183,10 @@ def referrer_recruit_tallies(
             continue
         graded_by.setdefault(hk, []).append((s["t0_unix"], st == "washed"))
         if st != "washed":
+            _ex = s.get("exit_at_ms")          # causal as-of window, see qualified_wins
             decisive_by.setdefault(hk, []).append(
-                (s["t0_unix"], st == "won", bool(s.get("is_copy", 0))))
+                (s["t0_unix"], st == "won", bool(s.get("is_copy", 0)),
+                 (float(_ex) / 1000.0) if _ex else None))
 
     out: dict[str, float] = {}
     for hk, decisive in decisive_by.items():

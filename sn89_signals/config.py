@@ -230,6 +230,55 @@ SCORE_WINDOW_S = 30 * 24 * 3600     # ELIMINATION / reporting window: the traili
 # emissions must follow current trading, and a stale book cannot coast.
 EMISSION_DECAY_S = int(os.getenv("SN89_EMISSION_DECAY_S", str(7 * 24 * 3600)))
 
+# CAUSAL qualified-win window. A win banks only if the miner passed the gate "as
+# of" that win -- but the as-of window was built from every decisive call with an
+# EARLIER t0, resolved or not, and a call's outcome is not knowable at its own t0.
+# So the window folded in the outcomes of positions that were still OPEN when the
+# win was made. Two consequences, both live until this was armed:
+#
+#   1. LOOKAHEAD. The gate answers "would we have acted on this call", and the
+#      act-side gate (tier-sync -> standing.meets_gate) uses outcomes graded so
+#      far, which is causal. The pay-side gate used the future. The acausal set is
+#      a strict SUPERSET of the causal one -- any call that had exited before t0
+#      also opened before t0 -- so the error only ever ADDS unresolved outcomes.
+#      Systematically biased against miners holding overlapping positions.
+#   2. RETROACTIVE UN-BANKING. qualified_wins re-derives every verdict each cycle
+#      from a t0-sorted list, so a loss that OPENS before a banked win and GRADES
+#      after it is inserted behind that win and flips its verdict. The banked win
+#      is erased and the tally drops to zero in one cycle -- exactly the cliff the
+#      7-day linear decay exists to prevent, and a direct contradiction of
+#      compute_weights' documented invariant that a loss "can only un-qualify the
+#      miner (freezing accrual of FUTURE qualified wins), never erase banked ones".
+#      That invariant only ever held if grading happened in t0 order. It does not:
+#      horizons differ, so a call opened earlier routinely grades later.
+#
+# Measured 2026-08-21 on 5Ct3Nn (user179), who reported it: the SOLUSD win
+# (t0 08-20 06:55, graded 08:15) banked at 9W/4L lb 51.5% and paid 2.49-2.89%
+# weight for 3h50m. At 12:11 the XAGUSD LOSS graded -- t0 08-20 02:09, i.e. 4h46m
+# BEFORE that win and still an open position when it was made. Next cycle the
+# win's window became 9W/5L lb 47.2%, the win un-banked, tally 0.81 -> 0.00,
+# weight -> 0. He also lost the probation dust floor, which keys off the same
+# re-derived list. Fleet-wide: 73 such loss-after-win t0 inversions across 31
+# miners since 2026-07-01, most eroding a tally rather than zeroing it.
+#
+# The fix: build the as-of window from calls that had RESOLVED by t0 (exit_at_ms,
+# already journaled and already the point-in-time key audit_journal.py uses), not
+# from calls that had merely OPENED by t0. Still a pure function of the journal,
+# so replay parity holds. A row with no exit_at_ms keeps legacy treatment -- 16
+# old rows have none, and audit_journal leaves those alone for the same reason:
+# absent a timestamp, either assumption is a guess.
+#
+# AS-OF, judged by the WIN's own t0, like every other versioned rule here: wins
+# placed before this stamp keep the verdict they were given, so arming it does not
+# re-score history or re-shuffle past payouts. Horizons run to 72h, so the field
+# converges on the new rule over the ~3 days after arming.
+CAUSAL_QWIN_FROM = int(os.getenv("SN89_CAUSAL_QWIN_FROM", "1787338800"))  # 2026-08-21T19:00:00Z
+
+
+def causal_qwin_enforced_as_of(t0_unix: float) -> bool:
+    """Whether a win at t0 has its qualify window built from RESOLVED outcomes."""
+    return bool(CAUSAL_QWIN_FROM and t0_unix >= CAUSAL_QWIN_FROM)
+
 # Hit-rate REPUTATION window. The qualify gate and the per-win tier are computed
 # over a ROLLING window — the trailing HIT_RATE_WINDOW_S, capped at the most
 # recent HIT_RATE_WINDOW_TRADES decisive outcomes (whichever is tighter) — NOT

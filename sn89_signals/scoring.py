@@ -265,8 +265,8 @@ def copy_gate_inputs(decisive: list[tuple[float, bool, bool]],
     """
     cutoff = now_unix - config.COPY_WINDOW_S
     rows = [d for d in decisive if d[0] >= cutoff]
-    copies = sum(1 for _, _, cp in rows if cp)
-    last_cp = max((t for t, _, cp in rows if cp), default=None)
+    copies = sum(1 for d in rows if d[2])
+    last_cp = max((d[0] for d in rows if d[2]), default=None)
     return copies, len(rows), last_cp
 
 
@@ -681,11 +681,12 @@ def score_inputs(decisive: list[tuple[float, bool, bool]], first_seen_unix: floa
     # regardless of the caller's row order).
     recent = sorted((d for d in decisive if d[0] >= rep_cutoff), key=lambda d: d[0])
     recent = recent[-config.hit_rate_window_trades_as_of(now_unix):]
-    rep_wins = sum(1 for _, won, _ in recent if won)
+    rep_wins = sum(1 for d in recent if d[1])
     rep_decisive = len(recent)
 
     tw_all = tw_orig = tcopies = tdec = 0
-    for t0, won, is_copy in decisive:
+    for d in decisive:
+        t0, won, is_copy = d[0], d[1], d[2]
         if t0 >= score_cutoff:
             tdec += 1
             if is_copy:
@@ -952,19 +953,43 @@ def _qualifies(rep_wins: int, rep_decisive: int) -> bool:
     return is_qualified_legacy(rep_wins, rep_decisive)
 
 
-def qualified_wins(decisive: list[tuple[float, bool, bool]], first_seen_unix: float,
+def _resolved_by(row: tuple, t0_unix: float) -> bool:
+    """Had this decisive row's outcome become KNOWN by t0_unix?
+
+    `row` is (t0, won, is_copy[, resolved_unix]). resolved_unix is the journaled
+    exit_at_ms in seconds — when the status became final. A row without one keeps
+    LEGACY treatment (counted as known), matching scripts/audit_journal.py: absent
+    a timestamp there is nothing to reconstruct from and either assumption is a
+    guess. 16 such rows exist and are old and long-settled.
+    """
+    resolved = row[3] if len(row) > 3 else None
+    return True if resolved is None else float(resolved) <= t0_unix
+
+
+def qualified_wins(decisive: list[tuple], first_seen_unix: float,
                    habitual: bool = False,
                    graded: list[tuple[float, bool]] | None = None
                    ) -> list[tuple[float, float]]:
     """Post-warmup WINs the miner earned WHILE QUALIFIED, each tagged with the
     point-in-time tier weight (≥ 1.0). PURE / deterministic.
 
-    A win at t0 counts iff the miner's reputation-window hit-rate AS OF t0 (the
-    trailing HIT_RATE_WINDOW_S ending at t0, capped at HIT_RATE_WINDOW_TRADES most
-    recent decisive outcomes, the win itself included) passes the qualify gate —
-    "a qualified win." A win earned while unqualified is skipped and never earns.
-    The weight is the tier the miner held at that moment (WOLF 2× / SHARP 1.2× /
-    base 1×), floored at 1.0 so a gate-passing win always counts at least base.
+    A win at t0 counts iff the miner's reputation-window hit-rate AS OF t0 passes
+    the qualify gate — "a qualified win." A win earned while unqualified is
+    skipped and never earns. The weight is the tier the miner held at that moment
+    (WOLF 2× / SHARP 1.2× / base 1×), floored at 1.0 so a gate-passing win always
+    counts at least base.
+
+    AS OF t0 means CAUSALLY as of t0, from config.CAUSAL_QWIN_FROM: the window is
+    the trailing HIT_RATE_WINDOW_S of decisive outcomes that had already RESOLVED
+    by t0 (plus the win itself), capped at HIT_RATE_WINDOW_TRADES most recent.
+    Before that stamp it was every decisive call with an earlier t0 whether or not
+    it had resolved — which read the outcomes of positions still OPEN at t0, and
+    let a loss that opened before a win but graded after it reach back and erase a
+    win already banked and paying. See config.CAUSAL_QWIN_FROM for the measurement.
+
+    `decisive` rows are (t0, won, is_copy) or (t0, won, is_copy, resolved_unix).
+    Callers that can supply the journaled resolution time SHOULD — without it
+    every row falls back to legacy treatment and the causal window is a no-op.
 
     LOSSES never appear in the output; they influence a win's qualification only
     through the hit-rate they contribute to the window up to that point. This is
@@ -976,15 +1001,22 @@ def qualified_wins(decisive: list[tuple[float, bool, bool]], first_seen_unix: fl
     warmup_end = first_seen_unix + config.IMMUNITY_S
     dec = sorted(decisive, key=lambda d: d[0])
     out: list[tuple[float, float]] = []
-    for i, (t0, won, cp) in enumerate(dec):
+    for i, row in enumerate(dec):
+        t0, won, cp = row[0], row[1], row[2]
         if not won or t0 < warmup_end or (habitual and cp):
             continue
         rep_cut = t0 - config.HIT_RATE_WINDOW_S
         # cap resolved at THIS win's t0 — a win that scored under the old cap keeps
         # the verdict it was given, exactly like the bands
-        window = [d for d in dec[:i + 1] if d[0] >= rep_cut][
-            -config.hit_rate_window_trades_as_of(t0):]
-        rw = sum(1 for _, w2, _ in window if w2)
+        if config.causal_qwin_enforced_as_of(t0):
+            # dec[:i] and not dec, because resolution always postdates a row's own
+            # t0: anything resolved by this t0 necessarily opened before it.
+            window = [d for d in dec[:i] if d[0] >= rep_cut and _resolved_by(d, t0)]
+            window.append(row)                       # the win itself always counts
+        else:
+            window = [d for d in dec[:i + 1] if d[0] >= rep_cut]
+        window = window[-config.hit_rate_window_trades_as_of(t0):]
+        rw = sum(1 for d in window if d[1])
         rd = len(window)
         if _qualifies(rw, rd):
             # Efficiency is applied OUTSIDE the max(1.0, ...) floor on purpose. Most
