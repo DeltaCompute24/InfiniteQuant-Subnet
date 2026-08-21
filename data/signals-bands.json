@@ -1,7 +1,7 @@
 {
- "version": "fxmacro3-20260813",
+ "version": "fxpoll3-20260821",
  "vol_window_days": 30,
- "note": "Forex narrowed 11 -> 3, effective 2026-08-13T00:00:00Z, matching history entry fxmacro3-20260813. Keeps AUDUSD, USDCHF and USDCAD; drops EURUSD, GBPUSD, USDJPY, NZDUSD, NZDCHF, AUDNZD, GBPCAD and NZDJPY. Selection is by MACRO CHARACTER, not by calibration: the three retained pairs each track a hard asset -- AUDUSD the commodity complex, USDCHF the safe-haven bid that also drives gold, USDCAD crude -- so the forex board expresses the same macro views as the metals and crypto rows rather than the carry and rate-differential structure the JPY and NZD crosses trade on. NO BAND VALUE CHANGES: the three retained pairs keep 28 / 26 / 20 bps exactly as calibrated by volnorm-equalwash40-hype184-20260812, and crypto and metals are untouched. HF v4 mirrors this at the same instant with AUDUSD only -- USDCHF and USDCAD solve under the 8x band/spread gate on every HF-length horizon at the spread p75, so they are LF-only.",
+ "note": "Forex rebuilt from the miner poll (pair_poll_votes fx-board-2026-08d, 24 voters), effective 2026-08-21T00:00:00Z, matching history entry fxpoll3-20260821. Adds EURUSD (17 votes), keeps AUDUSD (14) and USDCAD (10), drops USDCHF (4). Reverses half of fxmacro3-20260813 by intent -- miners trade the pairs they read. EURUSD lists at 17 bps; USDCAD moves 20 -> 17 because 20 washed 53.5% against a 40% target; AUDUSD is unchanged at 28 (43.4% wash, inside the 7pp deadband, so the solver holds it). Crypto and metals untouched. HF unchanged: AUDUSD stays the only FX pair on the HF board -- EURUSD solves to 4.7 bps and clears the 8x band/spread gate on the spread p50 and p75 but only 7.75x on the p90, so it is LF-only.",
  "bands": {
   "BTCUSD": {
    "asset_class": "crypto",
@@ -33,15 +33,10 @@
    "sl_bps": 195,
    "tp_bps": 195
   },
-  "USDCHF": {
-   "asset_class": "forex",
-   "sl_bps": 26,
-   "tp_bps": 26
-  },
   "USDCAD": {
    "asset_class": "forex",
-   "sl_bps": 20,
-   "tp_bps": 20
+   "sl_bps": 17,
+   "tp_bps": 17
   },
   "AUDUSD": {
    "asset_class": "forex",
@@ -57,6 +52,11 @@
    "asset_class": "crypto",
    "sl_bps": 184,
    "tp_bps": 184
+  },
+  "EURUSD": {
+   "asset_class": "forex",
+   "sl_bps": 17,
+   "tp_bps": 17
   }
  },
  "refreshed_at": "2026-07-21T18:45:00Z"
