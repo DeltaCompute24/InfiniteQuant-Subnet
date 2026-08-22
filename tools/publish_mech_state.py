@@ -38,7 +38,15 @@ def chain_split():
 
 def main() -> int:
     n_mech, pct, raw = chain_split()
-    board = hf.hf_bands_as_of(hf.HF_LAUNCH_FROM) or {}
+    # AS OF NOW, not pinned to launch. Pinned, this published the v1 board forever:
+    # the HF bands tab on the website went on listing EURUSD, GBPUSD and USDJPY for
+    # the nine days after the 08-13 fx cull removed them, never listed TAOUSD,
+    # HYPEUSD or AUDUSD, and quoted XAUUSD at 12 bps against a live 10. A trader
+    # planning entries off that page was planning against a board the ingest
+    # refuses. The board is as-of-versioned so a reader can resolve the one in
+    # force at a given instant; for a live display that instant is now.
+    board_t = time.time()
+    board = hf.hf_bands_as_of(board_t) or {}
     pairs = {}
     for pair, (tp, sl, horizon_s, cls) in board.items():
         pairs[pair] = {
@@ -46,15 +54,13 @@ def main() -> int:
             "tp_bps": tp, "sl_bps": sl,
             "horizon_s": horizon_s,
             "wash_after_s": horizon_s,      # unresolved at the horizon = wash
-            "grid_ms": hf.grid_ms_for(pair, hf.HF_LAUNCH_FROM),
-            "spread_ratio": hf.band_spread_ratio(pair, hf.HF_LAUNCH_FROM),
+            "grid_ms": hf.grid_ms_for(pair, board_t),
+            "spread_ratio": hf.band_spread_ratio(pair, board_t),
         }
-    # AS OF NOW, like mechanism 0 below — not pinned to launch. Pinned, this published
-    # the launch-era limits forever, so the open-position gate (max_open_per_pair 1
-    # from HF_OPEN_GATE_FROM) would have gone on advertising the 4 that was never
-    # enforced. The `board` above is pinned the same way and is correct only while
-    # HF_BANDS_HISTORY has a single era; it needs the same treatment at the first
-    # band change.
+    # AS OF NOW, like the board above and like mechanism 0 below. Pinned, this
+    # published the launch-era limits forever, so the open-position gate
+    # (max_open_per_pair 1 from HF_OPEN_GATE_FROM) would have gone on advertising
+    # the 4 that was never enforced.
     cap_day, gap_ms, max_open = hf.hf_rules_as_of(time.time())
 
     # Combined era: the chain split no longer describes where miner rewards go
