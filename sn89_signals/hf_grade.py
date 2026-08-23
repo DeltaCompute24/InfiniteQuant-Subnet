@@ -49,6 +49,12 @@ GRADER_VERSION = 5
 # when the tick record shows they were decisive.
 GRADE_SETTLE_S = int(os.getenv("SN89_HF_GRADE_SETTLE_S", "900"))
 
+# Where the tick recorder writes its sealed windows on this host. Checked BEFORE
+# the network so the grader reads its own output instead of downloading it back.
+# Read-only by contract: the recorder owns this directory (see _ticks_for). Set
+# empty to disable and fetch everything, which is what an off-host replayer does.
+LOCAL_TICK_SRC = os.getenv("SN89_HF_LOCAL_TICK_SRC", "/var/lib/sn89-hf/ticks")
+
 # ...but an EMPTY window is never sealed (anchor_loop only seals windows that got a
 # receipt), so a permanent gap is indistinguishable from a slow publish and would
 # wedge the call in `pending` forever. After this long past the horizon, grade on
@@ -320,16 +326,26 @@ def _ticks_for(base: str, tick_dir: str, pair: str,
     w = (t0_ms // WINDOW_MS - 1) * WINDOW_MS
     while w <= end_ms:
         local = os.path.join(tick_dir, f"{w}.ticks.jsonl")
+        src = local
         if not os.path.exists(local):
-            txt = _fetch_text(f"{base.rstrip('/')}/{w}/ticks.jsonl")
-            if txt is not None:
-                tmp = local + ".tmp"
-                with open(tmp, "w", encoding="utf-8") as fh:
-                    fh.write(txt)
-                os.replace(tmp, local)
+            # Our own sealed copy, if we are the host that recorded it. The
+            # `.ticks.json` manifest is the seal marker and the gate: an unsealed
+            # window can still take ticks stamped before its close, and reading one
+            # is the only way this can disagree with the published grade.
+            cand = (os.path.join(LOCAL_TICK_SRC, f"{w}.ticks.jsonl")
+                    if LOCAL_TICK_SRC else None)
+            if cand and os.path.exists(cand) and os.path.exists(cand[:-6] + ".json"):
+                src = cand                       # read in place; never write here
+            else:
+                txt = _fetch_text(f"{base.rstrip('/')}/{w}/ticks.jsonl")
+                if txt is not None:
+                    tmp = local + ".tmp"
+                    with open(tmp, "w", encoding="utf-8") as fh:
+                        fh.write(txt)
+                    os.replace(tmp, local)
         rows = []
         try:
-            with open(local, encoding="utf-8") as fh:
+            with open(src, encoding="utf-8") as fh:
                 for line in fh:
                     if not line.strip():
                         continue
