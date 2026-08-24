@@ -3,8 +3,9 @@
 Covers the three consensus layers:
   * valid_referral_pairs — chain-anchored validity (lead blocks, front-run
     margin, one-recruiter-per-recruit, breadth cap);
-  * referral_pair_suspended_until — the strict pair-scoped no-copy gate
-    (sharp episodes, live-overlap episodes, TTL self-clear);
+  * referral_pair_followers — the strict pair-scoped no-copy gate, DIRECTION-
+    AWARE (sharp episodes, live-overlap episodes, TTL self-clear, and which
+    SIDE forfeits its bonus);
   * compute_weights / weights_from_journal — the bonus math (mutual-conditional,
     recruiter cap, base-not-effective chaining, zero-sum within the pool, and
     byte-parity when the feature is dark).
@@ -168,6 +169,52 @@ class TestPairNoCopy:
         # here the RECRUITER shadows the RECRUIT — still suspends
         rows = _sharp_rows("B", "A", config.REFERRAL_PAIR_SHARP_EPISODES)
         assert scoring.referral_pair_suspended_until(rows, "A", "B", NOW) is not None
+
+
+# ── the gate names the FOLLOWER (2026-08-24) ───────────────────────────────────
+class TestPairNoCopyDirection:
+    """Before this, a trip dropped the whole pair: the account that was copied
+    FROM lost its bonus alongside the copier. The 2026-08-18 widening to 4/8 was
+    prompted by exactly that landing on the wrong party."""
+
+    def test_only_the_follower_is_named(self):
+        n = config.REFERRAL_PAIR_SHARP_EPISODES
+        f = scoring.referral_pair_followers(_sharp_rows("A", "B", n), "A", "B", NOW)
+        assert set(f) == {"B"}
+
+    def test_direction_reverses_with_the_evidence(self):
+        n = config.REFERRAL_PAIR_SHARP_EPISODES
+        f = scoring.referral_pair_followers(_sharp_rows("B", "A", n), "A", "B", NOW)
+        assert set(f) == {"A"}
+
+    def test_both_sides_can_be_suspended_independently(self):
+        n = config.REFERRAL_PAIR_SHARP_EPISODES
+        rows = (_sharp_rows("A", "B", n, start=NOW - 20 * DAY)
+                + _sharp_rows("B", "A", n, start=NOW - 5 * DAY))
+        f = scoring.referral_pair_followers(rows, "A", "B", NOW)
+        assert set(f) == {"A", "B"}
+        # each clock runs off that side's OWN last event, so they differ
+        assert f["A"] > f["B"]
+
+    def test_one_side_expiring_does_not_free_the_other(self, monkeypatch):
+        monkeypatch.setattr(config, "REFERRAL_PAIR_WINDOW_S", int(90 * DAY))
+        n = config.REFERRAL_PAIR_SHARP_EPISODES
+        stale = NOW - config.REFERRAL_PAIR_TTL_S - 5 * DAY
+        rows = (_sharp_rows("A", "B", n, start=stale)      # B's trip has expired
+                + _sharp_rows("B", "A", n, start=NOW - 3 * DAY))
+        f = scoring.referral_pair_followers(rows, "A", "B", NOW)
+        assert set(f) == {"A"}
+
+    def test_below_threshold_names_nobody(self):
+        n = config.REFERRAL_PAIR_SHARP_EPISODES
+        assert scoring.referral_pair_followers(
+            _sharp_rows("A", "B", n - 1), "A", "B", NOW) == {}
+
+    def test_symmetric_wrapper_still_answers_is_the_pair_flagged(self):
+        n = config.REFERRAL_PAIR_SHARP_EPISODES
+        rows = _sharp_rows("A", "B", n)
+        f = scoring.referral_pair_followers(rows, "A", "B", NOW)
+        assert scoring.referral_pair_suspended_until(rows, "A", "B", NOW) == max(f.values())
 
     def test_overlap_episodes_trip_without_sharp_lag(self):
         # follows ~1h behind (outside COPY_SHARP_LAG_S) but inside the leader's
@@ -343,24 +390,87 @@ class TestReplayEndToEnd:
         for hk, uid in self.UIDS.items():
             assert w[uid] == pytest.approx(eff[hk] / total)
 
-    def test_pair_copy_suspension_drops_bonus_keeps_base(self, lit):
-        sigs = self._journal()
-        # recruit B shadows recruiter A on REFERRAL_PAIR_SHARP_EPISODES separate
-        # occasions, hours apart ⇒ the pair gate trips
+    def _shadow(self, sigs, leader, follower):
+        """`follower` shadows `leader` enough to trip the sharp gate. Washed
+        rows so the shadowing itself moves neither side's tally — what changes
+        must be the BONUS and only the bonus."""
         for i in range(config.REFERRAL_PAIR_SHARP_EPISODES):
             t = NOW - 2 * DAY + i * 5 * HOUR
             pair = SHADOW_PAIRS[i % len(SHADOW_PAIRS)]
             sigs += [
-                {"commit_hex": f"A-s{i}", "hotkey": "A", "t0_unix": t,
-                 "status": "washed", "plaintext": _pt("A", pair)},
-                {"commit_hex": f"B-s{i}", "hotkey": "B", "t0_unix": t + 60,
-                 "status": "washed", "plaintext": _pt("B", pair)},
+                {"commit_hex": f"{leader}-s{i}", "hotkey": leader, "t0_unix": t,
+                 "status": "washed", "plaintext": _pt(leader, pair)},
+                {"commit_hex": f"{follower}-s{i}", "hotkey": follower,
+                 "t0_unix": t + 60, "status": "washed",
+                 "plaintext": _pt(follower, pair)},
             ]
+        return sigs
+
+    def test_copying_recruit_loses_its_own_bonus_only(self, lit):
+        # B (the recruit) shadows A. B forfeits its +10%; A keeps the recruiter
+        # bonus it earns off B, and both BASE tallies are untouched. This is the
+        # case that reached us as "my bonus has been paused" from the recruiter.
+        sigs = self._shadow(self._journal(), "A", "B")
         refs = [_ref("A", "B", reg_block="valid")]
-        w_sus = replay.weights_from_journal(sigs, _meta("A", "B", "D"), self.UIDS,
-                                            NOW, referrals=refs)
-        w_no = replay.weights_from_journal(sigs, _meta("A", "B", "D"), self.UIDS, NOW)
-        assert w_sus == w_no        # bonus suspended; BASE emission untouched
+        meta = _meta("A", "B", "D")
+        w = replay.weights_from_journal(sigs, meta, self.UIDS, NOW, referrals=refs)
+        base = {}
+        for hk in ("A", "B", "D"):
+            dec = [(s["t0_unix"], s["status"] == "won", False)
+                   for s in sigs if s["hotkey"] == hk and s["status"] != "washed"]
+            graded = [(s["t0_unix"], s["status"] == "washed")
+                      for s in sigs if s["hotkey"] == hk]
+            base[hk] = scoring.decayed_qwin_tally(
+                scoring.qualified_wins(dec, OLD, False, graded=graded), NOW)
+        eff = {"A": base["A"] + config.REFERRAL_RECRUITER_BONUS * base["B"],
+               "B": base["B"],                       # +10% withheld: B copied
+               "D": base["D"]}
+        total = sum(eff.values())
+        for hk, uid in self.UIDS.items():
+            assert w[uid] == pytest.approx(eff[hk] / total)
+
+    def test_copying_recruiter_does_not_cost_the_recruit(self, lit):
+        # Mirror image: A (the recruiter) shadows B. A forfeits its recruiter
+        # bonus; B keeps its +10%. Before 2026-08-24 B lost the bonus for A's
+        # behaviour, which is what forced the 4/8 threshold widening.
+        sigs = self._shadow(self._journal(), "B", "A")
+        refs = [_ref("A", "B", reg_block="valid")]
+        meta = _meta("A", "B", "D")
+        w = replay.weights_from_journal(sigs, meta, self.UIDS, NOW, referrals=refs)
+        base = {}
+        for hk in ("A", "B", "D"):
+            dec = [(s["t0_unix"], s["status"] == "won", False)
+                   for s in sigs if s["hotkey"] == hk and s["status"] != "washed"]
+            graded = [(s["t0_unix"], s["status"] == "washed")
+                      for s in sigs if s["hotkey"] == hk]
+            base[hk] = scoring.decayed_qwin_tally(
+                scoring.qualified_wins(dec, OLD, False, graded=graded), NOW)
+        eff = {"A": base["A"],                        # recruiter bonus withheld
+               "B": (1 + config.REFERRAL_RECRUIT_BONUS) * base["B"],
+               "D": base["D"]}
+        total = sum(eff.values())
+        for hk, uid in self.UIDS.items():
+            assert w[uid] == pytest.approx(eff[hk] / total)
+
+    def test_suspension_moves_only_the_bonus(self, lit):
+        # The penalty is a withheld bonus and nothing else. With the referral
+        # dark, a shadowed journal and a clean one produce the same vector —
+        # the shadow rows are washes, so they carry no tally of their own.
+        meta = _meta("A", "B", "D")
+        clean = self._journal()
+        shadowed = self._shadow(self._journal(), "A", "B")
+        assert (replay.weights_from_journal(shadowed, meta, self.UIDS, NOW)
+                == replay.weights_from_journal(clean, meta, self.UIDS, NOW))
+        # Lit, the copier B sits BELOW where it would with its bonus intact,
+        # while the copied-from A sits above its own base share.
+        refs = [_ref("A", "B", reg_block="valid")]
+        w_sus = replay.weights_from_journal(shadowed, meta, self.UIDS, NOW,
+                                            referrals=refs)
+        w_clean = replay.weights_from_journal(clean, meta, self.UIDS, NOW,
+                                              referrals=refs)
+        assert w_sus[2] < w_clean[2]        # B forfeited its +10%
+        assert w_sus[1] > w_clean[1]        # A's recruiter bonus survived intact
+        assert w_sus[3] > w_clean[3]        # the freed share re-splits the pool
 
     def test_purity_referrals_input_untouched(self, lit):
         sigs = self._journal()

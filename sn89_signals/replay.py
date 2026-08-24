@@ -131,28 +131,79 @@ def weights_from_journal(
             rep_wins=rep_won, rep_decisive=rep_dec, trailing_wins=tw, qwins=qwins))
 
     # ── referral pairs (§ referral): validity + pair no-copy, re-derived ─────────
+    # The pair stays; the no-copy gate names the SIDE that is shadowing and only
+    # that side's bonus is withheld (scoring.referral_pair_followers). Dropping
+    # the pair outright — what this did before 2026-08-24 — made the copied-from
+    # side pay for the copier.
     referral_pairs = None
+    referral_suspended: set[str] = set()
     if config.REFERRAL_ENABLED and referrals:
-        cand = scoring.valid_referral_pairs(referrals)
-        ref_hks = {hk for pair in cand for hk in pair}
-        pcut = now - config.REFERRAL_PAIR_WINDOW_S
-        ref_rows: list[scoring.GradedRow] = []
-        for s in signals:
-            if (s["hotkey"] not in ref_hks or s["status"] == "void"
-                    or not s.get("plaintext") or s["t0_unix"] < pcut):
-                continue
-            sig = Signal.from_bytes(s["plaintext"].encode())
-            ref_rows.append(scoring.GradedRow(
-                hotkey=s["hotkey"], trade_pair=sig.trade_pair, direction=sig.direction,
-                t0_unix=s["t0_unix"], status=s["status"],
-                horizon_h=config.horizon_h_for(sig.trade_pair, s["t0_unix"])))
-        referral_pairs = [
-            (recruiter, recruit) for recruiter, recruit in cand
-            if scoring.referral_pair_suspended_until(
-                ref_rows, recruiter, recruit, now) is None]
+        referral_pairs = scoring.valid_referral_pairs(referrals)
+        ref_rows = _referral_pair_rows(signals, referral_pairs, now)
+        for recruiter, recruit in referral_pairs:
+            referral_suspended |= set(scoring.referral_pair_followers(
+                ref_rows, recruiter, recruit, now))
 
     return scoring.compute_weights(states, now, excluded_uids=excluded_uids,
-                                   referral_pairs=referral_pairs)
+                                   referral_pairs=referral_pairs,
+                                   referral_suspended=referral_suspended)
+
+
+def referrer_withheld_recruits(signals: list[dict],
+                               orig_pairs: list[tuple[str, str]],
+                               remapped_pairs: list[tuple[str, str]],
+                               now: float) -> set[str]:
+    """Recruits whose pair pays their recruiter NOTHING on mecid-1 this cycle,
+    because that recruiter is the side shadowing the pair.
+
+    Keyed by recruit because a recruit belongs to exactly one recruiter
+    (valid_referral_pairs), so the recruit alone identifies the pair.
+
+    ONE definition, shared by referrer_weights_from_journal and
+    tools/publish_referrer_standing.py — the publisher refuses to write when
+    its arithmetic disagrees with the replay vector, and two copies of this
+    rule is how the page and the payout drift apart.
+
+    orig_pairs is pre-transfer, remapped_pairs post-transfer. The gate is
+    judged on the ORIGINAL pair (it measures who traded on top of whom, which a
+    transfer does not change) but applied only while the follower is still the
+    credited recruiter — a recruiter cannot launder the penalty onto a
+    destination that never traded alongside those recruits, and a destination
+    does not inherit it.
+    """
+    ref_rows = _referral_pair_rows(signals, orig_pairs, now)
+    followed = {
+        recruit for recruiter, recruit in orig_pairs
+        if recruiter in scoring.referral_pair_followers(
+            ref_rows, recruiter, recruit, now)
+    }
+    orig_recruiter = {recruit: recruiter for recruiter, recruit in orig_pairs}
+    return followed & {recruit for recruiter, recruit in remapped_pairs
+                       if orig_recruiter.get(recruit) == recruiter}
+
+
+def _referral_pair_rows(signals: list[dict], pairs: list[tuple[str, str]],
+                        now: float) -> list["scoring.GradedRow"]:
+    """GradedRows for every hotkey in `pairs`, inside the pair-gate window.
+
+    Shared by the two weight paths so mecid-0 and mecid-1 can never judge the
+    same pair off different evidence. Needs `plaintext` (the gate keys on
+    trade_pair + direction); a journal row without it is skipped, which is the
+    pre-reveal case and correctly contributes no copy evidence.
+    """
+    hks = {hk for pair in pairs for hk in pair}
+    pcut = now - config.REFERRAL_PAIR_WINDOW_S
+    rows: list[scoring.GradedRow] = []
+    for s in signals:
+        if (s["hotkey"] not in hks or s["status"] == "void"
+                or not s.get("plaintext") or s["t0_unix"] < pcut):
+            continue
+        sig = Signal.from_bytes(s["plaintext"].encode())
+        rows.append(scoring.GradedRow(
+            hotkey=s["hotkey"], trade_pair=sig.trade_pair, direction=sig.direction,
+            t0_unix=s["t0_unix"], status=s["status"],
+            horizon_h=config.horizon_h_for(sig.trade_pair, s["t0_unix"])))
+    return rows
 
 
 def referrer_recruit_tallies(
@@ -214,16 +265,21 @@ def referrer_weights_from_journal(
 
         valid_referral_pairs (same gate as the in-band bonus era)
           → apply_referral_transfers (one-time sn89refx remaps)
+          → referral_pair_followers (pair no-copy gate, RECRUITER side only —
+            a recruiter shadowing its own recruit forfeits that pair)
           → recruit tallies (decayed qualified wins — the recruit's own
             emission currency, rebuilt from the journal)
           → referrer_scores → referrer_weights (cap + burn)
 
-    Copy forensics and habitual-copier stripping are deliberately NOT applied
-    to the recruit tallies here: the referrer score is a read on the recruit's
-    RAW qualified performance, and re-running the copy pipeline per mechanism
-    would double the heaviest part of replay for a second-order effect. If a
-    copier gets zeroed on mecid-0, their tally still decays to nothing within
-    the decay window — the referrer's score follows with the same lag.
+    GLOBAL copy forensics and habitual-copier stripping are deliberately NOT
+    applied to the recruit tallies here: the referrer score is a read on the
+    recruit's RAW qualified performance, and re-running the §7.5 pipeline per
+    mechanism would double the heaviest part of replay for a second-order
+    effect. If a copier gets zeroed on mecid-0, their tally still decays to
+    nothing within the decay window — the referrer's score follows with the
+    same lag. The PAIR gate is different and is applied: it is scoped to the
+    two hotkeys of one pair, so it costs nothing to run, and mecid-1 is the
+    only place a recruiter can be charged for its own copying at all.
 
     extra_tallies: {competition_key: {hotkey: raw tally}} for the competitions
     this module cannot rebuild from the signals journal — HF and Closers grade
@@ -237,16 +293,27 @@ def referrer_weights_from_journal(
     than for the third of it that lives in this file. The inputs are public;
     the rebuild is just wider.
     """
-    pairs = scoring.valid_referral_pairs(referrals or [])
-    pairs = scoring.apply_referral_transfers(pairs, referral_transfers or [])
+    orig = scoring.valid_referral_pairs(referrals or [])
+    pairs = scoring.apply_referral_transfers(orig, referral_transfers or [])
     if not pairs:
         return {config.BURN_UID: 1.0}
+
+    # Pair no-copy gate, recruiter side. mecid-1 is the ONLY referrer bonus that
+    # still pays (the in-band 20% retired 2026-08-03), so this is where a
+    # recruiter who shadows its own recruit forfeits that pair — and it forfeits
+    # nothing else: the recruiter's mecid-0 emission, the recruit's emission and
+    # the recruit's +10% are all untouched, and the pair resumes when the gate
+    # self-clears. Judged on the ORIGINAL pair, because the gate measures two
+    # accounts trading on top of each other and a transfer does not change who
+    # traded; withheld only while the follower is STILL the credited recruiter,
+    # so a transfer hands the destination a clean pair rather than the penalty.
+    withheld = referrer_withheld_recruits(signals, orig, pairs, now)
 
     recruit_hks = {recruit for _, recruit in pairs}
     lf_tally = referrer_recruit_tallies(signals, meta, now, recruit_hks)
 
     if not config.referrer_multicomp_active(now):
-        scores = scoring.referrer_scores(pairs, lf_tally)
+        scores = scoring.referrer_scores(pairs, lf_tally, withheld_recruits=withheld)
         return scoring.referrer_weights(scores, uid_by_hotkey)
 
     # Multi-competition era. Each competition is normalized over its OWN FULL
@@ -260,7 +327,7 @@ def referrer_weights_from_journal(
         tallies[comp] = field
     shares = scoring.referrer_shares(config.comp_weights_as_of(now))
     blended = scoring.blended_recruit_tallies(tallies, shares)
-    scores = scoring.referrer_scores(pairs, blended)
+    scores = scoring.referrer_scores(pairs, blended, withheld_recruits=withheld)
     return scoring.referrer_weights(scores, uid_by_hotkey)
 
 

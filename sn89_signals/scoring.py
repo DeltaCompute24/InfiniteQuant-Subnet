@@ -475,15 +475,29 @@ def apply_referral_transfers(pairs: list[tuple[str, str]],
 
 
 def referrer_scores(pairs: list[tuple[str, str]],
-                    tally_by_hk: dict[str, float]) -> dict[str, float]:
+                    tally_by_hk: dict[str, float],
+                    withheld_recruits: set[str] | None = None) -> dict[str, float]:
     """§ referrer mechanism: score[recruiter] = Σ recruit tallies. The tally is
     the recruit's decayed qualified-win tally — the same currency that sizes
     the recruit's own emission — so a referrer earns exactly in proportion to
     how much their recruits are currently earning. A recruiter whose recruits
     are all cold scores 0 (no floor: the mechanism pays performance of the
-    base, not its size)."""
+    base, not its size).
+
+    withheld_recruits: recruits whose pair the RECRUITER is currently shadowing
+    (referral_pair_followers). That pair contributes nothing to the recruiter's
+    score for as long as it holds. This is the recruiter's half of the pair
+    no-copy gate and the only place it bites them, because mecid-1 is the only
+    referrer bonus that still pays — the in-band 20% share-shift retired
+    2026-08-03. It withholds a BONUS and nothing else: the recruiter's own
+    mecid-0 emission, the recruit's emission, and the recruit's +10% are all
+    untouched, and the pair stays valid so it resumes when the gate clears.
+    """
+    withheld = withheld_recruits or set()
     scores: dict[str, float] = {}
     for recruiter, recruit in pairs:
+        if recruit in withheld:
+            continue
         t = float(tally_by_hk.get(recruit, 0.0))
         if t > 0:
             scores[recruiter] = scores.get(recruiter, 0.0) + t
@@ -569,14 +583,16 @@ def referrer_weights(scores: dict[str, float], uid_by_hk: dict[str, int],
     return {u: w / total for u, w in weights.items()} if total > 0 else {burn_uid: 1.0}
 
 
-def referral_pair_suspended_until(pair_rows: list[GradedRow], hk_a: str, hk_b: str,
-                                  now_unix: float) -> float | None:
-    """Pair-scoped no-copy gate: the unix time until which the (hk_a, hk_b)
-    referral bonus is SUSPENDED, or None if it isn't. Pure/deterministic.
+def referral_pair_followers(pair_rows: list[GradedRow], hk_a: str, hk_b: str,
+                            now_unix: float) -> dict[str, float]:
+    """Pair-scoped no-copy gate, DIRECTION-AWARE: {follower_hotkey:
+    suspended_until} for each side of (hk_a, hk_b) that is currently shadowing
+    the other. Empty dict = the pair is clean. Pure/deterministic.
 
     Deliberately far stricter than the global §7.5 detector — the pair opted
-    into scrutiny by pairing up, and a trip here only pauses the bonus (base
-    emission is untouched, no public flag). Two triggers, either direction:
+    into scrutiny by pairing up, and a trip here only withholds a BONUS (both
+    sides' base emission is untouched, no public flag, no elimination). Two
+    triggers, evaluated PER FOLLOWER:
 
       * SHARP shadowing — same (pair, direction) commits within
         COPY_SHARP_LAG_S, collapsed into decisions by _episodes();
@@ -586,18 +602,37 @@ def referral_pair_suspended_until(pair_rows: list[GradedRow], hk_a: str, hk_b: s
         ≥ REFERRAL_PAIR_OVERLAP_EPISODES trips.
 
     Events are counted over the trailing REFERRAL_PAIR_WINDOW_S; a trip
-    suspends until REFERRAL_PAIR_TTL_S after the LAST event, then self-clears
-    (same philosophy as COPY_PENALTY_TTL_S — a warning, not a scarlet letter).
+    suspends that follower until REFERRAL_PAIR_TTL_S after ITS OWN last event,
+    then self-clears (same philosophy as COPY_PENALTY_TTL_S — a warning, not a
+    scarlet letter). Both sides can be suspended at once, on independent
+    clocks; neither inherits the other's.
+
+    ⚠ Both triggers were always tallied per follower — the episode counters are
+    keyed by follower hotkey and always were. Until 2026-08-24 the result was
+    collapsed with max() and the whole PAIR was dropped, so the side that
+    copied and the side that was copied FROM lost their bonus together. On
+    2026-08-18 the thresholds had to be widened to 4/8 because a recruiter
+    shadowed its own recruit and the RECRUIT was the one suspended for it —
+    treating the symptom. This is the cause: the penalty now lands on whoever
+    followed. See referral_pair_suspended_until for the symmetric view, which
+    survives for display only.
     """
     cutoff = now_unix - config.REFERRAL_PAIR_WINDOW_S
     pair_hk = {hk_a, hk_b}
     rows = [r for r in pair_rows
             if r.hotkey in pair_hk and r.status != "void" and r.t0_unix >= cutoff]
     if not rows:
-        return None
+        return {}
     rows.sort(key=lambda r: (r.t0_unix, r.hotkey))
 
-    suspended_until: float | None = None
+    suspended: dict[str, float] = {}
+
+    def _trip(follower: str, ts: list[float], threshold: int) -> None:
+        if _episodes(ts, config.COPY_EPISODE_S) < threshold:
+            return
+        until = max(ts) + config.REFERRAL_PAIR_TTL_S
+        if now_unix < until:
+            suspended[follower] = max(suspended.get(follower, 0.0), until)
 
     # sharp shadowing, per direction-of-follow
     groups: dict[tuple[str, str], list[GradedRow]] = defaultdict(list)
@@ -613,9 +648,7 @@ def referral_pair_suspended_until(pair_rows: list[GradedRow], hk_a: str, hk_b: s
             if 0 <= f.t0_unix - leader.t0_unix <= config.COPY_SHARP_LAG_S:
                 sharp_ts[f.hotkey].append(f.t0_unix)
     for follower, ts in sharp_ts.items():
-        if _episodes(ts, config.COPY_EPISODE_S) >= config.REFERRAL_PAIR_SHARP_EPISODES:
-            until = max(ts) + config.REFERRAL_PAIR_TTL_S
-            suspended_until = max(suspended_until or 0.0, until)
+        _trip(follower, ts, config.REFERRAL_PAIR_SHARP_EPISODES)
 
     # live-overlap follows (fresh copies of the rows — mark_copies mutates is_copy)
     marked = mark_copies([GradedRow(hotkey=r.hotkey, trade_pair=r.trade_pair,
@@ -627,13 +660,24 @@ def referral_pair_suspended_until(pair_rows: list[GradedRow], hk_a: str, hk_b: s
         if r.is_copy:
             overlap_ts[r.hotkey].append(r.t0_unix)
     for follower, ts in overlap_ts.items():
-        if _episodes(ts, config.COPY_EPISODE_S) >= config.REFERRAL_PAIR_OVERLAP_EPISODES:
-            until = max(ts) + config.REFERRAL_PAIR_TTL_S
-            suspended_until = max(suspended_until or 0.0, until)
+        _trip(follower, ts, config.REFERRAL_PAIR_OVERLAP_EPISODES)
 
-    if suspended_until is not None and now_unix < suspended_until:
-        return suspended_until
-    return None
+    return suspended
+
+
+def referral_pair_suspended_until(pair_rows: list[GradedRow], hk_a: str, hk_b: str,
+                                  now_unix: float) -> float | None:
+    """Symmetric view of referral_pair_followers: the latest unix time until
+    which EITHER side of (hk_a, hk_b) is suspended, or None if neither is.
+
+    ⚠ This no longer decides anyone's money. It answers "is this pair under
+    the copy gate at all", which is what a status line wants; the weight paths
+    take referral_pair_followers and withhold only the follower's own bonus.
+    Do not reintroduce it into a scoring path — collapsing the two sides here
+    is exactly the bug that made a recruit pay for its recruiter's copying.
+    """
+    followers = referral_pair_followers(pair_rows, hk_a, hk_b, now_unix)
+    return max(followers.values()) if followers else None
 
 
 # ── weights (§7.2 CONFIRMED: gate → tier-weighted pro-rata wins, trailing 30 days) ─
@@ -701,7 +745,8 @@ def score_inputs(decisive: list[tuple[float, bool, bool]], first_seen_unix: floa
 def compute_weights(states: list[MinerState], now_unix: float,
                     burn_uid: int = config.BURN_UID,
                     excluded_uids: set[int] | None = None,
-                    referral_pairs: list[tuple[str, str]] | None = None) -> dict[int, float]:
+                    referral_pairs: list[tuple[str, str]] | None = None,
+                    referral_suspended: set[str] | None = None) -> dict[int, float]:
     """{uid: normalized_weight}. Immune miners get the dust floor; the pool is
     split across miners by a time-decayed, tier-weighted tally of their QUALIFIED
     wins (a relative competition of recent qualified wins); a probation dust floor
@@ -720,16 +765,24 @@ def compute_weights(states: list[MinerState], now_unix: float,
     dust floor nor a pro-rata share — for as long as they stay flagged. Their
     forfeited budget burns; the exclusion is reversible (recomputed each cycle).
 
-    referral_pairs (§ referral): VALID, UNSUSPENDED (recruiter, recruit) hotkey
-    pairs — the caller (replay.weights_from_journal) has already applied
-    valid_referral_pairs + referral_pair_suspended_until. While BOTH sides have
-    a positive base tally and neither is excluded, the recruit's effective tally
-    gains REFERRAL_RECRUIT_BONUS × its own base and the recruiter's gains
+    referral_pairs (§ referral): VALID (recruiter, recruit) hotkey pairs — the
+    caller (replay.weights_from_journal) has already applied
+    valid_referral_pairs. While BOTH sides have a positive base tally and
+    neither is excluded, the recruit's effective tally gains
+    REFERRAL_RECRUIT_BONUS × its own base and the recruiter's gains
     REFERRAL_RECRUITER_BONUS × the recruit's base (total capped at
     REFERRAL_MAX_X × the recruiter's own base). Bonuses are computed from BASE
     tallies only — never from boosted ones — so A→B→C referral chains cannot
     compound. Pure share-shifting within the miner pool: the pro-rata split
     below normalizes over boosted tallies, and the emission cap is unchanged.
+
+    referral_suspended (§ referral no-copy, DIRECTION-AWARE): hotkeys currently
+    shadowing the other side of one of their own pairs
+    (referral_pair_followers). A suspended hotkey forfeits ITS OWN referral
+    bonus and nothing else — its base tally, its emission and the other side's
+    bonus are all untouched. Before 2026-08-24 the caller instead dropped the
+    whole pair from referral_pairs, which charged the copied-from side for the
+    copier's behaviour.
 
     Eliminated hotkeys must be filtered out by the caller before this — they get
     nothing, not dust.
@@ -785,6 +838,7 @@ def compute_weights(states: list[MinerState], now_unix: float,
     bonus: dict[str, float] = defaultdict(float)
     if referral_pairs and config.REFERRAL_ENABLED:
         by_hk = {s.hotkey: s for s in states}
+        suspended = referral_suspended or set()
         per_recruiter: dict[str, float] = defaultdict(float)
         for recruiter, recruit in referral_pairs:
             r, c = by_hk.get(recruiter), by_hk.get(recruit)
@@ -794,12 +848,16 @@ def compute_weights(states: list[MinerState], now_unix: float,
                 continue                        # globally copy-zeroed → lapses
             if base[recruiter] <= 0 or base[recruit] <= 0:
                 continue                        # mutual-conditional: both must be earning
-            bonus[recruit] += config.REFERRAL_RECRUIT_BONUS * base[recruit]
+            # Pair no-copy gate, per side: the follower forfeits its own bonus,
+            # the side it shadowed keeps theirs. Withholding a bonus is the
+            # WHOLE penalty — base[] above is untouched either way.
+            if recruit not in suspended:
+                bonus[recruit] += config.REFERRAL_RECRUIT_BONUS * base[recruit]
             # § referrer mechanism: once mecid-1 pays referrers directly, the
             # in-band 20% recruiter share-shift retires (double-paying the same
             # referral from two pools). The recruit's own bonus above stays —
             # it is a trader-entry incentive, not a referrer reward.
-            if not config.referrer_active(now_unix):
+            if not config.referrer_active(now_unix) and recruiter not in suspended:
                 per_recruiter[recruiter] += config.REFERRAL_RECRUITER_BONUS * base[recruit]
         for hk, b in per_recruiter.items():
             bonus[hk] += min(b, config.REFERRAL_MAX_X * base[hk])

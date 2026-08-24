@@ -119,8 +119,13 @@ def main() -> int:
     mg = bt.Subtensor(NETWORK).metagraph(NETUID)
     uid_by_hotkey = {hk: i for i, hk in enumerate(mg.hotkeys)}
 
-    pairs = scoring.valid_referral_pairs(referrals)
-    pairs = scoring.apply_referral_transfers(pairs, transfers)
+    orig_pairs = scoring.valid_referral_pairs(referrals)
+    pairs = scoring.apply_referral_transfers(orig_pairs, transfers)
+    # Pair no-copy gate, recruiter side — a recruiter shadowing its own recruit
+    # is paid nothing for that pair. Taken from replay so the page and the
+    # on-chain vector cannot state different rules (the canon check below would
+    # catch it, by refusing to write at all).
+    withheld = replay.referrer_withheld_recruits(sig_rows, orig_pairs, pairs, now)
 
     fields, missing = competition_tallies(sig_rows, meta, uid_by_hotkey, now)
     multicomp = config.referrer_multicomp_active(now)
@@ -151,8 +156,9 @@ def main() -> int:
     # restricted back down to recruits — otherwise it reports every earning
     # miner on the subnet as somebody's recruit.
     recruit_hks = {c for _, c in pairs}
-    scored = {hk: v for hk, v in tally.items() if v and hk in recruit_hks}
-    scores = scoring.referrer_scores(pairs, tally)
+    scored = {hk: v for hk, v in tally.items()
+              if v and hk in recruit_hks and hk not in withheld}
+    scores = scoring.referrer_scores(pairs, tally, withheld_recruits=withheld)
     weights = scoring.referrer_weights(scores, uid_by_hotkey)
 
     # The whole reason this file is trustworthy: our vector must BE the
@@ -205,7 +211,13 @@ def main() -> int:
                 "by_competition": {k: round(v, 8)
                                    for k, v in (contrib.get(c) or {}).items()
                                    if v > 0},
-                "share_of_score": round(t / score, 6) if (score and t) else 0.0,
+                # A recruit can carry a real tally and still pay this recruiter
+                # nothing, when the recruiter is shadowing them. Without this
+                # flag the row renders as tally > 0, share 0.0 — which reads as
+                # an arithmetic bug rather than a penalty.
+                "withheld_copy_gate": c in withheld,
+                "share_of_score": (0.0 if c in withheld
+                                   else round(t / score, 6) if (score and t) else 0.0),
             })
         rows.append({
             "hotkey": recruiter,
@@ -215,7 +227,8 @@ def main() -> int:
             "pool_share": round(share, 8),
             "tao_day": round(share * field_day, 6) if payable else 0.0,
             "n_recruits": len(recruits),
-            "n_scoring": sum(1 for r in recruits if r["tally"]),
+            "n_scoring": sum(1 for r in recruits
+                             if r["tally"] and not r["withheld_copy_gate"]),
             "recruits": recruits,
         })
     rows.sort(key=lambda r: (-r["pool_share"], -r["score"], -r["n_recruits"]))

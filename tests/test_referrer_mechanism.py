@@ -64,6 +64,19 @@ class TestReferrerScores:
         s = scoring.referrer_scores(pairs, tallies)
         assert s == {A: 4.0, B: 2.0}
 
+    def test_withheld_pair_contributes_nothing(self):
+        # The recruiter is shadowing R1, so that pair pays them nothing — the
+        # recruiter half of the pair no-copy gate, and the ONLY place it bites
+        # them (the in-band 20% retired 2026-08-03). R2 is unaffected.
+        pairs = [(A, R1), (A, R2), (B, R3)]
+        tallies = {R1: 3.0, R2: 1.0, R3: 2.0}
+        s = scoring.referrer_scores(pairs, tallies, withheld_recruits={R1})
+        assert s == {A: 1.0, B: 2.0}
+
+    def test_withholding_every_pair_drops_the_recruiter_entirely(self):
+        s = scoring.referrer_scores([(A, R1)], {R1: 3.0}, withheld_recruits={R1})
+        assert s == {}
+
     def test_cold_recruits_score_zero(self):
         # a big base of non-earning recruits pays nothing — the mechanism
         # rewards recruit PERFORMANCE, never list size
