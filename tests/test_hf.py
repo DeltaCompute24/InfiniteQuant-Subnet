@@ -2052,11 +2052,80 @@ class TestLiveTail:
         assert ing.windows
 
     def test_live_dir_is_a_subdir_so_consensus_cannot_see_it(self):
-        """hf_anchor._pending and build_hf_scoreboard._accepted_calls glob
-        LOG_DIR/*.jsonl NON-recursively. A subdir is invisible to them, which is
-        what keeps an UNANCHORED row out of weights and replay. Flattening this
-        into LOG_DIR would silently feed the live copy into consensus."""
+        """hf_anchor._pending globs LOG_DIR/*.jsonl NON-RECURSIVELY, so a subdir is
+        invisible to it, and that is what keeps an UNANCHORED row out of anchoring,
+        weights and replay. Flattening this into LOG_DIR would silently feed the
+        live copy into consensus.
+
+        build_hf_scoreboard._accepted_calls used to be named here too. It now reads
+        LIVE_DIR deliberately, so a trader sees their own call in seconds instead of
+        after the seal plus the next board build -- safe because every GATE on that
+        page reads the grade cache, so an ungraded row can only add a `pending`."""
         import importlib
         hi = importlib.import_module("neurons.hf_ingest")
         assert hi.LIVE_DIR.parent == hi.LOG_DIR
         assert hi.LIVE_DIR != hi.LOG_DIR
+
+
+class TestBoardReadsLiveTail:
+    """The miner page renders from the HF board snapshot, and the board built its
+    call list from the SEALED window logs only. So a trader's own call was invisible
+    to them for the seal (0-180s) plus the board's build interval -- up to eight
+    minutes of a thirty-minute horizon, showing nothing at all.
+    """
+
+    def _board(self, tmp_path, monkeypatch):
+        import importlib, sys
+        sys.path.insert(0, "/opt/sn89-signals/tools")
+        m = importlib.import_module("build_hf_scoreboard")
+        monkeypatch.setattr(m, "LOG_DIR", str(tmp_path))
+        monkeypatch.setattr(m, "LIVE_DIR", str(tmp_path / "live"))
+        return m
+
+    def _row(self, hk, seq, pair="BTCUSD", t0=1_787_000_000_000, direction="LONG"):
+        import json as _j
+        return _j.dumps({"submit": {"hk": hk, "seq": seq,
+                                    "payload": {"trade_pair": pair, "direction": direction,
+                                                "asset_class": "crypto"}},
+                         "receipt": {"hk": hk, "seq": seq, "grid_t0_ms": t0}})
+
+    def test_a_call_only_in_the_live_tail_is_picked_up(self, tmp_path, monkeypatch):
+        m = self._board(tmp_path, monkeypatch)
+        (tmp_path / "live").mkdir()
+        (tmp_path / "live" / "1787000000000.jsonl").write_text(self._row("5AAA", 1) + "\n")
+        calls = m._accepted_calls()
+        assert ("5AAA", 1) in calls
+        assert calls[("5AAA", 1)]["pair"] == "BTCUSD"
+
+    def test_the_sealed_copy_wins_when_both_hold_it(self, tmp_path, monkeypatch):
+        """They are the same row today. If they ever diverge, the ANCHORED one is
+        the record and must be what the page shows."""
+        m = self._board(tmp_path, monkeypatch)
+        (tmp_path / "live").mkdir()
+        (tmp_path / "live" / "1787000000000.jsonl").write_text(
+            self._row("5BBB", 2, pair="ETHUSD") + "\n")
+        (tmp_path / "1787000000000.jsonl").write_text(
+            self._row("5BBB", 2, pair="BTCUSD") + "\n")
+        assert m._accepted_calls()[("5BBB", 2)]["pair"] == "BTCUSD"
+
+    def test_a_closers_vote_in_the_live_tail_is_still_filtered(self, tmp_path,
+                                                               monkeypatch):
+        """The ingest writes every competition into one stream, live tail included.
+        Without this filter a Closers vote reads as an HF call pending forever --
+        207 of 209 pending rows on 2026-08-06."""
+        import json as _j
+        m = self._board(tmp_path, monkeypatch)
+        (tmp_path / "live").mkdir()
+        (tmp_path / "live" / "1787000000000.jsonl").write_text(_j.dumps(
+            {"submit": {"hk": "5CCC", "seq": 3,
+                        "payload": {"trade_pair": "BTCUSD", "direction": "LONG",
+                                    "kind": "closers"}},
+             "receipt": {"hk": "5CCC", "seq": 3, "grid_t0_ms": 1}}) + "\n")
+        assert ("5CCC", 3) not in m._accepted_calls()
+
+    def test_a_missing_live_dir_is_not_an_error(self, tmp_path, monkeypatch):
+        """It is created lazily on the first accepted call, so a quiet period or a
+        fresh host has none. The board must degrade to sealed-only, not fail."""
+        m = self._board(tmp_path, monkeypatch)
+        (tmp_path / "1787000000000.jsonl").write_text(self._row("5DDD", 4) + "\n")
+        assert ("5DDD", 4) in m._accepted_calls()

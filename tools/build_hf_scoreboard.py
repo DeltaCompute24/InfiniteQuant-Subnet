@@ -236,6 +236,9 @@ def _classify(won: int, dec: int):
     return None
 
 LOG_DIR = os.getenv("SN89_HF_LOG_DIR", "/var/lib/sn89-hf")
+# The ingest's UNANCHORED live tail (hf_ingest.record_live). Same env name as the
+# ingest so the two cannot be pointed at different directories.
+LIVE_DIR = os.getenv("SN89_HF_LIVE_DIR", os.path.join(LOG_DIR, "live"))
 GRADE_DBS = [os.path.expanduser("~/.sn89/hf-grade/hf_grades.db"),
              "/root/.sn89/hf-grade/hf_grades.db",
              os.path.join(LOG_DIR, "hf_grades.db")]
@@ -270,7 +273,25 @@ def _accepted_calls() -> dict:
     is the same filter, and the two must not drift.
     """
     calls = {}
-    for f in glob.glob(os.path.join(LOG_DIR, "*.jsonl")):
+    # LIVE TAIL FIRST, sealed second. The rows are identical and this dict assigns,
+    # so the anchored copy wins wherever both hold a call and the live tail only
+    # ever contributes calls too recent to have been sealed.
+    #
+    # Why this page is allowed to read an unanchored row when the grading path is
+    # not: a call with no grade can only ever ADD A `pending` ROW. Every gate here
+    # -- diversity, eligibility, submissions, trading days -- is computed from the
+    # GRADE CACHE in _grades()/_eligibility(), and won/lost/wash, hit rate, tier,
+    # qualified and emission_weight are all keyed off grades too. _compute_paths
+    # skips anything not already graded. So the reachable blast radius is the
+    # `pending` count and the miner's own recent-calls list, which is exactly the
+    # thing a trader was waiting up to eight minutes to see.
+    #
+    # The residual: if the ingest dies between signing a receipt and sealing its
+    # window, a call could show as pending here and then disappear. It was never
+    # graded and never paid, and the anchored log stays the record.
+    paths = (sorted(glob.glob(os.path.join(LIVE_DIR, "*.jsonl")))[-8:]
+             + sorted(glob.glob(os.path.join(LOG_DIR, "*.jsonl"))))
+    for f in paths:
         if not Path(f).stem.isdigit():
             continue
         try:
