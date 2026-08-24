@@ -2129,3 +2129,110 @@ class TestBoardReadsLiveTail:
         m = self._board(tmp_path, monkeypatch)
         (tmp_path / "1787000000000.jsonl").write_text(self._row("5DDD", 4) + "\n")
         assert ("5DDD", 4) in m._accepted_calls()
+
+
+class TestEntryProbe:
+    """Diagnostic for the fast-grade design: a verdict needs the entry, the band and
+    the ticks. The band is fixed at accept and the ticks are ours, so the entry is
+    the only thing forcing a grade to wait for a sealed window. This records what
+    the bus held at accept and again SETTLE_S later, so the wait can be measured
+    instead of assumed. Nothing reads it to decide anything.
+    """
+
+    def _ingest(self, tmp_path, registered=frozenset()):
+        import importlib
+        from bittensor_wallet import Keypair
+        hi = importlib.import_module("neurons.hf_ingest")
+        ing = object.__new__(hi.Ingest)
+        ing.kp = Keypair.create_from_uri("//EntryProbeKey")
+        ing.last_seq, ing.sent_ms, ing.windows = {}, {}, {}
+        ing.closers_sent_ms = {}
+        ing.lock_index, ing._locks_loaded_at = {}, 9e18
+        ing.registered, ing._reg_loaded_at = set(registered), 9e18
+        ing.open_calls = {}
+        ing.last_px = {"BTCUSD": (1_787_000_000_000, 64_000.0)}
+        ing._tick_ok_at = 0.0
+        ing._reject_dir = str(tmp_path / "rejects")
+        ing._live_dir = str(tmp_path / "live")
+        ing._entry_probe_dir = str(tmp_path / "entry-probe")
+        ing._entry_probe = {}
+        return hi, ing
+
+    def _frame(self, kp, seq=1, pair="BTCUSD"):
+        import time as _t
+        ts = int(_t.time() * 1000)
+        tp, sl, hor, ac = hf.hf_bands_as_of(ts / 1000.0)[pair]
+        payload = {"trade_pair": pair, "direction": "SHORT", "asset_class": ac,
+                   "tp_bps": tp, "sl_bps": sl, "horizon_s": hor}
+        sb = hf.submit_signing_bytes(kp.ss58_address, seq, "n" * 32, payload, ts)
+        return {"v": 1, "kind": "hf.submit", "hk": kp.ss58_address, "seq": seq,
+                "nonce": "n" * 32, "ts_miner": ts, "payload": payload,
+                "sig": kp.sign(sb).hex()}
+
+    def _rows(self, tmp_path):
+        import json as _j
+        out = []
+        for p in sorted((tmp_path / "entry-probe").glob("*.jsonl")):
+            out += [_j.loads(ln) for ln in p.read_text().splitlines() if ln.strip()]
+        return out
+
+    def test_accept_records_what_the_bus_held(self, tmp_path, monkeypatch):
+        from bittensor_wallet import Keypair
+        miner = Keypair.create_from_uri("//EntryProbeMiner")
+        hi, ing = self._ingest(tmp_path, registered={miner.ss58_address})
+        monkeypatch.setattr(hf, "HF_OPEN_GATE_FROM", 9e18)
+        out = ing.handle(self._frame(miner))
+        assert out["kind"] == "hf.receipt", out.get("reason")
+        rows = [r for r in self._rows(tmp_path) if r["stage"] == "accept"]
+        assert len(rows) == 1
+        assert rows[0]["bus_px"] == 64_000.0
+        assert rows[0]["grid_t0_ms"] == out["grid_t0_ms"]
+
+    def test_the_settled_sample_fires_when_due(self, tmp_path, monkeypatch):
+        from bittensor_wallet import Keypair
+        miner = Keypair.create_from_uri("//EntryProbeSettle")
+        hi, ing = self._ingest(tmp_path, registered={miner.ss58_address})
+        monkeypatch.setattr(hf, "HF_OPEN_GATE_FROM", 9e18)
+        out = ing.handle(self._frame(miner))
+        assert ing._entry_probe, "nothing queued for the settled sample"
+        due = list(ing._entry_probe.values())[0]["due_ms"]
+        # the bus moves during the settle -- that movement is the measurement
+        ing.last_px["BTCUSD"] = (1_787_000_005_000, 64_010.0)
+        assert ing.sample_due_entry_probes(due - 1) == 0     # not yet
+        assert ing.sample_due_entry_probes(due + 1) == 1
+        assert not ing._entry_probe                          # popped, cannot grow
+        s = [r for r in self._rows(tmp_path) if r["stage"] == "settle"]
+        assert len(s) == 1 and s[0]["bus_px"] == 64_010.0
+
+    def test_a_hopelessly_late_sample_is_dropped_not_written(self, tmp_path,
+                                                             monkeypatch):
+        """A sample taken minutes after the settle describes nothing, and writing it
+        would quietly pollute the parity number this exists to produce."""
+        from bittensor_wallet import Keypair
+        miner = Keypair.create_from_uri("//EntryProbeLate")
+        hi, ing = self._ingest(tmp_path, registered={miner.ss58_address})
+        monkeypatch.setattr(hf, "HF_OPEN_GATE_FROM", 9e18)
+        ing.handle(self._frame(miner))
+        due = list(ing._entry_probe.values())[0]["due_ms"]
+        assert ing.sample_due_entry_probes(due + 600_000) == 0
+        assert not ing._entry_probe
+        assert [r for r in self._rows(tmp_path) if r["stage"] == "settle"] == []
+
+    def test_a_broken_probe_never_costs_the_receipt(self, tmp_path, monkeypatch):
+        from bittensor_wallet import Keypair
+        miner = Keypair.create_from_uri("//EntryProbeBroken")
+        hi, ing = self._ingest(tmp_path, registered={miner.ss58_address})
+        ing._entry_probe_dir = str(tmp_path / "nope" / "\0bad")
+        monkeypatch.setattr(hf, "HF_OPEN_GATE_FROM", 9e18)
+        out = ing.handle(self._frame(miner))
+        assert out["kind"] == "hf.receipt", out.get("reason")
+        assert ing.windows
+
+    def test_a_refusal_is_never_probed(self, tmp_path):
+        """No entry to compare: the call does not exist."""
+        from bittensor_wallet import Keypair
+        miner = Keypair.create_from_uri("//EntryProbeRefused")
+        hi, ing = self._ingest(tmp_path)          # unregistered -> refused
+        assert ing.handle(self._frame(miner))["kind"] == "hf.reject"
+        assert self._rows(tmp_path) == []
+        assert not ing._entry_probe

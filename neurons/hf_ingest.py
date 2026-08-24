@@ -101,6 +101,26 @@ LIVE_DIR = Path(os.getenv("SN89_HF_LIVE_DIR", str(LOG_DIR / "live")))
 # still catches up, and small enough that the dir stays a handful of files.
 LIVE_RETAIN_S = int(os.getenv("SN89_HF_LIVE_RETAIN_S", str(3 * 3600)))
 
+# ── entry-parity probe (DIAGNOSTIC ONLY — nothing reads this to decide anything)
+# A grade needs three things: the entry price, the band, and the ticks. The band is
+# known at accept and the ticks are on our own bus, so the ONLY reason grading waits
+# for a sealed window is the entry. Measured 2026-08-24, the entry tick is already
+# 0ms old at t0 for metals and p50 438ms / p90 1963ms for crypto -- it has arrived
+# before the call has. What has NOT necessarily arrived is a tick STAMPED at or
+# before t0 that reaches us late (transport lag p50 0.6-2.3s, TAOUSD p90 4.8s).
+#
+# So this samples the bus twice for every accepted call: once in the hot path, and
+# once SETTLE_S later. Comparing both against hf.price_at over the sealed window
+# answers the question the fast-grade design turns on -- how long must we wait
+# before our entry provably equals the validator's? Zero would mean no wait at all.
+#
+# Deliberately its OWN sidecar and not a field on the live-tail row: that row is
+# byte-identical to what seal_window writes, consumers dedupe on it, and a test
+# pins the equality. A diagnostic must not be the thing that breaks it.
+ENTRY_PROBE_DIR = Path(os.getenv("SN89_HF_ENTRY_PROBE_DIR", str(LOG_DIR / "entry-probe")))
+ENTRY_PROBE_SETTLE_S = float(os.getenv("SN89_HF_ENTRY_PROBE_SETTLE_S", "10"))
+ENTRY_PROBE_RETAIN_S = int(os.getenv("SN89_HF_ENTRY_PROBE_RETAIN_S", str(7 * 86400)))
+
 _state: dict = {"seq": {}, "sent": {}, "windows": {}}
 
 
@@ -123,6 +143,7 @@ class Ingest:
     # its own tmp dir (test_reject_log_persists_a_refusal does).
     _reject_dir = None
     _live_dir = None            # same reason as _reject_dir above
+    _entry_probe_dir = None     # same reason again
 
     def __init__(self, receipt_kp: Keypair):
         self.kp = receipt_kp
@@ -146,6 +167,8 @@ class Ingest:
         self._pruned_at = 0.0
         self._reject_dir = REJECT_DIR
         self._live_dir = LIVE_DIR
+        self._entry_probe_dir = ENTRY_PROBE_DIR
+        self._entry_probe: dict = {}   # (hk, seq) -> due_ms, for the settled sample
         LOG_DIR.mkdir(parents=True, exist_ok=True)
         self.refresh_mech0_locks()
         if REQUIRE_REGISTERED and not self.refresh_registered():
@@ -241,6 +264,7 @@ class Ingest:
                 del self.open_calls[k]
         rej = self.prune_rejects()
         liv = self.prune_live()
+        self.prune_entry_probe()
         if dropped or stale or shut or rej or liv:
             _log(f"prune: sent_ms -{dropped} ts, lock_index -{len(stale)} keys, "
                  f"open_calls -{shut} (now {len(self.sent_ms)} hk / "
@@ -400,6 +424,62 @@ class Ingest:
         except Exception as e:                                   # noqa: BLE001
             _log(f"live tail write FAILED hk={rcpt.get('hk')} seq={rcpt.get('seq')}: {e}")
 
+    def _entry_row(self, stage, hk, seq, pair, grid_t0_ms, t_recv_us):
+        px = self.last_px.get(pair)
+        return {"stage": stage, "hk": hk, "seq": seq, "pair": pair,
+                "grid_t0_ms": grid_t0_ms, "t_recv_us": t_recv_us,
+                "at_ms": int(time.time() * 1000),
+                "bus_ts": (px[0] if px else None),
+                "bus_px": (px[1] if px else None)}
+
+    def record_entry_probe(self, stage, hk, seq, pair, grid_t0_ms, t_recv_us) -> None:
+        """Append one bus sample for a call. Never raises — see record_live."""
+        if self._entry_probe_dir is None:
+            return
+        try:
+            d = Path(self._entry_probe_dir)
+            d.mkdir(parents=True, exist_ok=True)
+            w = hf.window_start_ms(int(t_recv_us) // 1000)
+            row = self._entry_row(stage, hk, seq, pair, grid_t0_ms, t_recv_us)
+            with open(d / f"{w}.jsonl", "a") as f:
+                f.write(json.dumps(row, separators=(",", ":")) + "\n")
+        except Exception as e:                                   # noqa: BLE001
+            _log(f"entry probe write FAILED hk={hk} seq={seq} stage={stage}: {e}")
+
+    def sample_due_entry_probes(self, now_ms: int) -> int:
+        """Take the SETTLED sample for any call whose settle window has elapsed.
+
+        Driven from anchor_loop, which already ticks every second. Bounded: an entry
+        is popped when sampled, and anything impossibly stale is dropped rather than
+        held, so a burst cannot grow this without limit.
+        """
+        if self._entry_probe_dir is None or not self._entry_probe:
+            return 0
+        n = 0
+        for k in [k for k, v in self._entry_probe.items() if v["due_ms"] <= now_ms]:
+            v = self._entry_probe.pop(k)
+            if now_ms - v["due_ms"] > 300_000:
+                continue                       # far too late to describe the settle
+            self.record_entry_probe("settle", k[0], k[1], v["pair"],
+                                    v["grid_t0_ms"], v["t_recv_us"])
+            n += 1
+        return n
+
+    def prune_entry_probe(self) -> int:
+        """Drop probe windows past ENTRY_PROBE_RETAIN_S."""
+        if self._entry_probe_dir is None:
+            return 0
+        cut = int((time.time() - ENTRY_PROBE_RETAIN_S) * 1000)
+        n = 0
+        try:
+            for p in Path(self._entry_probe_dir).glob("*.jsonl"):
+                if p.stem.isdigit() and int(p.stem) < cut:
+                    p.unlink()
+                    n += 1
+        except OSError as e:
+            _log(f"entry probe prune failed: {e}")
+        return n
+
     def prune_live(self) -> int:
         """Drop live-tail windows past LIVE_RETAIN_S. The sealed log is the record;
         this copy has no reason to outlive the consumers that read the tail."""
@@ -555,6 +635,11 @@ class Ingest:
         w = hf.window_start_ms(t_recv_ms)
         self.windows.setdefault(w, []).append({"submit": frame, "receipt": rcpt})
         self.record_live(frame, rcpt)
+        self.record_entry_probe("accept", hk, seq, pair, grid, t_recv_us)
+        if self._entry_probe_dir is not None and len(self._entry_probe) < 10_000:
+            self._entry_probe[(hk, seq)] = {
+                "due_ms": int(grid) + int(ENTRY_PROBE_SETTLE_S * 1000),
+                "pair": pair, "grid_t0_ms": grid, "t_recv_us": t_recv_us}
         return rcpt
 
     # ── anchoring ────────────────────────────────────────────────────────────
@@ -587,6 +672,7 @@ class Ingest:
             if REQUIRE_REGISTERED and time.time() - self._reg_loaded_at > REG_REFRESH_S:
                 await asyncio.to_thread(self.refresh_registered)
             now = int(time.time() * 1000)
+            self.sample_due_entry_probes(now)
             cur = hf.window_start_ms(now)
             for w in [x for x in self.windows if x < cur]:
                 self.seal_window(w)
