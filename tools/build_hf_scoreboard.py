@@ -503,10 +503,33 @@ def _mecid1_weights(decisive_by_hk, first_seen_by_hk, subs_by_hk, now):
 # Derived and cached incrementally: a call is walked once, ever.
 
 def _tick_dir() -> str | None:
+    """The tick directory holding the NEWEST published window - not the first
+    that happens to exist.
+
+    hf_grade._ticks_for reads windows in place out of LOCAL_TICK_SRC whenever
+    this host is the one recording them, and writes into the validator's cache
+    dir only when it has to fetch. So on a recording host the cache dir keeps
+    existing while silently freezing: ~/.sn89/hf-grade/ticks stopped advancing
+    2026-08-23 15:33 UTC, this function kept returning it because it was listed
+    first, and _compute_paths then found no window file for anything graded
+    after that. Every such call rendered OUTCOME and MFE/MAE as an em dash and
+    banked "+0 bps" in the win ledger, which reads to a trader as a win that did
+    not count - though grades, multipliers and emission weight never touch a
+    path. Ranking by content survives the frontier moving back the other way.
+    """
+    best, best_w = None, -1
     for d in TICK_DIRS:
-        if os.path.isdir(d):
-            return d
-    return None
+        if not os.path.isdir(d):
+            continue
+        w = -1
+        with os.scandir(d) as it:
+            for e in it:
+                n = e.name
+                if n.endswith(".ticks.jsonl") and n[:-12].isdigit():
+                    w = max(w, int(n[:-12]))
+        if w > best_w:
+            best, best_w = d, w
+    return best
 
 
 def _path_db() -> sqlite3.Connection:
