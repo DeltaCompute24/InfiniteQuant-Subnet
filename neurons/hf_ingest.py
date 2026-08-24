@@ -83,6 +83,23 @@ REJECT_DIR = Path(os.getenv("SN89_HF_REJECT_DIR", str(LOG_DIR / "rejects")))
 # Long enough that a trader can still ask about last week; the board only reads
 # the newest few per hotkey.
 REJECT_RETAIN_S = int(os.getenv("SN89_HF_REJECT_RETAIN_S", str(30 * 86400)))
+# The live tail. seal_window writes the anchored copy only at window close, in
+# canonical leaf order (t_recv_us, hk, seq) over the WHOLE window, because that is
+# what the Merkle root is taken over -- a property of the PROOF, not of the data.
+# The accepted row itself exists the instant we sign the receipt. Letting the
+# anchored file be the only copy put a 0-180s delay (mean 90s) in front of every
+# reader of a mechanism whose whole point is that a countersigned receipt binds a
+# call without waiting for a block. Refusals never had this: record_rejection has
+# always appended per submission.
+#
+# UNANCHORED, and it must stay that way in the reader's mind: consuming it is
+# trusting THIS ingest rather than a Merkle proof. It is for our own execution
+# only. Weights, grading and replay keep reading the sealed logs, which the
+# subdir rule above already guarantees (they glob LOG_DIR/*.jsonl, not **).
+LIVE_DIR = Path(os.getenv("SN89_HF_LIVE_DIR", str(LOG_DIR / "live")))
+# Only needs to outlive its own window; hours of slack so a consumer that stalls
+# still catches up, and small enough that the dir stays a handful of files.
+LIVE_RETAIN_S = int(os.getenv("SN89_HF_LIVE_RETAIN_S", str(3 * 3600)))
 
 _state: dict = {"seq": {}, "sent": {}, "windows": {}}
 
@@ -105,6 +122,7 @@ class Ingest:
     # __init__ sets the real path; a test that wants to exercise persistence sets
     # its own tmp dir (test_reject_log_persists_a_refusal does).
     _reject_dir = None
+    _live_dir = None            # same reason as _reject_dir above
 
     def __init__(self, receipt_kp: Keypair):
         self.kp = receipt_kp
@@ -127,6 +145,7 @@ class Ingest:
         self._subtensor = None                      # reused across refreshes — see _conn()
         self._pruned_at = 0.0
         self._reject_dir = REJECT_DIR
+        self._live_dir = LIVE_DIR
         LOG_DIR.mkdir(parents=True, exist_ok=True)
         self.refresh_mech0_locks()
         if REQUIRE_REGISTERED and not self.refresh_registered():
@@ -221,11 +240,12 @@ class Ingest:
             else:
                 del self.open_calls[k]
         rej = self.prune_rejects()
-        if dropped or stale or shut or rej:
+        liv = self.prune_live()
+        if dropped or stale or shut or rej or liv:
             _log(f"prune: sent_ms -{dropped} ts, lock_index -{len(stale)} keys, "
                  f"open_calls -{shut} (now {len(self.sent_ms)} hk / "
                  f"{len(self.lock_index)} locks / {len(self.open_calls)} held pairs), "
-                 f"reject logs -{rej}")
+                 f"reject logs -{rej}, live tail -{liv}")
         self._pruned_at = time.time()
 
     # ── tick tail (feeds the open-position gate) ─────────────────────────────
@@ -357,6 +377,45 @@ class Ingest:
         except Exception as e:                                   # noqa: BLE001
             _log(f"reject log write failed ({rej.get('reason')}): {e}")
 
+    def record_live(self, frame: dict, rcpt: dict) -> None:
+        """Append an accepted row to the live tail. Never raises.
+
+        Byte-identical in shape to the sealed window log ({"submit", "receipt"}),
+        so a reader unions the two on (hk, seq) with no second parser and no
+        second schema to drift. Runs inside the sub-second accept path, so it is
+        one buffered append and no fsync -- exactly the trade record_rejection
+        documents: losing the tail on a hard kill costs a few seconds of head
+        start, while raising here would turn an ACCEPTED call into a dropped
+        connection. The anchored copy is unaffected either way.
+        """
+        if self._live_dir is None:
+            return
+        try:
+            d = Path(self._live_dir)
+            d.mkdir(parents=True, exist_ok=True)
+            w = hf.window_start_ms(int(rcpt["t_recv_us"]) // 1000)
+            with open(d / f"{w}.jsonl", "a") as f:
+                f.write(json.dumps({"submit": frame, "receipt": rcpt},
+                                   separators=(",", ":")) + "\n")
+        except Exception as e:                                   # noqa: BLE001
+            _log(f"live tail write FAILED hk={rcpt.get('hk')} seq={rcpt.get('seq')}: {e}")
+
+    def prune_live(self) -> int:
+        """Drop live-tail windows past LIVE_RETAIN_S. The sealed log is the record;
+        this copy has no reason to outlive the consumers that read the tail."""
+        if self._live_dir is None:
+            return 0
+        cut = int((time.time() - LIVE_RETAIN_S) * 1000)
+        n = 0
+        try:
+            for p in Path(self._live_dir).glob("*.jsonl"):
+                if p.stem.isdigit() and int(p.stem) < cut:
+                    p.unlink()
+                    n += 1
+        except OSError as e:
+            _log(f"live prune failed: {e}")
+        return n
+
     def prune_rejects(self) -> int:
         """Drop reject-log windows past REJECT_RETAIN_S. Unbounded otherwise —
         a miner in a refusal loop writes one line per submit, forever."""
@@ -480,6 +539,7 @@ class Ingest:
             self.closers_sent_ms.setdefault(hk, []).append(t_recv_ms)
             w = hf.window_start_ms(t_recv_ms)
             self.windows.setdefault(w, []).append({"submit": frame, "receipt": rcpt})
+            self.record_live(frame, rcpt)
             return rcpt
         self.sent_ms.setdefault(hk, []).append(t_recv_ms)
         self.lock_index[(hk, pair, hf.MECID)] = t_recv_ms
@@ -494,6 +554,7 @@ class Ingest:
                         _tp, _sl, grid, _hor))
         w = hf.window_start_ms(t_recv_ms)
         self.windows.setdefault(w, []).append({"submit": frame, "receipt": rcpt})
+        self.record_live(frame, rcpt)
         return rcpt
 
     # ── anchoring ────────────────────────────────────────────────────────────

@@ -1936,3 +1936,127 @@ class TestHFDiversityPerPair:
         d = hf.hf_diversity(subs, self.NOW)
         assert d["n"] == 105 and d["pairs"] == 1
         assert d["floor"] == hf.HF_DIVERSITY_FLOOR_NARROW
+
+
+class TestLiveTail:
+    """An accepted call reached disk only when seal_window wrote the anchored copy
+    at window close, so every reader saw it 0-180s late (mean 90s) on a mechanism
+    built so a countersigned receipt binds a call WITHOUT waiting for a block. The
+    delay belonged to the proof -- the anchored file is written whole, in canonical
+    leaf order, because that is what the Merkle root covers -- and it was allowed to
+    become the only copy. Refusals never had the problem; record_rejection has always
+    appended per submission. These pin the accept side to the same behaviour.
+    """
+
+    def _ingest(self, tmp_path, registered=frozenset()):
+        import importlib
+        from bittensor_wallet import Keypair
+        hi = importlib.import_module("neurons.hf_ingest")
+        ing = object.__new__(hi.Ingest)
+        ing.kp = Keypair.create_from_uri("//LiveTailKey")
+        ing.last_seq, ing.sent_ms, ing.windows = {}, {}, {}
+        ing.closers_sent_ms = {}
+        ing.lock_index, ing._locks_loaded_at = {}, 9e18
+        ing.registered, ing._reg_loaded_at = set(registered), 9e18
+        ing.open_calls, ing.last_px = {}, {}
+        ing._tick_ok_at = 0.0
+        ing._reject_dir = str(tmp_path / "rejects")
+        ing._live_dir = str(tmp_path / "live")
+        return hi, ing
+
+    def _frame(self, kp, seq=1, pair="BTCUSD"):
+        import time as _t
+        ts = int(_t.time() * 1000)
+        tp, sl, hor, ac = hf.hf_bands_as_of(ts / 1000.0)[pair]
+        payload = {"trade_pair": pair, "direction": "SHORT", "asset_class": ac,
+                   "tp_bps": tp, "sl_bps": sl, "horizon_s": hor}
+        sb = hf.submit_signing_bytes(kp.ss58_address, seq, "n" * 32, payload, ts)
+        return {"v": 1, "kind": "hf.submit", "hk": kp.ss58_address, "seq": seq,
+                "nonce": "n" * 32, "ts_miner": ts, "payload": payload,
+                "sig": kp.sign(sb).hex()}
+
+    def _rows(self, tmp_path):
+        import json as _j
+        out = []
+        for p in sorted((tmp_path / "live").glob("*.jsonl")):
+            out += [_j.loads(ln) for ln in p.read_text().splitlines() if ln.strip()]
+        return out
+
+    def test_accepted_call_is_on_disk_before_its_window_seals(self, tmp_path,
+                                                              monkeypatch):
+        from bittensor_wallet import Keypair
+        miner = Keypair.create_from_uri("//LiveTailMiner")
+        hi, ing = self._ingest(tmp_path, registered={miner.ss58_address})
+        monkeypatch.setattr(hf, "HF_OPEN_GATE_FROM", 9e18)
+        out = ing.handle(self._frame(miner))
+        assert out["kind"] == "hf.receipt", out.get("reason")
+        # the window is still open -- nothing has been sealed
+        assert ing.windows and not list(tmp_path.glob("*.jsonl"))
+        rows = self._rows(tmp_path)
+        assert len(rows) == 1
+        # SAME SHAPE as the sealed log, so a reader unions the two with one parser
+        assert set(rows[0]) == {"submit", "receipt"}
+        assert rows[0]["receipt"]["sig_owner"] == out["sig_owner"]
+        assert rows[0]["submit"]["payload"]["trade_pair"] == "BTCUSD"
+
+    def test_the_live_row_is_the_row_seal_window_would_write(self, tmp_path,
+                                                             monkeypatch):
+        """If these ever diverge, a consumer reading live-then-sealed sees one call
+        twice in two shapes, and the (hk, seq) dedupe it relies on stops meaning
+        anything."""
+        from bittensor_wallet import Keypair
+        miner = Keypair.create_from_uri("//LiveTailSameShape")
+        hi, ing = self._ingest(tmp_path, registered={miner.ss58_address})
+        monkeypatch.setattr(hf, "HF_OPEN_GATE_FROM", 9e18)
+        ing.handle(self._frame(miner))
+        (w, entries), = ing.windows.items()
+        assert self._rows(tmp_path) == entries
+
+    def test_a_refusal_is_not_in_the_live_tail(self, tmp_path):
+        """It goes to the reject log. A refused call is not a call."""
+        from bittensor_wallet import Keypair
+        miner = Keypair.create_from_uri("//LiveTailRefused")
+        hi, ing = self._ingest(tmp_path)          # not registered -> refused
+        out = ing.handle(self._frame(miner))
+        assert out["kind"] == "hf.reject"
+        assert self._rows(tmp_path) == []
+
+    def test_no_live_dir_means_no_write(self, tmp_path, monkeypatch):
+        """The class default, for the same reason _reject_dir has one: a suite run
+        must not append throwaway keypairs into the production tail."""
+        from bittensor_wallet import Keypair
+        import importlib
+        hi = importlib.import_module("neurons.hf_ingest")
+        assert hi.Ingest._live_dir is None
+        miner = Keypair.create_from_uri("//LiveTailNoDir")
+        _hi, ing = self._ingest(tmp_path, registered={miner.ss58_address})
+        ing._live_dir = None
+        monkeypatch.setattr(hf, "HF_OPEN_GATE_FROM", 9e18)
+        out = ing.handle(self._frame(miner))
+        assert out["kind"] == "hf.receipt", out.get("reason")
+        assert not (tmp_path / "live").exists()
+
+    def test_a_broken_tail_never_costs_the_miner_the_receipt(self, tmp_path,
+                                                             monkeypatch):
+        """This runs inside the sub-second accept path. Raising here would turn an
+        ACCEPTED call into a dropped connection, which is strictly worse than a
+        consumer being 90s behind -- the thing we are fixing."""
+        from bittensor_wallet import Keypair
+        miner = Keypair.create_from_uri("//LiveTailBroken")
+        hi, ing = self._ingest(tmp_path, registered={miner.ss58_address})
+        ing._live_dir = str(tmp_path / "nope" / "\0bad")
+        monkeypatch.setattr(hf, "HF_OPEN_GATE_FROM", 9e18)
+        out = ing.handle(self._frame(miner))
+        assert out["kind"] == "hf.receipt", out.get("reason")
+        # and the anchored path is untouched by the failure
+        assert ing.windows
+
+    def test_live_dir_is_a_subdir_so_consensus_cannot_see_it(self):
+        """hf_anchor._pending and build_hf_scoreboard._accepted_calls glob
+        LOG_DIR/*.jsonl NON-recursively. A subdir is invisible to them, which is
+        what keeps an UNANCHORED row out of weights and replay. Flattening this
+        into LOG_DIR would silently feed the live copy into consensus."""
+        import importlib
+        hi = importlib.import_module("neurons.hf_ingest")
+        assert hi.LIVE_DIR.parent == hi.LOG_DIR
+        assert hi.LIVE_DIR != hi.LOG_DIR
