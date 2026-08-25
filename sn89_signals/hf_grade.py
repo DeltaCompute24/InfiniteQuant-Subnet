@@ -257,6 +257,20 @@ def _db(cache_dir: str) -> sqlite3.Connection:
         c.execute("ALTER TABLE grades ADD COLUMN open_until_ms INTEGER")
     if "direction" not in have_cols:
         c.execute("ALTER TABLE grades ADD COLUMN direction TEXT")
+    # `reason` is v5: WHY a call voided, in the same string the ingest hands a
+    # refused submission (`pair_open_same_mechanism:<openmax>:<free_at_ms>`,
+    # `no_entry_price`). Purely explanatory — nothing scoring reads it, so it is
+    # added WITHOUT a GRADER_VERSION bump: a bump clears every row, and on a
+    # mechanism whose eligibility gates are measured in days that is a live-fire
+    # replayability test this change has no reason to run.
+    #
+    # It exists because a void was previously indistinguishable from every other
+    # void at every surface a miner can see. The website charts the call as if it
+    # had been scored, which for a call that reached TP reads as a grading bug.
+    # Rows written before v5 carry NULL; a reader must be able to derive the
+    # reason from `grades` alone (see `void_reason_for`) rather than assume.
+    if "reason" not in have_cols:
+        c.execute("ALTER TABLE grades ADD COLUMN reason TEXT")
     # Every ACCEPTED submission, independent of whether it can be graded.
     #
     # `grades` is NOT the set of calls a miner made — it is the subset we could
@@ -506,13 +520,13 @@ def _resolve_pending(db, base: str, tick_dir: str, row, now_ms: int,
         (hk, pair, int(t0_ms)))]
     try:
         hf.check_pair_open(prior_open, int(t0_ms), t0_ms / 1000.0)
-    except hf.HFRejected:
+    except hf.HFRejected as e:
         if early:
             return          # a void costs the miner nothing to learn at the horizon
         db.execute("INSERT OR REPLACE INTO grades "
-                   "(key, hk, t0_ms, pair, status, open_until_ms, direction) "
-                   "VALUES (?,?,?,?,?,?,?)",
-                   (key, hk, int(t0_ms), pair, "void", int(t0_ms), direction))
+                   "(key, hk, t0_ms, pair, status, open_until_ms, direction, reason) "
+                   "VALUES (?,?,?,?,?,?,?,?)",
+                   (key, hk, int(t0_ms), pair, "void", int(t0_ms), direction, str(e)))
         db.execute("DELETE FROM pending WHERE key=?", (key,))
         return
     g = hf.grade(pair, direction, entry, tp, sl, int(t0_ms), horizon_s, ticks)
@@ -535,10 +549,53 @@ def _resolve_pending(db, base: str, tick_dir: str, row, now_ms: int,
     # whatever that validator's history happened to be. A bare VALUES(...) would bind
     # direction into open_until_ms on some nodes and not others.
     db.execute("INSERT OR REPLACE INTO grades "
-               "(key, hk, t0_ms, pair, status, open_until_ms, direction) "
-               "VALUES (?,?,?,?,?,?,?)",
-               (key, hk, int(t0_ms), pair, g["status"], int(held), direction))
+               "(key, hk, t0_ms, pair, status, open_until_ms, direction, reason) "
+               "VALUES (?,?,?,?,?,?,?,?)",
+               (key, hk, int(t0_ms), pair, g["status"], int(held), direction,
+                g.get("reason") if g["status"] == "void" else None))
     db.execute("DELETE FROM pending WHERE key=?", (key,))
+
+
+def void_reason_for(db, hk: str, pair: str, t0_ms: int,
+                    stored_reason: str | None = None) -> dict | None:
+    """Explain ONE void, for a human, from `grades` alone.
+
+    Returns the machine reason plus, when that reason is the open-position gate,
+    the prior call that was still holding the pair — which is the only part a
+    miner can act on. A bare `pair_open_same_mechanism:1:<ms>` names a time and
+    not a trade, and the first question back is always "held by WHAT".
+
+    `stored_reason` is the `reason` column when the row has one. Rows graded
+    before that column existed carry NULL, so the holder is RE-DERIVED here from
+    the same table with the same rule rather than left unexplained: the inputs
+    (`open_until_ms` on every non-void predecessor) are exactly what the gate
+    read, so a derived answer and a stored one agree by construction. Deriving it
+    also means the answer survives a cache rebuild, which drops these rows and
+    re-grades them.
+    """
+    holders = [
+        {"t0_ms": int(r[0]), "direction": r[1], "status": r[2],
+         "open_until_ms": int(r[3])}
+        for r in db.execute(
+            "SELECT t0_ms, direction, status, open_until_ms FROM grades "
+            "WHERE hk=? AND pair=? AND t0_ms<? AND status!='void' "
+            "AND open_until_ms IS NOT NULL AND open_until_ms>? "
+            "ORDER BY t0_ms",
+            (hk, pair, int(t0_ms), int(t0_ms)))]
+    reason = stored_reason or (
+        "pair_open_same_mechanism:1:%d" % min(h["open_until_ms"] for h in holders)
+        if holders else None)
+    if reason is None:
+        # No holder and no stored reason. The only other way `grade()` voids is a
+        # missing entry price, so say that rather than invent a third cause — but
+        # say it as the fallback it is, not as a reading.
+        return {"code": "no_entry_price", "reason": None, "holders": []}
+    out = {"code": str(reason).split(":")[0], "reason": str(reason),
+           "holders": holders}
+    if holders:
+        out["blocked_by"] = min(holders, key=lambda h: h["t0_ms"])
+        out["free_at_ms"] = min(h["open_until_ms"] for h in holders)
+    return out
 
 
 def _history(cache_dir: str, as_of: float | None = None):
