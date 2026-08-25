@@ -391,7 +391,73 @@ def _grades():
             return by_key, rows, held, subs_rows
         except sqlite3.Error:
             continue
-    return {}, [], {}
+    # FOUR values. This returned three, so the one path that reaches it — no
+    # readable grade cache at all — raised ValueError at the call site instead of
+    # rendering the empty board it was written to render.
+    return {}, [], {}, []
+
+
+def _void_notes() -> dict:
+    """{key: {"code","reason","blocked_by"}} for every void in the grade cache.
+
+    A void is the one status the miner page could not act on: the row said `void`
+    and the chart replayed the call's own ticks, which for a call blocked by the
+    open-position gate can run straight to TP while the card says void. Three of
+    Hiig's calls read as a grading bug that way on 2026-08-25.
+
+    Reads its own connection rather than widening `_grades()`, whose four return
+    values are unpacked positionally at the call site. `reason` is v5; a cache
+    written by an older validator has no such column, so the holder is re-derived
+    from the same `open_until_ms` values the gate itself read — the answer is the
+    same either way, which is the point.
+    """
+    cols = ("key, hk, t0_ms, pair, status, open_until_ms, direction, reason",
+            "key, hk, t0_ms, pair, status, open_until_ms, direction, NULL")
+    for db in GRADE_DBS:
+        if not os.path.exists(db):
+            continue
+        rows = None
+        for sel in cols:
+            try:
+                c = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
+                rows = list(c.execute(f"SELECT {sel} FROM grades"))
+                c.close()
+                break
+            except sqlite3.Error:
+                continue
+        if rows is None:
+            continue
+        # Only a NON-void predecessor holds a pair (`open_until_ms` is t0 for a
+        # void), so a refusal can never chain into the calls behind it.
+        by_pair: dict = {}
+        for _k, hk, t0, pair, st, ou, dr, _r in rows:
+            if st != "void" and ou is not None:
+                by_pair.setdefault((hk, pair), []).append((int(t0), dr, st, int(ou)))
+        out = {}
+        for key, hk, t0, pair, st, _ou, _dr, reason in rows:
+            if st != "void":
+                continue
+            held = [h for h in by_pair.get((hk, pair), [])
+                    if h[0] < int(t0) < h[3]]
+            reason = reason or ("pair_open_same_mechanism:1:%d" % min(h[3] for h in held)
+                                if held else None)
+            if reason is None:
+                out[key] = {"code": "no_entry_price", "reason": None, "blocked_by": None}
+                continue
+            n = {"code": str(reason).split(":")[0], "reason": str(reason),
+                 "blocked_by": None}
+            if held:
+                b = min(held, key=lambda h: h[0])
+                n["blocked_by"] = {
+                    "t0_unix": b[0] / 1000.0, "direction": b[1], "status": b[2],
+                    "held_until_unix": b[3] / 1000.0,
+                    "released_by": "horizon" if b[2] == "wash" else "touch",
+                }
+                n["free_at_unix"] = min(h[3] for h in held) / 1000.0
+                n["submitted_s_early"] = round((min(h[3] for h in held) - int(t0)) / 1000.0)
+            out[key] = n
+        return out
+    return {}
 
 
 def _publish_grade_db(src: str) -> None:
@@ -896,6 +962,7 @@ def main() -> int:
     now = time.time()
     calls = _accepted_calls()
     grades, grade_rows, held_by_key, subs_rows = _grades()
+    void_notes = _void_notes()
     hk2uid, names, retired_hks = _identity()
     # HF eligibility (>=50 accepted submissions across >=8 distinct UTC trading
     # days) — the same gate the validator applies; the qualified badge must not
@@ -1003,9 +1070,11 @@ def main() -> int:
             pa["washed"] += 1
         elif st is None:
             a["pending"] += 1             # not yet in the grade cache
-        # else: a resolved 'void' (no valid price at the grid point) — a real
-        # submission (counted in n/longs/shorts) but neither decisive, wash, nor
-        # pending. Falls through so it never inflates the pending count.
+        # else: a resolved 'void' — a real submission (counted in n/longs/shorts)
+        # but neither decisive, wash, nor pending. Falls through so it never
+        # inflates the pending count. NB the usual cause is the same-mechanism
+        # open-position gate, NOT a missing price at the grid point: `void_notes`
+        # below carries which, and the prior call that held the pair.
 
         # the miner's own call history. Built for EVERY status including void and
         # pending: a trader chasing "where did my call go" is asking about exactly
@@ -1029,6 +1098,10 @@ def main() -> int:
             "tp_bps": round(float(band[0])) if band else None,
             "sl_bps": round(float(band[1])) if band else None,
             "horizon_s": int(band[2]) if band else None,
+            # Void only; None on every other status. Without it the page prints a
+            # verdict with no cause and charts the call as though it had been
+            # scored.
+            **({"void": void_notes.get(key)} if st == "void" else {}),
         })
 
     # cadence strip + the subnet-level network block, both from the LF builder
