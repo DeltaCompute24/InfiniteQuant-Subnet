@@ -100,10 +100,27 @@ def miner_label(hotkey: str) -> str:
 
 def gradeable_pairs() -> set[str]:
     """Pairs the HF tick recorder covers: HF board ∪ LF board (mirrors the
-    recorder's own default pair list)."""
+    recorder's own default pair list).
+
+    ⚠ THE LF HALF MUST INDEX ["bands"]. `load_bands()` returns the whole
+    document — {"version", "bands", "note", "refreshed_at", "vol_window_days"} —
+    so `set(load_bands().keys())` unions in FIVE METADATA STRINGS and ZERO
+    pairs. The votable set silently collapsed to HF_BOARD_V1, which is exactly
+    what this docstring promises it is not, and no test or log line said so:
+    the junk keys uppercase to plausible-looking pair names and every position
+    on an LF-only pair simply never appeared in the feed.
+
+    Measured on the position bus over the 30 days to 2026-08-25: AUDUSD,
+    HYPEUSD, TAOUSD, USDCAD and XAGUSD were unvotable, dropping 275 of 3,122
+    fleet opens (8.8%) and 99 of 906 allowlisted opens (10.9%). TAOUSD had been
+    a graded LF pair since 2026-08-11 and was never once votable.
+
+    `config.allowed_assets()` exists for precisely this and is what the tick
+    recorder uses (neurons/hf_tick_recorder.py). Use it, not load_bands().
+    """
     pairs = set(hf.HF_BOARD_V1)
     try:
-        pairs |= set(config.load_bands().keys())
+        pairs |= set(config.allowed_assets().keys())
     except Exception:  # noqa: BLE001 — board unreadable → HF pairs still work
         pass
     return {p.upper() for p in pairs}
