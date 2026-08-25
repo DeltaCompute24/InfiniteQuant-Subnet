@@ -66,6 +66,26 @@ TICK_SOURCE = os.getenv("SN89_TICK_SOURCE", "hyperliquid")
 TICK_SOURCE_Q = f"?source={TICK_SOURCE}" if TICK_SOURCE else ""
 OUT_DIR = Path(os.getenv("SN89_HF_TICK_DIR", "/var/lib/sn89-hf/ticks"))
 POLL_MS = int(os.getenv("SN89_HF_TICK_POLL_MS", "50"))
+
+# ── live tail ────────────────────────────────────────────────────────────────
+# Ticks reach disk only when their window seals, which is 5s after a 180s window
+# closes -- so the series is 5-185s behind by construction. That is right for the
+# ANCHORED artifact: the tick_root is taken over the whole window and cannot be
+# written incrementally. It is not a property of the data, which we hold the
+# instant the bus returns it.
+#
+# The same additive row goes here as it arrives, so anything that needs to reason
+# about price NOW reads live-tail-then-sealed and gets the identical series a few
+# minutes earlier. Measured 2026-08-25: re-deciding twelve calls the fast verdict
+# had got backwards off signals-marks.db (a ~2.3s downsample) against THIS series
+# corrected 12 of 12 -- the resolution is the whole difference, so a consumer that
+# wants to agree with the validator has to read these ticks and not the marks.
+#
+# UNANCHORED, and a SUBDIR on purpose: every consumer of the sealed series globs
+# <dir>/*.ticks.jsonl non-recursively, so this cannot leak into a grade, a
+# tick_root or a replay. Flattening it into the window dir would do exactly that.
+LIVE_DIR = Path(os.getenv("SN89_HF_TICK_LIVE_DIR", str(OUT_DIR / "live")))
+LIVE_RETAIN_S = int(os.getenv("SN89_HF_TICK_LIVE_RETAIN_S", str(6 * 3600)))
 # Cover BOTH boards. Once mechanism 0 moves to touch-on-ticks it grades off this
 # same series, so a pair missing here is a pair that cannot be graded. The four
 # crosses added by fxexpand17 (AUDNZD/GBPCAD/NZDCHF/NZDJPY) had NO tick coverage
@@ -138,6 +158,8 @@ class TickRecorder:
         self.polls = 0
         self.kept = 0
         self.late = 0
+        self.live = LIVE_DIR
+        self._live_pruned = 0.0
 
     def poll_once(self) -> int:
         try:
@@ -147,6 +169,7 @@ class TickRecorder:
             return 0
         self.polls += 1
         n = 0
+        fresh: list = []
         for a in ASSETS:
             d = ticks.get(a)
             if not d:
@@ -178,9 +201,47 @@ class TickRecorder:
             if d.get("ask") is not None:
                 rec["k"] = float(d["ask"])
             self.windows.setdefault(w, []).append(rec)
+            fresh.append((w, rec))
             n += 1
             self.kept += 1
+        self._write_live(fresh)
         return n
+
+    def _write_live(self, fresh) -> None:
+        """Append this poll's new ticks to the live tail. Never raises.
+
+        One buffered write per POLL, not per tick: at 50 ms and ~39 assets that is
+        20 writes a second instead of hundreds, and the ordering inside a poll is
+        already the ordering the sealed file will carry.
+
+        A failure here must never cost a tick from the anchored window -- that is
+        the record, this is a convenience -- so it is caught and logged, exactly
+        as hf_ingest.record_live does on the submission side.
+        """
+        if not fresh:
+            return
+        try:
+            self.live.mkdir(parents=True, exist_ok=True)
+            by_w: dict = {}
+            for w, rec in fresh:
+                by_w.setdefault(w, []).append(rec)
+            for w, recs in by_w.items():
+                with open(self.live / f"{w}.ticks.jsonl", "a") as f:
+                    for rec in recs:
+                        # sort_keys mirrors seal() exactly, so a sealed window and
+                        # its live tail are BYTE-IDENTICAL line for line and the
+                        # parity check is a diff rather than a judgement call.
+                        f.write(json.dumps(rec, sort_keys=True,
+                                           separators=(",", ":")) + "\n")
+            now = time.time()
+            if now - self._live_pruned > 600:
+                self._live_pruned = now
+                cut = int((now - LIVE_RETAIN_S) * 1000)
+                for p in self.live.glob("*.ticks.jsonl"):
+                    if p.stem.split(".")[0].isdigit() and int(p.stem.split(".")[0]) < cut:
+                        p.unlink()
+        except Exception as e:                                   # noqa: BLE001
+            _log(f"live tick tail write FAILED: {e}")
 
     def seal(self, w: int) -> dict:
         if w in self.sealed:
