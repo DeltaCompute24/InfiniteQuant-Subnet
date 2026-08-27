@@ -61,6 +61,21 @@ REG_REFRESH_S = int(os.getenv("SN89_HF_REG_REFRESH_S", "300"))
 # The recorder's files are up to a window (180 s) behind because it writes at seal,
 # and a gate reading those would refuse re-entry for minutes after a call resolved.
 TICKBUS = os.getenv("IQ_TICKBUS_URL", "http://127.0.0.1:18774")
+# ⚠ The bus serves TWO crypto series and the GRADED one is not the default.
+# `hf_tick_recorder` cut over to `?source=hyperliquid` on 2026-08-20 and this
+# poller was left on the bare path, so from that day the open-position gate
+# advanced its OpenCalls -- entry price AND touch counting -- off Polygon's XT
+# aggregate while the board resolved the same calls off the anchored Hyperliquid
+# ticks. The comment above claimed the two were one source; it had been wrong for
+# a week. Both directions of the mismatch cost a trader a call: the gate holds a
+# pair the board already released (39 refusals across 11 traders since the
+# cutover), and it releases one the board still holds, which the grader then
+# voids (11 calls across 7 hotkeys since 2026-08-26).
+#
+# Read the SAME env var the recorder reads. A second constant here, or a literal,
+# is how the two drift apart again the next time the graded venue moves.
+TICK_SOURCE = os.getenv("SN89_TICK_SOURCE", "hyperliquid")
+TICKS_URL = f"{TICKBUS}/ticks" + (f"?source={TICK_SOURCE}" if TICK_SOURCE else "")
 TICK_POLL_MS = int(os.getenv("SN89_HF_INGEST_TICK_POLL_MS", "250"))
 # With no fresh ticks an open call can never be seen to resolve, so the gate would
 # refuse legal re-entry for a whole horizon. Past this the gate FAILS OPEN: a bad
@@ -282,7 +297,7 @@ class Ingest:
         """
         import urllib.request
         try:
-            with urllib.request.urlopen(f"{TICKBUS}/ticks", timeout=2) as r:
+            with urllib.request.urlopen(TICKS_URL, timeout=2) as r:
                 ticks = json.loads(r.read()).get("ticks", {})
         except Exception:               # noqa: BLE001
             return 0                    # _tick_ok_at goes stale -> the gate fails open
@@ -330,6 +345,7 @@ class Ingest:
                 # era-gated on HF_OPEN_GATE_FROM. Print both.
                 era = time.time() >= hf.HF_OPEN_GATE_FROM
                 _log(f"tick tail {'LIVE' if now_fresh else 'STALE'} · bus={TICKBUS} "
+                     f"· source={TICK_SOURCE or 'default'} "
                      f"· {len(self.last_px)} pairs priced · open-position gate "
                      + ("ENFORCED" if (now_fresh and era) else
                         "FAILING OPEN (tick feed stale)" if era else
