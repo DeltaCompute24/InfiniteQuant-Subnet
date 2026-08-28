@@ -115,6 +115,11 @@ LIVE_DIR = Path(os.getenv("SN89_HF_LIVE_DIR", str(LOG_DIR / "live")))
 # Only needs to outlive its own window; hours of slack so a consumer that stalls
 # still catches up, and small enough that the dir stays a handful of files.
 LIVE_RETAIN_S = int(os.getenv("SN89_HF_LIVE_RETAIN_S", str(3 * 3600)))
+# Exactly the keys hf.anchor_payload -> receipt_signing_bytes dereferences. Kept
+# here so a rehydrated row is rejected at read time rather than at seal time, when
+# it would raise inside the anchor loop. If the receipt shape gains a field that
+# the root is computed over, it belongs in this list too.
+_RECEIPT_SEAL_FIELDS = ("hk", "seq", "ph", "t_recv_us", "grid_t0_ms", "ing")
 
 # ── entry-parity probe (DIAGNOSTIC ONLY — nothing reads this to decide anything)
 # A grade needs three things: the entry price, the band, and the ticks. The band is
@@ -167,11 +172,18 @@ class Ingest:
         self.closers_sent_ms: dict[str, list] = {}  # hotkey -> accepted CLOSERS submits (own rate ledger)
         self.windows: dict[int, list] = {}          # window start ms -> receipts
         self.lock_index: dict = {}                  # (hk, pair, mecid) -> ts ms
-        # (hk, PAIR) -> [hf.OpenCall]. NOT rebuilt on restart, like sent_ms and
-        # last_seq before it: a bounce leaves the gate blind to calls opened before
-        # it, for at most one horizon. That direction is the safe one — it fails
-        # OPEN, and hf_grade voids anything that slips through off the published
-        # windows, which survive the restart.
+        # (hk, PAIR) -> [hf.OpenCall]. STILL not rebuilt on restart, unlike
+        # `windows` which rehydrate_windows() now recovers from the live tail. A
+        # bounce leaves the gate blind to calls opened before it, for at most one
+        # horizon. That direction is the safe one — it fails OPEN, and hf_grade
+        # voids anything that slips through off the published windows.
+        #
+        # "Safe" means the anchor stays honest, NOT that it is free: the miner
+        # spends a call and gets a void. Measured on 2026-08-27, one restart cost
+        # BTCUSD seq 1787810764442292 exactly that way — accepted 06:06:02 because
+        # the holder opened at 05:49:58 was no longer in this dict, then voided by
+        # the grader against the holder's real open_until. Rebuilding it needs the
+        # entry price at each call's t0, which this process does not persist.
         self.open_calls: dict = {}
         self.last_px: dict = {}                     # PAIR -> (src_ts_ms, price)
         self._tick_ok_at = 0.0                      # last poll that returned data
@@ -185,6 +197,10 @@ class Ingest:
         self._entry_probe_dir = ENTRY_PROBE_DIR
         self._entry_probe: dict = {}   # (hk, seq) -> due_ms, for the settled sample
         LOG_DIR.mkdir(parents=True, exist_ok=True)
+        # Before anything else that can seal: a window whose boundary passed while
+        # we were down is sealed by the first anchor_loop tick, and it must carry
+        # the calls the previous process accepted into it.
+        self.rehydrate_windows()
         self.refresh_mech0_locks()
         if REQUIRE_REGISTERED and not self.refresh_registered():
             # Starting ungated would silently reopen the hole this gate closes,
@@ -659,6 +675,92 @@ class Ingest:
         return rcpt
 
     # ── anchoring ────────────────────────────────────────────────────────────
+    def rehydrate_windows(self) -> int:
+        """Refill `self.windows` from the live tail for every UNSEALED window.
+
+        Accepted receipts live in memory until their window closes, so a restart
+        mid-window silently un-anchors every call taken since the window opened.
+        The call is signed, the trader is told it landed, and it then appears in no
+        sealed log and can never be graded -- it reads RECEIVED forever and still
+        costs the miner a slot against the daily cap. That is what took SOLUSD
+        seq 1787810438257785 on 2026-08-27: accepted 06:00:38, process restarted
+        06:02:16, window 1787810400000 sealed at n=2 holding the two post-restart
+        calls and not that one. Unrecoverable by the time it was noticed, because
+        the tail it could have been rebuilt from had aged past LIVE_RETAIN_S.
+
+        Nothing new is recorded to make this work. `record_live` has always written
+        the same {"submit","receipt"} object on every accept, and says so: the tail
+        is "byte-identical in shape to the sealed window log ... so a reader unions
+        the two on (hk, seq) with no second parser". This is that reader.
+
+        NEVER touches a window that already has a sealed log. Re-sealing rewrites
+        `{w}.jsonl` AND `{w}.anchor.json`, which moves a root that may already be
+        published or committed on chain -- a worse failure than the one being fixed
+        here, and a silent one. An already-sealed window is skipped, not merged.
+
+        Failure is non-fatal by design: an unreadable tail costs the calls it held,
+        while raising here would refuse to start the ingest at all and cost every
+        call until someone noticed. Both are logged loudly.
+        """
+        if self._live_dir is None:
+            return 0
+        try:
+            paths = sorted(Path(self._live_dir).glob("*.jsonl"))
+        except OSError as e:                                     # noqa: BLE001
+            _log(f"!! rehydrate: live tail unreadable ({e}) — starting with an empty buffer")
+            return 0
+        n_calls = n_win = n_sealed = 0
+        for p in paths:
+            if not p.stem.isdigit():
+                continue
+            w = int(p.stem)
+            if (LOG_DIR / f"{w}.jsonl").exists():
+                n_sealed += 1
+                continue
+            seen, rows = set(), []
+            try:
+                with open(p) as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        e = json.loads(line)
+                        r = e["receipt"]
+                        # (hk, seq) is the call's identity. A duplicated append --
+                        # from an earlier rehydrate of this same tail, or a retry --
+                        # must not put two leaves in the Merkle tree for one call.
+                        key = (str(r["hk"]), int(r["seq"]))
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        # Validate against what the SEAL needs, not what this loop
+                        # needs. A row missing `ing` or `ph` rehydrates fine and
+                        # then raises KeyError inside anchor_payload -- and
+                        # seal_window is called from anchor_loop with no try, so
+                        # one short row would take down the sealing loop for every
+                        # window after it. Drop the row here instead; this code
+                        # exists precisely for the case where the tail was cut
+                        # mid-write. (Caught by test_recovered_rows_survive_a_seal,
+                        # which failed until the fixture carried a real receipt.)
+                        missing = [k for k in _RECEIPT_SEAL_FIELDS if k not in r]
+                        if missing:
+                            _log(f"!! rehydrate: window {w} dropping hk={r.get('hk')} "
+                                 f"seq={r.get('seq')} — receipt missing {missing}")
+                            continue
+                        int(r["t_recv_us"])       # leaf_order_key needs it; fail here, not at seal
+                        rows.append(e)
+            except (OSError, ValueError, KeyError, TypeError) as e:   # noqa: BLE001
+                _log(f"!! rehydrate: window {w} tail unreadable ({e}) — "
+                     f"{len(rows)} row(s) recovered before the bad line, rest LOST")
+            if rows:
+                self.windows.setdefault(w, []).extend(rows)
+                n_calls += len(rows)
+                n_win += 1
+                _log(f"rehydrate: window {w} — recovered {len(rows)} accepted call(s)")
+        _log(f"rehydrate: {n_calls} accepted call(s) restored across {n_win} unsealed "
+             f"window(s); {n_sealed} already-sealed window(s) left untouched")
+        return n_calls
+
     def seal_window(self, w: int) -> dict | None:
         """Write the window log and return the anchor payload for the chain commit.
 
