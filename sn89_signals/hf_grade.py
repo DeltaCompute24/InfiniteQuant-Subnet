@@ -261,6 +261,13 @@ def _db(cache_dir: str) -> sqlite3.Connection:
     # SHAPE alone, so an upgraded validator needs each column added explicitly or
     # every insert below fails.
     have_cols = {r[1] for r in c.execute("PRAGMA table_info(grades)")}
+    # The band the call was GRADED against, so the tally can price it later
+    # without re-deriving it from a board that may have moved since. NULL on
+    # every pre-existing row, which falls back to the board -- the same value
+    # that row was graded against -- so the corpus replays byte-identically.
+    for _c, _t in (("tp_bps", "REAL"), ("sl_bps", "REAL"), ("horizon_s", "INTEGER")):
+        if _c not in have_cols:
+            c.execute(f"ALTER TABLE grades ADD COLUMN {_c} {_t}")
     if "open_until_ms" not in have_cols:
         c.execute("ALTER TABLE grades ADD COLUMN open_until_ms INTEGER")
     if "direction" not in have_cols:
@@ -575,10 +582,12 @@ def _resolve_pending(db, base: str, tick_dir: str, row, now_ms: int,
     # whatever that validator's history happened to be. A bare VALUES(...) would bind
     # direction into open_until_ms on some nodes and not others.
     db.execute("INSERT OR REPLACE INTO grades "
-               "(key, hk, t0_ms, pair, status, open_until_ms, direction, reason) "
-               "VALUES (?,?,?,?,?,?,?,?)",
+               "(key, hk, t0_ms, pair, status, open_until_ms, direction, reason, "
+               " tp_bps, sl_bps, horizon_s) "
+               "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                (key, hk, int(t0_ms), pair, g["status"], int(held), direction,
-                g.get("reason") if g["status"] == "void" else None))
+                g.get("reason") if g["status"] == "void" else None,
+                float(tp), float(sl), int(horizon_s)))
     db.execute("DELETE FROM pending WHERE key=?", (key,))
 
 
@@ -666,8 +675,9 @@ def _history(cache_dir: str, as_of: float | None = None):
         if cut_ms is not None and int(t0_ms) > cut_ms:
             continue                      # not submitted yet at as_of
         subs.setdefault(hk, []).append((int(t0_ms), pair, direction))
-    for hk, t0_ms, status, open_until_ms in db.execute(
-            "SELECT hk, t0_ms, status, open_until_ms FROM grades"):
+    for hk, t0_ms, status, open_until_ms, g_tp, g_sl, g_hz in db.execute(
+            "SELECT hk, t0_ms, status, open_until_ms, tp_bps, sl_bps, horizon_s "
+            "FROM grades"):
         if cut_ms is not None and open_until_ms and int(open_until_ms) > cut_ms:
             continue                      # still open at as_of, so still ungraded
         t0 = t0_ms / 1000.0
@@ -677,7 +687,16 @@ def _history(cache_dir: str, as_of: float | None = None):
             # writes 'wash', LF writes 'washed'.
             graded.setdefault(hk, []).append((t0, status == "wash"))
         if status in ("won", "lost"):
-            dec.setdefault(hk, []).append((t0, status == "won", False))
+            # POSITION 3 IS resolved_unix AND MUST STAY THERE. scoring's
+            # _resolved_by reads `row[3] if len(row) > 3`, so putting the band
+            # there makes a 19.0 bps band read as a resolution timestamp 19
+            # seconds after the epoch -- every prior row then looks already
+            # resolved and the causal qualify window silently reverts to the
+            # legacy behaviour CAUSAL_QWIN_FROM was added to fix. HF has no
+            # journaled resolution time, so it is None, exactly as before.
+            # The band goes at 4 and 5.
+            dec.setdefault(hk, []).append((t0, status == "won", False, None,
+                                           g_tp, g_hz))
     db.close()
     for v in dec.values():
         v.sort(key=lambda x: x[0])
