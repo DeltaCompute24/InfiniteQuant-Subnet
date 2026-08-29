@@ -851,7 +851,8 @@ def compute_weights(states: list[MinerState], now_unix: float,
                     burn_uid: int = config.BURN_UID,
                     excluded_uids: set[int] | None = None,
                     referral_pairs: list[tuple[str, str]] | None = None,
-                    referral_suspended: set[str] | None = None) -> dict[int, float]:
+                    referral_suspended: set[str] | None = None,
+                    use_points: bool | None = None) -> dict[int, float]:
     """{uid: normalized_weight}. Immune miners get the dust floor; the pool is
     split across miners by a time-decayed, tier-weighted tally of their QUALIFIED
     wins (a relative competition of recent qualified wins); a probation dust floor
@@ -911,8 +912,17 @@ def compute_weights(states: list[MinerState], now_unix: float,
     # see qualified_wins). A loss never subtracts here — it can only un-qualify the
     # miner and thus freeze accrual — so there is no cliff, and parking (stopping
     # trading) to protect emissions doesn't work: the tally decays to zero.
+    # use_points: None means "ask the chain" (the arming stamp). A caller passes
+    # False when its competition has no priceable history yet -- LF today. Without
+    # that, arming points on a chain would zero every LF miner at once: their
+    # states carry no qcalls, so the tally is 0 and the whole LF share burns.
+    # The gate is per COMPETITION, not per chain, because the competitions are
+    # folded in one at a time.
+    points_mode = (config.points_enforced_as_of(now_unix)
+                   if use_points is None else bool(use_points))
+
     def qtally(s: MinerState) -> float:
-        if config.points_enforced_as_of(now_unix):
+        if points_mode:
             # CLAMPED AT ZERO, and the clamp lives here rather than in
             # decayed_points_tally on purpose. A negative weight has no meaning
             # on chain, but every other caller -- the referrer score, any

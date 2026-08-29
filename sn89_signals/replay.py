@@ -146,7 +146,10 @@ def weights_from_journal(
 
     return scoring.compute_weights(states, now, excluded_uids=excluded_uids,
                                    referral_pairs=referral_pairs,
-                                   referral_suspended=referral_suspended)
+                                   referral_suspended=referral_suspended,
+                                   # LF folds into the points scheme later; until it
+                                   # does, arming points must not zero its field.
+                                   use_points=False)
 
 
 def referrer_withheld_recruits(signals: list[dict],
