@@ -30,6 +30,106 @@ def _wilson(wins: int, n: int, z: float) -> tuple[float, float]:
     return ((centre - margin) / denom, (centre + margin) / denom)
 
 
+# -- signed points (CONSENSUS) -----------------------------------------------
+# Deterministic: only + - * / sqrt exp log and a bounded series, all IEEE-754
+# correctly-rounded, so every validator computes the identical number. Same
+# constraint _wilson lives under -- no erf, no NormalDist, no numpy.
+
+
+def _p_no_touch(a: float) -> float:
+    """P(sup|W| < a) over t<=1 for standard Brownian motion.
+
+    Reflection series. Converges fast; 40 terms is far past machine precision
+    for every a this is called with, and a fixed term count keeps it a pure
+    function of its input rather than of a convergence test.
+    """
+    if a <= 0:
+        return 0.0
+    acc = 0.0
+    for k in range(40):
+        m = 2 * k + 1
+        acc += ((-1) ** k) / m * math.exp(-(m * m) * math.pi * math.pi / (8 * a * a))
+    return max(0.0, min(1.0, (4.0 / math.pi) * acc))
+
+
+def resolve_probability(z: float) -> float:
+    """Chance a symmetric band z sigma-units wide is touched inside its window.
+
+    z = band / (sigma * sqrt(horizon)) is the ONLY variable that matters: band
+    and horizon are not independent knobs, and two calls with the same z are the
+    same claim however they were drawn.
+    """
+    return 1.0 - _p_no_touch(z)
+
+
+def sigma_from_board(tp_bps: float, horizon_s: int,
+                     target_resolve: float | None = None) -> float:
+    """Pair volatility in bps per sqrt(second), DERIVED from the board entry.
+
+    Every band in HF_BANDS_HISTORY is solved so the pair resolves
+    HF_POINTS_TARGET_RESOLVE of the time, so a board row IS a point on the
+    resolve curve and sigma falls out of it. Deriving beats shipping a sigma
+    table: a second consensus table drifts from the first, and this repo already
+    carries the same symbol map in six places.
+    """
+    tgt = config.HF_POINTS_TARGET_RESOLVE if target_resolve is None else target_resolve
+    z_ref = z_for_resolve(tgt)
+    if tp_bps <= 0 or horizon_s <= 0 or z_ref <= 0:
+        return 0.0
+    return tp_bps / (z_ref * math.sqrt(horizon_s))
+
+
+def z_for_resolve(p: float) -> float:
+    """The z whose resolve probability is p. Bisection, fixed iteration count
+    so it is deterministic rather than tolerance-dependent."""
+    lo, hi = 0.01, 10.0
+    for _ in range(80):
+        mid = (lo + hi) / 2.0
+        if resolve_probability(mid) > p:
+            lo = mid
+        else:
+            hi = mid
+    return (lo + hi) / 2.0
+
+
+def points_for(tp_bps: float, horizon_s: int, sigma: float,
+               gamma: float | None = None) -> float:
+    """What a WIN on this shape pays. A loss costs the same; a wash is zero.
+
+    pts = 1 + gamma * log2(1 / p_res(z))  -- the information content of the
+    claim. A no-view miner wins at p_res/2 (the band has to be reached, then
+    direction is a coin flip), so this is -log2 of that prior, and paying a win
+    its own surprise is what makes the scale difficulty-adjusted.
+
+    Because a loss costs exactly this, a no-view miner's expectation is zero at
+    every band and window for ANY gamma -- the two sides cancel whatever this
+    function looks like. That is what frees gamma to be a product dial.
+    """
+    g = config.HF_POINTS_GAMMA if gamma is None else gamma
+    if sigma <= 0 or horizon_s <= 0 or tp_bps <= 0:
+        return 0.0
+    z = tp_bps / (sigma * math.sqrt(horizon_s))
+    pr = resolve_probability(z)
+    if pr <= 0.0:
+        pr = 1e-12
+    return 1.0 + g * (math.log(1.0 / pr) / math.log(2.0))
+
+
+def signed_points(status: str, tp_bps: float, horizon_s: int, sigma: float,
+                  gamma: float | None = None) -> float:
+    """+pts on a win, -pts on a loss, 0 on a wash or a void.
+
+    The symmetry is the mechanism, not a stylistic choice. Pricing a wash
+    negative was measured and rejected: a wash cost of -k*pts collapses the
+    optimum to the narrowest legal band at every skill level, because the cost
+    scales with the same pts() the widening was meant to earn.
+    """
+    if status not in ("won", "lost"):
+        return 0.0
+    p = points_for(tp_bps, horizon_s, sigma, gamma)
+    return p if status == "won" else -p
+
+
 def confident_edge(wins: int, n: int, z: float = config.QUALIFY_Z) -> float:
     """Lower confidence bound on a hotkey's true hit-rate — the qualify metric."""
     return _wilson(wins, n, z)[0]

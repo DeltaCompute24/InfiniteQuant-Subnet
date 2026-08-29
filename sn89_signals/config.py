@@ -297,6 +297,37 @@ HF_CUSTOM_MAX_HORIZON_S = int(os.getenv("SN89_HF_CUSTOM_MAX_HORIZON_S", str(48 *
 HF_CUSTOM_MAX_BAND_BPS = float(os.getenv("SN89_HF_CUSTOM_MAX_BAND_BPS", "1000"))
 
 
+# -- signed points: what a call is worth -------------------------------------
+# 0 = OFF on every network, for the same reason HF_CUSTOM_BANDS_FROM is: a
+# timestamp does not know which chain it is on, and arming this in source would
+# re-score every mainnet call after that instant under a scheme its board never
+# used. Armed from .env.test only.
+HF_POINTS_FROM = int(os.getenv("SN89_HF_POINTS_FROM", "0"))
+
+# pts(z) = 1 + GAMMA * log2(1 / p_res(z)).
+#
+# GAMMA is a pure product dial and NOT a risk parameter, which is the whole
+# point of scoring a loss at exactly what the win would have paid: a no-view
+# miner's expectation is zero at every band and every window, for any GAMMA,
+# because +pts and -pts cancel whatever pts() looks like.
+#
+# 1.5 rather than 1.0 because at GAMMA=1 widening barely pays -- expected points
+# are flat within 5% from z 0.6 to 1.15, so wide-and-short would be a bigger
+# number on screen and not a better strategy. 1.5 puts a skilled miner's optimum
+# near a 58% resolve rate.
+HF_POINTS_GAMMA = float(os.getenv("SN89_HF_POINTS_GAMMA", "1.5"))
+
+# The board's structural-wash target: every band on HF_BANDS_HISTORY is solved
+# so that it resolves this often. It is what lets sigma be DERIVED from the
+# board instead of shipped as a second consensus table that can drift from it.
+HF_POINTS_TARGET_RESOLVE = float(os.getenv("SN89_HF_POINTS_TARGET_RESOLVE", "0.86"))
+
+
+def points_enforced_as_of(t0_unix: float) -> bool:
+    """Whether a call at t0 is scored in signed points rather than counted wins."""
+    return bool(HF_POINTS_FROM and t0_unix >= HF_POINTS_FROM)
+
+
 def custom_bands_enforced_as_of(t0_unix: float) -> bool:
     """Whether the miner may declare their own band/horizon for a call at t0.
 
