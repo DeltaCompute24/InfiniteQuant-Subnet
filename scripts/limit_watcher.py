@@ -40,7 +40,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from bittensor_wallet import Keypair
 
-from sn89_signals import hf
+from sn89_signals import config, hf
 
 ADMIN_DB = os.getenv("IQ_ADMIN_DB", "/opt/iq-platform/data/live/iq_admin_dash.db")
 TICKBUS = os.getenv("IQ_TICKBUS_URL", "http://127.0.0.1:18774")
@@ -366,6 +366,19 @@ def fire(row: sqlite3.Row, signers: dict, feed_tokens: dict,
         if pair not in board:
             return {"kind": "error", "reason": f"pair_not_on_hf_board:{pair}"}
         tp, sl, hz, cls = board[pair]
+        # A band the miner DREW survives the rest. Stamping the board over it
+        # here would submit a different trade from the one on their screen --
+        # same shape as the ratchet reading the previous position's P&L: the
+        # value is right for the mechanism and wrong for this call.
+        #
+        # Only honoured when the chain has armed custom sizing. On an unarmed
+        # chain the board is the rule, so passing a drawn band through would
+        # earn a band_mismatch rejection instead of quietly being ignored --
+        # and a rejection the miner can see beats a silent override.
+        if config.custom_bands_enforced_as_of(time.time()):
+            tp = float(payload.get("tp_bps") or tp)
+            sl = float(payload.get("sl_bps") or sl)
+            hz = int(payload.get("horizon_s") or hz)
         payload = {"trade_pair": pair, "direction": payload["direction"],
                    "asset_class": cls, "tp_bps": tp, "sl_bps": sl,
                    "horizon_s": hz}
