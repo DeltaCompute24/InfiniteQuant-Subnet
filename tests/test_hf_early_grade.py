@@ -58,7 +58,12 @@ def cache(tmp_path):
 
 def _seed_pending(cache, key="{}:1".format(HK)):
     db = hf_grade._db(cache)
-    db.execute("INSERT OR REPLACE INTO pending VALUES (?,?,?,?,?,?)",
+    # Column-named, not positional: `pending` gained the miner-declared band
+    # (tp_bps/sl_bps/horizon_s) and a positional insert breaks on every schema
+    # change. Leaving the band NULL here is the point of these tests -- they
+    # cover a FIXED-BOARD call, which must still grade off the board.
+    db.execute("INSERT OR REPLACE INTO pending "
+               "(key, hk, t0_ms, pair, direction, end_ms) VALUES (?,?,?,?,?,?)",
                (key, HK, T0, PAIR, "LONG", END))
     db.commit()
     db.close()

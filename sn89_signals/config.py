@@ -275,6 +275,38 @@ EMISSION_DECAY_S = int(os.getenv("SN89_EMISSION_DECAY_S", str(7 * 24 * 3600)))
 CAUSAL_QWIN_FROM = int(os.getenv("SN89_CAUSAL_QWIN_FROM", "1787338800"))  # 2026-08-21T19:00:00Z
 
 
+# -- custom sizing: the miner declares the band, not the board ---------------
+# 0 = OFF, and OFF IS THE DEFAULT ON EVERY NETWORK. This is deliberately not a
+# date: an as-of stamp is a timestamp, and a timestamp does not know which chain
+# it is running on. Give this a real value in the source and the day the code
+# reaches finney it retroactively reclassifies every mainnet call after that
+# instant as a custom-band call, on a board that never had custom bands -- the
+# mainnet grader would re-derive different verdicts for calls already graded and
+# already paid.
+#
+# Armed per-network from the environment (.env.test only, for now), the same way
+# SN89_COMBINED_WEIGHTS_FROM is.
+HF_CUSTOM_BANDS_FROM = int(os.getenv("SN89_HF_CUSTOM_BANDS_FROM", "0"))
+
+# Envelope for a miner-declared band, checked when the stamp is armed. The board
+# stops being an equality test and becomes a bound: a band still has to clear
+# MIN_BAND_SPREAD_RATIO x the pair spread, or the outcome is microstructure
+# rather than opinion -- the same test that earns a pair a board slot at all.
+HF_CUSTOM_MIN_HORIZON_S = int(os.getenv("SN89_HF_CUSTOM_MIN_HORIZON_S", "300"))
+HF_CUSTOM_MAX_HORIZON_S = int(os.getenv("SN89_HF_CUSTOM_MAX_HORIZON_S", str(48 * 3600)))
+HF_CUSTOM_MAX_BAND_BPS = float(os.getenv("SN89_HF_CUSTOM_MAX_BAND_BPS", "1000"))
+
+
+def custom_bands_enforced_as_of(t0_unix: float) -> bool:
+    """Whether the miner may declare their own band/horizon for a call at t0.
+
+    False everywhere until a network explicitly arms it. Historical replay is
+    unaffected on every chain: before the stamp, board equality is the rule
+    exactly as it always was.
+    """
+    return bool(HF_CUSTOM_BANDS_FROM and t0_unix >= HF_CUSTOM_BANDS_FROM)
+
+
 def causal_qwin_enforced_as_of(t0_unix: float) -> bool:
     """Whether a win at t0 has its qualify window built from RESOLVED outcomes."""
     return bool(CAUSAL_QWIN_FROM and t0_unix >= CAUSAL_QWIN_FROM)

@@ -27,7 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import bittensor as bt
 
-from sn89_signals import hf
+from sn89_signals import config, hf
 
 LOG_DIR = Path(os.getenv("SN89_HF_LOG_DIR", "/var/lib/sn89-hf"))
 TICK_DIR = Path(os.getenv("SN89_HF_TICK_DIR", str(LOG_DIR / "ticks")))
@@ -107,6 +107,14 @@ def grade_new_calls(now_ms: int) -> int:
             if not board or pair not in board:
                 continue
             tp, sl, horizon_s, _ = board[pair]
+            # Custom sizing: grade what the miner called, not what the board would
+            # have imposed. The receipt payload is the authority; absent a declared
+            # band this is the board value, i.e. exactly the pre-existing behaviour.
+            if config.custom_bands_enforced_as_of(t0_ms / 1000.0):
+                _p = rcpt.get("payload") or {}
+                tp = float(_p.get("tp_bps", tp) or tp)
+                sl = float(_p.get("sl_bps", sl) or sl)
+                horizon_s = int(_p.get("horizon_s", horizon_s) or horizon_s)
             end_ms = int(t0_ms) + horizon_s * 1000
             if now_ms < end_ms:
                 continue                                  # not resolved yet

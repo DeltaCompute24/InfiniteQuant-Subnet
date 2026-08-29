@@ -606,12 +606,52 @@ def validate_submission(payload: dict, t0_unix: float) -> None:
     tp_bps, sl_bps, horizon_s, cls = board[pair]
     if str(payload.get("direction")) not in ("LONG", "SHORT"):
         raise HFRejected("bad_direction")
+    if str(payload.get("asset_class")) != cls:
+        raise HFRejected(f"asset_class_mismatch:expected {cls}")
+
+    if config.custom_bands_enforced_as_of(t0_unix):
+        # CUSTOM SIZING. The board stops being an equality test and becomes an
+        # envelope. What the miner may not do is pick a shape whose outcome is
+        # microstructure rather than opinion, which is the SAME spread test that
+        # earns a pair its board slot -- reused here per-call instead of per-pair.
+        _validate_custom_band(payload, pair)
+        return
+
     if float(payload.get("tp_bps", 0)) != tp_bps or float(payload.get("sl_bps", 0)) != sl_bps:
         raise HFRejected(f"band_mismatch:expected {tp_bps}/{sl_bps}")
     if int(payload.get("horizon_s", 0)) != horizon_s:
         raise HFRejected(f"horizon_mismatch:expected {horizon_s}")
-    if str(payload.get("asset_class")) != cls:
-        raise HFRejected(f"asset_class_mismatch:expected {cls}")
+
+
+def _validate_custom_band(payload: dict, pair: str) -> None:
+    """Envelope check for a miner-declared band. Pure; raises HFRejected."""
+    try:
+        tp = float(payload.get("tp_bps", 0))
+        sl = float(payload.get("sl_bps", 0))
+        hz = int(payload.get("horizon_s", 0))
+    except (TypeError, ValueError):
+        raise HFRejected("bad_band_payload")
+
+    # Symmetric only, for v1. An asymmetric band is strictly more expressive and
+    # the first-passage maths still closes, but a no-view miner's win probability
+    # stops being 1/2 and the payout would have to price the skew as well. Until
+    # it does, an asymmetric band would be mispriced rather than merely unsupported.
+    if tp != sl:
+        raise HFRejected(f"band_not_symmetric:{tp}/{sl}")
+    if not (0 < tp <= config.HF_CUSTOM_MAX_BAND_BPS):
+        raise HFRejected(f"band_out_of_range:{tp}")
+    if not (config.HF_CUSTOM_MIN_HORIZON_S <= hz <= config.HF_CUSTOM_MAX_HORIZON_S):
+        raise HFRejected(f"horizon_out_of_range:{hz}")
+
+    spread = HF_TYPICAL_SPREAD_BPS.get(pair)
+    if spread is None:
+        # No measured spread means no floor can be applied, and a band that cannot
+        # be floored is a band whose outcome we cannot vouch for. Refuse rather
+        # than wave it through -- the quiet direction here is the wrong one.
+        raise HFRejected(f"no_spread_for_pair:{pair}")
+    floor = spread * MIN_BAND_SPREAD_RATIO
+    if tp < floor:
+        raise HFRejected(f"band_under_spread_floor:{tp}<{floor:.2f}")
 
 
 def check_rate(prior_ts_ms: list, t_ms: int, t0_unix: float) -> None:

@@ -245,6 +245,14 @@ def _db(cache_dir: str) -> sqlite3.Connection:
     c.execute("CREATE TABLE IF NOT EXISTS pending ("
               "key TEXT PRIMARY KEY, hk TEXT, t0_ms INTEGER, pair TEXT, "
               "direction TEXT, end_ms INTEGER)")
+    # Custom sizing: the band is a property of the CALL, not of the board, so it
+    # has to travel with the row. Nullable on purpose -- every row written before
+    # this column existed reads NULL and falls back to the board below, which is
+    # what makes historical replay byte-identical.
+    _pend_cols = {r[1] for r in c.execute("PRAGMA table_info(pending)")}
+    for _c, _t in (("tp_bps", "REAL"), ("sl_bps", "REAL"), ("horizon_s", "INTEGER")):
+        if _c not in _pend_cols:
+            c.execute(f"ALTER TABLE pending ADD COLUMN {_c} {_t}")
     c.execute("CREATE TABLE IF NOT EXISTS grades ("
               "key TEXT PRIMARY KEY, hk TEXT, t0_ms INTEGER, pair TEXT, status TEXT, "
               "open_until_ms INTEGER)")
@@ -421,10 +429,22 @@ def sync_and_grade(base: str, cache_dir: str, now: float) -> None:
             board = hf.hf_bands_as_of(t0_ms / 1000.0) if t0_ms else None
             if not board or pair not in board:
                 continue
-            _, _, horizon_s, _ = board[pair]
-            db.execute("INSERT OR REPLACE INTO pending VALUES (?,?,?,?,?,?)",
-                       (key, hk, int(t0_ms), pair, p.get("direction"),
-                        int(t0_ms) + horizon_s * 1000))
+            b_tp, b_sl, b_hz, _ = board[pair]
+            # The band the MINER declared, when they were allowed to declare one.
+            # Falls back to the board otherwise, so a fixed-board call stores
+            # exactly what the board would have supplied at grade time.
+            if config.custom_bands_enforced_as_of(t0_ms / 1000.0):
+                tp_d = float(p.get("tp_bps", b_tp) or b_tp)
+                sl_d = float(p.get("sl_bps", b_sl) or b_sl)
+                hz_d = int(p.get("horizon_s", b_hz) or b_hz)
+            else:
+                tp_d, sl_d, hz_d = b_tp, b_sl, b_hz
+            db.execute(
+                "INSERT OR REPLACE INTO pending "
+                "(key, hk, t0_ms, pair, direction, end_ms, tp_bps, sl_bps, horizon_s) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (key, hk, int(t0_ms), pair, p.get("direction"),
+                 int(t0_ms) + hz_d * 1000, tp_d, sl_d, hz_d))
         db.execute("INSERT OR IGNORE INTO windows_seen VALUES (?)", (w,))
     db.commit()
 
@@ -437,7 +457,7 @@ def sync_and_grade(base: str, cache_dir: str, now: float) -> None:
     # answerable once that earlier call is itself graded. Same pair -> same horizon,
     # so earlier t0 means earlier end_ms, and this ordering settles predecessors
     # first within a batch.
-    due = db.execute("SELECT key, hk, t0_ms, pair, direction, end_ms FROM pending "
+    due = db.execute("SELECT key, hk, t0_ms, pair, direction, end_ms, tp_bps, sl_bps, horizon_s FROM pending "
                      "WHERE end_ms <= ? ORDER BY end_ms, t0_ms, key",
                      (now_ms - GRADE_SETTLE_S * 1000,)).fetchall()
     for row in due:
@@ -457,7 +477,7 @@ def sync_and_grade(base: str, cache_dir: str, now: float) -> None:
         # walk_to is the newest frozen window; see EARLY_SETTLE_S.
         walk_to = now_ms - EARLY_SETTLE_S * 1000
         early = db.execute(
-            "SELECT key, hk, t0_ms, pair, direction, end_ms FROM pending "
+            "SELECT key, hk, t0_ms, pair, direction, end_ms, tp_bps, sl_bps, horizon_s FROM pending "
             "WHERE end_ms > ? AND t0_ms <= ? ORDER BY t0_ms, key",
             (partition, walk_to - EARLY_MIN_SPAN_S * 1000)).fetchall()
         for row in early:
@@ -479,7 +499,8 @@ def _resolve_pending(db, base: str, tick_dir: str, row, now_ms: int,
                     non-decisive read carries no information and NOTHING is written;
                     the call stays pending for its horizon.
     """
-    key, hk, t0_ms, pair, direction, end_ms = row
+    key, hk, t0_ms, pair, direction, end_ms = row[:6]
+    stored = row[6:9] if len(row) >= 9 else (None, None, None)
     early = walk_to is not None
     board = hf.hf_bands_as_of(t0_ms / 1000.0)
     if not board or pair not in board:
@@ -487,6 +508,11 @@ def _resolve_pending(db, base: str, tick_dir: str, row, now_ms: int,
             db.execute("DELETE FROM pending WHERE key=?", (key,))
         return
     tp, sl, horizon_s, _ = board[pair]
+    # Grade what the miner actually called. NULL means the row predates custom
+    # sizing, and the board value it falls back to IS the value that row was
+    # graded against before -- so every historical grade reproduces exactly.
+    if stored[0] is not None:
+        tp, sl, horizon_s = float(stored[0]), float(stored[1]), int(stored[2])
     # ...and ordering alone is not enough: a predecessor stuck in `pending` on a
     # tick gap is NOT in this batch, so grading its successor now would read an
     # empty prior set and pass a call the gate should void. Wait for it. It
