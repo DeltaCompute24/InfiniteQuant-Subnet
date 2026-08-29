@@ -4,13 +4,30 @@ import pytest
 from sn89_signals import config, hf, scoring
 
 DAY = 86_400
-T0 = 1_700_000_000
+# After HF_V4_FROM, so hf_bands_as_of(T0) actually returns a board -- an
+# earlier stamp yields None, sigma 0, and every call reads as unpriceable.
+T0 = 1_790_000_000
 BOARD_TP, BOARD_HZ = 19.0, 1800          # BTCUSD-shaped
 
 
-def row(t, won, tp=BOARD_TP, hz=BOARD_HZ):
-    """A decisive row in the canonical layout: index 3 is resolved_unix."""
-    return (t, won, False, None, tp, hz)
+def row(t, won, tp=BOARD_TP, hz=BOARD_HZ, pair="BTCUSD"):
+    """A decisive row in the canonical layout.
+
+    index 3 is resolved_unix, 4/5 are the band the call was graded against, 6 is
+    the pair -- which is what sigma is looked up by. Sigma must come from the
+    PAIR'S BOARD ROW, never from the call's own band: deriving it from the call
+    is circular and prices every shape identically.
+    """
+    return (t, won, False, None, tp, hz, pair)
+
+
+def board_sigma(pair, t0):
+    """The sigma a real caller supplies, from the board row for the pair."""
+    b = hf.hf_bands_as_of(t0) or {}
+    r = b.get(pair)
+    if not r:
+        return 0.0
+    return scoring.sigma_from_board(float(r[0]), int(r[2]))
 
 
 @pytest.fixture
@@ -20,23 +37,26 @@ def always_qualified(monkeypatch):
 
 class TestLossesAreInTheTally:
     def test_a_loss_produces_negative_points(self, always_qualified):
-        out = scoring.qualified_calls([row(T0, False)], first_seen_unix=0.0)
+        out = scoring.qualified_calls([row(T0, False)], first_seen_unix=0.0,
+                                      sigma_for=board_sigma)
         assert len(out) == 1 and out[0][1] < 0
 
     def test_a_win_produces_positive_points(self, always_qualified):
-        out = scoring.qualified_calls([row(T0, True)], first_seen_unix=0.0)
+        out = scoring.qualified_calls([row(T0, True)], first_seen_unix=0.0,
+                                      sigma_for=board_sigma)
         assert len(out) == 1 and out[0][1] > 0
 
     def test_win_and_loss_on_one_shape_cancel(self, always_qualified):
         out = scoring.qualified_calls([row(T0, True), row(T0 + 60, False)],
-                                      first_seen_unix=0.0)
+                                      first_seen_unix=0.0, sigma_for=board_sigma)
         assert abs(sum(p for _, p in out)) < 1e-12
 
     def test_an_unpriceable_row_contributes_nothing(self, always_qualified):
         # No band and no horizon: score nothing rather than guess a board value
         # that may not be the one this call was graded against.
         assert scoring.qualified_calls([(T0, True, False, None)],
-                                       first_seen_unix=0.0) == []
+                                       first_seen_unix=0.0,
+                                       sigma_for=board_sigma) == []
 
 
 class TestTheDailyCapCannotBeGamed:
@@ -106,3 +126,32 @@ class TestClampAtTheWeightEdge:
         assert w.get(1, 0.0) == 0.0, "an underwater miner must not earn"
         assert w.get(2, 0.0) > 0.0
         assert all(v >= 0.0 for v in w.values()), "no weight may be negative"
+
+
+class TestHarderShapesAreWorthMore:
+    """The property the circular-sigma bug destroyed without failing a test.
+
+    Deriving sigma from the call's own band returns tp/(z_ref*sqrt(hz)), so z is
+    always z_ref and every shape prices at the same 1.326 -- a miner drawing
+    twice the band on a quarter of the clock scored exactly like one taking the
+    board. Sigma has to come from the pair's board row.
+    """
+
+    def test_a_bolder_shape_pays_more(self, always_qualified):
+        board = scoring.qualified_calls([row(T0, True)], 0.0, sigma_for=board_sigma)
+        bold = scoring.qualified_calls(
+            [row(T0, True, tp=BOARD_TP * 2, hz=BOARD_HZ // 4)], 0.0,
+            sigma_for=board_sigma)
+        assert bold[0][1] > board[0][1] * 2, (
+            "a much harder shape must pay much more; if these are equal, sigma "
+            "is being derived from the call instead of the board")
+
+    def test_a_bolder_shape_costs_more_when_wrong(self, always_qualified):
+        board = scoring.qualified_calls([row(T0, False)], 0.0, sigma_for=board_sigma)
+        bold = scoring.qualified_calls(
+            [row(T0, False, tp=BOARD_TP * 2, hz=BOARD_HZ // 4)], 0.0,
+            sigma_for=board_sigma)
+        assert bold[0][1] < board[0][1] * 2
+
+    def test_no_sigma_source_means_unpriceable(self, always_qualified):
+        assert scoring.qualified_calls([row(T0, True)], 0.0) == []

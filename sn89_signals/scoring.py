@@ -1202,7 +1202,8 @@ def qualified_wins(decisive: list[tuple], first_seen_unix: float,
 
 
 def qualified_calls(decisive: list[tuple], first_seen_unix: float,
-                    habitual: bool = False) -> list[tuple[float, float]]:
+                    habitual: bool = False,
+                    sigma_for=None) -> list[tuple[float, float]]:
     """Post-warmup calls scored in SIGNED POINTS, as [(t0, points)].
 
     The points analogue of qualified_wins, and it differs in one way that
@@ -1242,7 +1243,19 @@ def qualified_calls(decisive: list[tuple], first_seen_unix: float,
         rd = len(window)
         if not _qualifies(rw, rd):
             continue
-        sigma = sigma_from_board(float(tp), int(hz))
+        # SIGMA COMES FROM THE PAIR'S BOARD ROW, never from this call's own band.
+        # sigma_from_board(tp, hz) on the call's OWN numbers is circular: it
+        # returns tp/(z_ref*sqrt(hz)), so z is always z_ref and every shape
+        # prices at the same 1.326 no matter how bold. Caught by an end-to-end
+        # check where a miner drawing twice the band on a quarter of the clock
+        # scored identically to one taking the board.
+        #
+        # scoring.py must not import hf (hf imports scoring), so the board lookup
+        # arrives as a callable from the caller that owns the board.
+        pair = row[6] if len(row) > 6 else None
+        sigma = sigma_for(pair, t0) if (sigma_for and pair) else 0.0
+        if sigma <= 0:
+            continue                     # unpriceable without a board sigma
         pts = signed_points("won" if won else "lost",
                             float(tp), int(hz), sigma)
         out.append((t0, pts))

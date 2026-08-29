@@ -696,7 +696,7 @@ def _history(cache_dir: str, as_of: float | None = None):
             # journaled resolution time, so it is None, exactly as before.
             # The band goes at 4 and 5.
             dec.setdefault(hk, []).append((t0, status == "won", False, None,
-                                           g_tp, g_hz))
+                                           g_tp, g_hz, pair))
     db.close()
     for v in dec.values():
         v.sort(key=lambda x: x[0])

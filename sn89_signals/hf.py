@@ -1199,11 +1199,34 @@ def hf_compute_weights(decisive_by_hk: dict, first_seen_by_hk: dict,
             qwins = scoring.qualified_wins(
                 decisive, eligible, habitual=False,
                 graded=(graded_by_hk or {}).get(hk))
+            # Both histories are built every cycle; compute_weights reads whichever
+            # the chain has armed. Building only the armed one would mean a network
+            # arming points has no history until fresh calls land, which is a
+            # silent reset of everyone's standing at the cutover.
+            qcalls = scoring.qualified_calls(decisive, eligible, habitual=False,
+                                             sigma_for=_board_sigma_for)
             states.append(scoring.MinerState(
                 hotkey=hk, uid=uid, first_seen_unix=eligible,
                 rep_wins=rep_won, rep_decisive=rep_dec, trailing_wins=won_all,
-                qwins=qwins))
+                qwins=qwins, qcalls=qcalls))
         return scoring.compute_weights(states, now)
+
+
+def _board_sigma_for(pair: str, t0_unix: float) -> float:
+    """Pair volatility from the BOARD ROW in force at t0, in bps per sqrt(s).
+
+    As-of, so a board change reprices only calls made after it and replay of
+    everything earlier is unchanged -- the same rule every other constant in
+    this package follows. Returns 0.0 for a pair with no board entry, which the
+    caller treats as unpriceable rather than guessing a sigma.
+    """
+    from . import scoring
+    board = hf_bands_as_of(t0_unix) or {}
+    row = board.get(str(pair).upper())
+    if not row:
+        return 0.0
+    tp, _sl, hz, _cls = row
+    return scoring.sigma_from_board(float(tp), int(hz))
 
 
 def hf_compute_tallies(decisive_by_hk: dict, first_seen_by_hk: dict,
@@ -1242,10 +1265,19 @@ def hf_compute_tallies(decisive_by_hk: dict, first_seen_by_hk: dict,
                 continue
             if not integrity_ok(hk, now):
                 continue                         # flagged by the integrity service
-            qwins = scoring.qualified_wins(
-                decisive, eligible, habitual=False,
-                graded=(graded_by_hk or {}).get(hk))
-            t = scoring.decayed_qwin_tally(qwins, now)
+            if config.points_enforced_as_of(now):
+                # The raw tally, UNCLAMPED -- a referrer must be able to see that
+                # a recruit is underwater. Only a positive tally is published,
+                # because referrer_scores pays a share OF a positive pool and a
+                # negative contribution there has no meaning.
+                t = scoring.decayed_points_tally(
+                    scoring.qualified_calls(decisive, eligible, habitual=False,
+                                            sigma_for=_board_sigma_for), now)
+            else:
+                qwins = scoring.qualified_wins(
+                    decisive, eligible, habitual=False,
+                    graded=(graded_by_hk or {}).get(hk))
+                t = scoring.decayed_qwin_tally(qwins, now)
             if t > 0:
                 out[hk] = t
         return out
