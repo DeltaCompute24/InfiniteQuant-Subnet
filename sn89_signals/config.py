@@ -323,6 +323,22 @@ HF_POINTS_GAMMA = float(os.getenv("SN89_HF_POINTS_GAMMA", "1.5"))
 HF_POINTS_TARGET_RESOLVE = float(os.getenv("SN89_HF_POINTS_TARGET_RESOLVE", "0.86"))
 
 
+# Rolling window for the POINTS tally, and the per-day cap that replaces
+# WIN_CAP inside it.
+#
+# WIN_CAP is 20 MOST RECENT wins. Against a 30-day window that silently becomes
+# a sub-24-hour window for exactly the highest-cadence miners -- an HF miner at
+# 30 calls a day passes 20 wins well inside one day -- while low-cadence miners
+# are unaffected, so it looks like the month is working.
+#
+# The cap is therefore per UTC day and counts the FIRST N calls of each day, in
+# time order. NOT the best N: letting the tally keep a miner's best calls would
+# let them discard losses after the fact, which is the one thing a signed score
+# must never allow.
+HF_POINTS_WINDOW_S = int(os.getenv("SN89_HF_POINTS_WINDOW_S", str(30 * 24 * 3600)))
+HF_POINTS_DAILY_CAP = int(os.getenv("SN89_HF_POINTS_DAILY_CAP", "8"))
+
+
 def points_enforced_as_of(t0_unix: float) -> bool:
     """Whether a call at t0 is scored in signed points rather than counted wins."""
     return bool(HF_POINTS_FROM and t0_unix >= HF_POINTS_FROM)

@@ -795,6 +795,11 @@ class MinerState:
     # time-decayed, tier-weighted tally of these (see compute_weights). Losses
     # never appear here.
     qwins: list[tuple[float, float]] = field(default_factory=list)
+    # SIGNED points history [(t0, points)], losses included. Empty on every
+    # network that has not armed HF_POINTS_FROM, which is all of them today.
+    # Kept beside qwins rather than replacing it so a disarmed chain computes
+    # byte-identically to before this field existed.
+    qcalls: list[tuple[float, float]] = field(default_factory=list)
 
 
 def score_inputs(decisive: list[tuple[float, bool, bool]], first_seen_unix: float,
@@ -907,6 +912,17 @@ def compute_weights(states: list[MinerState], now_unix: float,
     # miner and thus freeze accrual — so there is no cliff, and parking (stopping
     # trading) to protect emissions doesn't work: the tally decays to zero.
     def qtally(s: MinerState) -> float:
+        if config.points_enforced_as_of(now_unix):
+            # CLAMPED AT ZERO, and the clamp lives here rather than in
+            # decayed_points_tally on purpose. A negative weight has no meaning
+            # on chain, but every other caller -- the referrer score, any
+            # reporting surface -- needs to see how far underwater a miner is.
+            # A tally that clamped itself would hide that from all of them.
+            #
+            # Underwater therefore means "earns nothing and must climb back to
+            # positive", not "is eliminated". Elimination stays the lifetime
+            # Wilson upper-bound rule and is never triggered by a points total.
+            return max(0.0, decayed_points_tally(s.qcalls, now_unix))
         return decayed_qwin_tally(s.qwins, now_unix)
 
     # ── probation floor ─────────────────────────────────────────────────────────
@@ -1183,6 +1199,81 @@ def qualified_wins(decisive: list[tuple], first_seen_unix: float,
             eff = efficiency_multiplier(graded, t0) if graded else 1.0
             out.append((t0, max(1.0, tier_multiplier(rw, rd, t0)) * eff))
     return out
+
+
+def qualified_calls(decisive: list[tuple], first_seen_unix: float,
+                    habitual: bool = False) -> list[tuple[float, float]]:
+    """Post-warmup calls scored in SIGNED POINTS, as [(t0, points)].
+
+    The points analogue of qualified_wins, and it differs in one way that
+    matters: LOSSES ARE IN IT. A signed score whose losses are dropped is not a
+    signed score, and the no-view-earns-zero property -- the thing the whole
+    scheme rests on -- is false the moment one side is filtered.
+
+    The point-in-time qualify gate applies to BOTH sides for the same reason. If
+    only wins were gated, a miner would bank wins while qualified and shed
+    losses while not, which is a free ratchet.
+
+    Each row is (t0, won, is_copy, resolved_unix, tp_bps, horizon_s). The band
+    is at 4 and 5; index 3 is resolved_unix and is read by _resolved_by -- see
+    tests/test_decisive_tuple_layout.py for why that ordering is asserted.
+    A row with no band falls back to the board via the caller, and a row we
+    cannot price at all contributes nothing rather than a guess.
+    """
+    warmup_end = first_seen_unix + config.IMMUNITY_S
+    dec = sorted(decisive, key=lambda d: d[0])
+    out: list[tuple[float, float]] = []
+    for i, row in enumerate(dec):
+        t0, won, cp = row[0], row[1], row[2]
+        if t0 < warmup_end or (habitual and cp):
+            continue
+        tp = row[4] if len(row) > 4 else None
+        hz = row[5] if len(row) > 5 else None
+        if not tp or not hz:
+            continue                     # unpriceable: contribute nothing
+        rep_cut = t0 - config.HIT_RATE_WINDOW_S
+        if config.causal_qwin_enforced_as_of(t0):
+            window = [d for d in dec[:i] if d[0] >= rep_cut and _resolved_by(d, t0)]
+            window.append(row)
+        else:
+            window = [d for d in dec[:i + 1] if d[0] >= rep_cut]
+        window = window[-config.hit_rate_window_trades_as_of(t0):]
+        rw = sum(1 for d in window if d[1])
+        rd = len(window)
+        if not _qualifies(rw, rd):
+            continue
+        sigma = sigma_from_board(float(tp), int(hz))
+        pts = signed_points("won" if won else "lost",
+                            float(tp), int(hz), sigma)
+        out.append((t0, pts))
+    return out
+
+
+def decayed_points_tally(calls: list[tuple[float, float]], now_unix: float) -> float:
+    """Signed, time-decayed points over the rolling window. May be NEGATIVE.
+
+    compute_weights clamps at zero before this becomes a weight -- a negative
+    weight has no meaning on chain -- but the clamp belongs THERE and not here.
+    A tally that clamped itself would hide how far underwater a miner is from
+    every caller that is not building a weight vector.
+
+    The per-day cap keeps the FIRST HF_POINTS_DAILY_CAP calls of each UTC day.
+    Chronological, never best-of: a cap that kept a miner's best calls would let
+    them shed losses after the fact.
+    """
+    W = config.HF_POINTS_WINDOW_S
+    live = [(t0, p) for t0, p in calls if 0.0 <= now_unix - t0 < W]
+    live.sort(key=lambda x: x[0])
+    per_day: dict[int, int] = {}
+    total = 0.0
+    for t0, p in live:
+        day = int(t0 // 86_400)
+        n = per_day.get(day, 0)
+        if n >= config.HF_POINTS_DAILY_CAP:
+            continue
+        per_day[day] = n + 1
+        total += p * (1.0 - (now_unix - t0) / W)
+    return total
 
 
 def decayed_qwin_tally(qwins: list[tuple[float, float]], now_unix: float) -> float:
