@@ -1301,6 +1301,67 @@ def qualified_calls(decisive: list[tuple], first_seen_unix: float,
     return out
 
 
+def points_test(decisive: list[tuple], sigma_for=None) -> dict:
+    """The points qualify gate. Returns {t, staked, n, qualified}.
+
+    Rows are the same shape qualified_calls takes:
+    (t0, won, is_copy, resolved_unix, tp_bps, horizon_s, pair). A row we cannot
+    price contributes nothing rather than a guess -- never a default band, which
+    would credit a miner with a difficulty they did not take.
+
+    Deterministic and arithmetic-only (+ - * / sqrt), like scoring._wilson: every
+    validator must reach the identical verdict, so no erf and no NormalDist.
+
+    This does NOT apply the point-in-time Wilson gate. It IS the gate -- running
+    the old one inside the new one would require a miner to pass both, which is
+    the union bug the closers entry gate already shipped once.
+    """
+    sx = sp = svar = 0.0
+    n = 0
+    for row in sorted(decisive, key=lambda d: d[0]):
+        t0, won = row[0], row[1]
+        tp = row[4] if len(row) > 4 else None
+        hz = row[5] if len(row) > 5 else None
+        pair = row[6] if len(row) > 6 else None
+        if not tp or not hz:
+            continue
+        sigma = sigma_for(pair, t0) if (sigma_for and pair) else 0.0
+        if sigma <= 0:
+            continue
+        p = points_for(float(tp), int(hz), sigma)
+        if p <= 0:
+            continue
+        sx += p if won else -p
+        sp += p
+        # Var[X_i] = p^2, NOT p^2 * p_res(z_i).
+        #
+        # The p_res factor is correct for a sum over ALL SUBMITTED calls, where a
+        # wash contributes X=0 and drags the variance down. This function is
+        # handed DECISIVE rows only -- washes never reach it -- so conditional on
+        # having resolved, X_i is +/-p_i at 1/2 each and the variance is the full
+        # p_i^2.
+        #
+        # Shipping the p_res factor here understates the denominator by sqrt(0.86)
+        # = 0.927 and makes the gate uniformly more permissive than Wilson >= 0.55.
+        # Measured before the fix: the points test passed MORE miners than Wilson
+        # in all 12 cells of a w x N sweep, 141 disagreements in 2400 trials --
+        # against a design that requires the two to agree, which is the whole
+        # basis for letting an already-qualified miner migrate without re-testing.
+        svar += p * p
+        n += 1
+    if n == 0 or svar <= 0:
+        return {"t": 0.0, "staked": 0.0, "n": 0, "qualified": False}
+    t = (sx - config.POINTS_QUALIFY_EPS * sp) / math.sqrt(svar)
+    return {
+        "t": t,
+        "staked": sp,
+        "n": n,
+        "qualified": bool(t >= config.POINTS_QUALIFY_Z
+                          and n >= config.POINTS_QUALIFY_MIN_RESOLVED
+                          and sp >= config.POINTS_QUALIFY_MIN_STAKED),
+    }
+
+
 def wash_surprise(resolved: list[tuple[float, bool, float]]) -> float:
     """How far a miner's washes exceed what their own shapes predicted.
 

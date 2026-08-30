@@ -513,6 +513,32 @@ QUALIFY_Z = 1.2816                 # one-sided ~90 % confidence for the qualify 
 QUALIFY_LB_FLOOR = 0.50            # qualify when the Wilson lower bound on the true
                                     # hit-rate ≥ this (i.e. 90 % sure you beat a coin flip)
 
+# ── The points qualify gate (custom-sizing format) ──────────────────────────────
+# A hit rate stops meaning anything once the miner picks the difficulty: 60% at
+# z=0.3 and 60% at z=1.4 are not the same trader. Symmetric scoring hands us the
+# replacement -- a no-skill miner's expected points are EXACTLY zero at every band,
+# a point null, with a variance that is DERIVED rather than estimated because the
+# miner declares z before the outcome.
+#
+#         SUM X_i - EPS * SUM p_i
+#   T =  --------------------------      qualify at T >= POINTS_QUALIFY_Z
+#        sqrt( SUM p_i^2 * p_res(z_i) )
+#
+# EPS MUST BE STRICTLY POSITIVE, for the same reason QUALIFY_LB_FLOOR must exceed
+# 0.50: at EPS=0 a coin-flipper passes ~10% of the time at EVERY sample size --
+# the fixed-alpha pathology in a new coordinate system, measured identical at 20,
+# 60, 200 and 600 calls. At 0.10 it decays: 2.3% at 60 calls, 0.03% at 600.
+#
+# On a fixed board every z_i is equal, so T reduces to a monotone function of
+# wins/N -- which is what Wilson tests. 0.10 is the calibration that makes the two
+# agree at board difficulty, which is why a miner already qualified on HF or LF
+# needs no grandfather clause: replay their calls and they clear the same bar.
+POINTS_QUALIFY_EPS = float(os.getenv("SN89_POINTS_QUALIFY_EPS", "0.10"))
+POINTS_QUALIFY_Z = 1.2816          # one-sided ~90%, same as QUALIFY_Z
+POINTS_QUALIFY_MIN_RESOLVED = int(os.getenv("SN89_POINTS_QUALIFY_MIN_RESOLVED", "30"))
+POINTS_QUALIFY_MIN_STAKED = float(os.getenv("SN89_POINTS_QUALIFY_MIN_STAKED", "40"))
+
+
 # Tier multiplier prior. The per-win tier (WIN_RATE_TIERS) is applied to a
 # beta-shrunk posterior mean (prior Beta(K/2, K/2) centred on 0.50), NOT the raw
 # rate, so a thin-sample hot streak (e.g. 9/4) is pulled toward a coin flip and
