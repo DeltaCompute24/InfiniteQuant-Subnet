@@ -680,6 +680,7 @@ def _history(cache_dir: str, as_of: float | None = None):
     fs: dict = {}
     subs: dict = {}
     graded: dict = {}
+    washes: dict = {}
     for hk, t0_ms, pair, direction, horizon_s in db.execute(
             "SELECT hk, t0_ms, pair, direction, horizon_s FROM submissions"):
         if cut_ms is not None and int(t0_ms) > cut_ms:
@@ -695,6 +696,12 @@ def _history(cache_dir: str, as_of: float | None = None):
             continue                      # still open at as_of, so still ungraded
         t0 = t0_ms / 1000.0
         fs[hk] = min(fs.get(hk, t0), t0)
+        if status in ("won", "lost", "wash") and g_tp and g_hz:
+            # Separate from `graded`, which efficiency_multiplier unpacks as
+            # 2-tuples -- widening that would break it. This carries the band so
+            # the caller can recover q(z), the wash probability the miner
+            # DECLARED when they drew the shape.
+            washes.setdefault(hk, []).append((t0, status == "wash", g_tp, g_hz, pair))
         if status in ("won", "lost", "wash"):
             # graded (not void): what scoring.efficiency_multiplier prices. Note HF
             # writes 'wash', LF writes 'washed'.
@@ -715,7 +722,7 @@ def _history(cache_dir: str, as_of: float | None = None):
         v.sort(key=lambda x: x[0])
     for v in graded.values():
         v.sort(key=lambda x: x[0])
-    return dec, fs, subs, graded
+    return dec, fs, subs, graded, washes
 
 
 def mecid1_weights(uid_by_hk: dict, now: float | None = None,
@@ -727,8 +734,9 @@ def mecid1_weights(uid_by_hk: dict, now: float | None = None,
     cache_dir = cache_dir or os.path.expanduser(
         os.getenv("SN89_HF_GRADE_CACHE", "~/.sn89/hf-grade"))
     sync_and_grade(base, cache_dir, now)
-    dec, fs, subs, graded = _history(cache_dir, as_of=now)
-    return hf.hf_compute_weights(dec, fs, uid_by_hk, now, subs, graded)
+    dec, fs, subs, graded, washes = _history(cache_dir, as_of=now)
+    return hf.hf_compute_weights(dec, fs, uid_by_hk, now, subs, graded,
+                                 washes)
 
 
 def mecid1_tallies(uid_by_hk: dict, now: float | None = None,
@@ -741,5 +749,5 @@ def mecid1_tallies(uid_by_hk: dict, now: float | None = None,
     cache_dir = cache_dir or os.path.expanduser(
         os.getenv("SN89_HF_GRADE_CACHE", "~/.sn89/hf-grade"))
     sync_and_grade(base, cache_dir, now)
-    dec, fs, subs, graded = _history(cache_dir, as_of=now)
+    dec, fs, subs, graded, _washes = _history(cache_dir, as_of=now)
     return hf.hf_compute_tallies(dec, fs, uid_by_hk, now, subs, graded)

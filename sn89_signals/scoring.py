@@ -800,6 +800,9 @@ class MinerState:
     # Kept beside qwins rather than replacing it so a disarmed chain computes
     # byte-identically to before this field existed.
     qcalls: list[tuple[float, float]] = field(default_factory=list)
+    # Resolved history as [(t0, was_wash, q)], q being the wash probability the
+    # miner DECLARED by drawing that shape. Only the excess over it is charged.
+    wash_hist: list[tuple[float, bool, float]] = field(default_factory=list)
 
 
 def score_inputs(decisive: list[tuple[float, bool, bool]], first_seen_unix: float,
@@ -990,6 +993,32 @@ def compute_weights(states: list[MinerState], now_unix: float,
 
     def eff(s: MinerState) -> float:
         return base[s.hotkey] + bonus.get(s.hotkey, 0.0)
+
+    # ── excess-wash debt ────────────────────────────────────────────────────────
+    # Charged only where a miner washed MORE than their own shapes predicted, and
+    # ranked by where they stand in the field: the top of the board pays nothing,
+    # the bottom pays in full. Continuous, so nobody sits on a threshold.
+    #
+    # The standing distribution has to be built across the WHOLE field, which is
+    # why this cannot live inside qtally() -- a per-miner function cannot know
+    # anyone's percentile. It is computed once here, over the raw tallies.
+    if points_mode:
+        raw = sorted(decayed_points_tally(s.qcalls, now_unix) for s in states)
+        def _pct(v: float) -> float:
+            if len(raw) < 2:
+                return 1.0          # a field of one: nobody is below anybody
+            below = sum(1 for r in raw if r < v)
+            return below / (len(raw) - 1.0)
+        debts: dict[str, float] = {}
+        for s in states:
+            if not s.wash_hist:
+                continue
+            t = decayed_points_tally(s.qcalls, now_unix)
+            sur = wash_surprise(s.wash_hist)
+            debts[s.hotkey] = wash_debt(t, sur, standing_pct=_pct(t))
+        if debts:
+            _base = base
+            base = {hk: v - debts.get(hk, 0.0) for hk, v in _base.items()}
 
     # ── distribute the pool by decayed qualified-win tally (relative share) ──────
     earners = [s for s in states if s.uid not in excluded_uids and eff(s) > 0]

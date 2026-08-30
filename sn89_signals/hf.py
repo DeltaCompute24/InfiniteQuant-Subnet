@@ -1187,9 +1187,28 @@ def hf_scoring_config(now: float | None = None):
             setattr(config, k, v)
 
 
+def _wash_hist(rows, ) -> list:
+    """[(t0, is_wash, q)] from [(t0, is_wash, tp, hz, pair)].
+
+    q = 1 - p_res(z) is the wash probability the miner DECLARED by drawing that
+    shape. Sigma comes from the pair's board row, never from the call's own band
+    -- deriving it from the call is circular and makes every shape identical.
+    """
+    from . import scoring
+    out = []
+    for t0, is_wash, tp, hz, pair in rows or ():
+        sg = _board_sigma_for(pair, t0)
+        if sg <= 0 or not tp or not hz:
+            continue
+        z = float(tp) / (sg * math.sqrt(float(hz)))
+        out.append((t0, bool(is_wash), 1.0 - scoring.resolve_probability(z)))
+    return out
+
+
 def hf_compute_weights(decisive_by_hk: dict, first_seen_by_hk: dict,
                        uid_by_hk: dict, now: float, subs_by_hk: dict,
-                       graded_by_hk: dict | None = None) -> dict:
+                       graded_by_hk: dict | None = None,
+                       washes_by_hk: dict | None = None) -> dict:
     """{uid: normalized_weight} for mecid 1, from HF-ONLY graded outcomes.
 
     Reuses the SAME battle-tested tally as mecid 0 (scoring.qualified_wins,
@@ -1259,7 +1278,8 @@ def hf_compute_weights(decisive_by_hk: dict, first_seen_by_hk: dict,
             states.append(scoring.MinerState(
                 hotkey=hk, uid=uid, first_seen_unix=eligible,
                 rep_wins=rep_won, rep_decisive=rep_dec, trailing_wins=won_all,
-                qwins=qwins, qcalls=qcalls))
+                qwins=qwins, qcalls=qcalls,
+                wash_hist=_wash_hist((washes_by_hk or {}).get(hk))))
         return scoring.compute_weights(states, now)
 
 

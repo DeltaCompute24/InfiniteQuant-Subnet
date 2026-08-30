@@ -1828,7 +1828,7 @@ class TestHFSubmissionsTableIsUnfiltered:
                     + [self._rcpt(100 + i, "USDJPY", "SHORT", 1_000_000 + i * 1000)
                        for i in range(5)])
         self._cache(tmp_path, monkeypatch, receipts).close()
-        _dec, _fs, subs, _graded = hf_grade._history(str(tmp_path))
+        _dec, _fs, subs, _graded, _washes = hf_grade._history(str(tmp_path))
         # subs records gained a 4th element (declared horizon, for the diversity
         # floor). Index rather than unpack, so a later widening cannot break this.
         dirs = [s[2] for s in subs["A"]]
