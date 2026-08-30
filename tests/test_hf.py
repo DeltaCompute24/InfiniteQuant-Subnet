@@ -1829,7 +1829,9 @@ class TestHFSubmissionsTableIsUnfiltered:
                        for i in range(5)])
         self._cache(tmp_path, monkeypatch, receipts).close()
         _dec, _fs, subs, _graded = hf_grade._history(str(tmp_path))
-        dirs = [d for _, _, d in subs["A"]]
+        # subs records gained a 4th element (declared horizon, for the diversity
+        # floor). Index rather than unpack, so a later widening cannot break this.
+        dirs = [s[2] for s in subs["A"]]
         assert dirs.count("SHORT") == 5 and dirs.count("LONG") == 5
 
     def test_the_5eoldj8t_shape_passes_the_gate(self, tmp_path, monkeypatch):

@@ -28,6 +28,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import math
 import os
 import time
 
@@ -1002,16 +1003,59 @@ HF_DIVERSITY_FLOOR_WIDE = float(os.getenv("SN89_HF_DIVERSITY_FLOOR_WIDE", "0.06"
 HF_DIVERSITY_FLOOR_BROAD = float(os.getenv("SN89_HF_DIVERSITY_FLOOR_BROAD", "0.03"))
 
 
-def hf_diversity_floor(n_pairs: int) -> float:
-    """The minimum minority-direction share demanded of a miner covering `n_pairs`
-    distinct pairs. Monotonically non-increasing in breadth."""
+# Horizon scaling for the diversity floor. REF is the board's own short horizon,
+# so a miner at the board clock is unscaled and nothing about the fixed-board era
+# changes. MAX_X caps the demand: an uncapped sqrt at the 48h ceiling would ask
+# for a minority share no honest two-sided miner reaches.
+HF_DIVERSITY_HORIZON_REF_S = int(os.getenv("SN89_HF_DIVERSITY_HORIZON_REF_S", "1800"))
+HF_DIVERSITY_HORIZON_MAX_X = float(os.getenv("SN89_HF_DIVERSITY_HORIZON_MAX_X", "3.0"))
+# HARD CEILING ON THE FLOOR, and it is not cosmetic. `share` is
+# sum(min(long, short)) / n, so it CANNOT EXCEED 0.5 -- a perfectly balanced book
+# scores exactly 0.5. Any floor above that is unsatisfiable, and scaling 20% at
+# 2 pairs by 3x produces 60%: a narrow-breadth miner on a long horizon would fail
+# the gate however two-sided they actually were, with the log showing a share
+# they had no way to beat.
+HF_DIVERSITY_FLOOR_CEIL = float(os.getenv("SN89_HF_DIVERSITY_FLOOR_CEIL", "0.45"))
+
+
+def hf_diversity_floor(n_pairs: int, mean_horizon_s: float | None = None) -> float:
+    """Minimum minority-direction share demanded of a miner covering `n_pairs`
+    pairs at a mean declared horizon of `mean_horizon_s`.
+
+    Non-increasing in breadth, and INCREASING IN HORIZON.
+
+    The horizon term is the one that is not obvious. A long-only book with no
+    view still wins in a trending tape, and the effect scales with sqrt(H):
+    measured at the board band, a long-only bot takes 50.4% at 30 minutes and
+    52-58% at 24 hours. So the longer the window a miner declares, the less a
+    one-sided record proves, and the more two-sidedness the gate has to demand
+    to say the same thing.
+
+    Under a FIXED board this term was unnecessary -- everyone traded the same
+    horizon, so it was a constant folded into the ladder. Custom sizing makes the
+    horizon a choice, and without this a miner escapes the gate by lengthening
+    the clock rather than by trading both sides.
+
+    Capped at HF_DIVERSITY_HORIZON_MAX_X so the floor can never exceed a
+    plausible share: an uncapped sqrt at 48h would demand more minority calls
+    than a genuinely two-sided miner produces.
+    """
     if n_pairs <= 2:
-        return HF_DIVERSITY_FLOOR_NARROW
-    if n_pairs <= 4:
-        return HF_DIVERSITY_FLOOR_MID
-    if n_pairs <= 6:
-        return HF_DIVERSITY_FLOOR_WIDE
-    return HF_DIVERSITY_FLOOR_BROAD
+        base = HF_DIVERSITY_FLOOR_NARROW
+    elif n_pairs <= 4:
+        base = HF_DIVERSITY_FLOOR_MID
+    elif n_pairs <= 6:
+        base = HF_DIVERSITY_FLOOR_WIDE
+    else:
+        base = HF_DIVERSITY_FLOOR_BROAD
+    if not mean_horizon_s or mean_horizon_s <= 0:
+        return base                      # legacy rows: the ladder, unchanged
+    x = math.sqrt(float(mean_horizon_s) / HF_DIVERSITY_HORIZON_REF_S)
+    x = max(1.0, min(HF_DIVERSITY_HORIZON_MAX_X, x))
+    # Clamped below the 0.5 a perfectly balanced book can reach -- see
+    # HF_DIVERSITY_FLOOR_CEIL. An unreachable floor is not a strict gate, it is
+    # a gate that has stopped measuring anything.
+    return min(HF_DIVERSITY_FLOOR_CEIL, base * x)
 
 
 def hf_diversity(subs, now: float) -> dict:
@@ -1047,6 +1091,7 @@ def hf_diversity(subs, now: float) -> dict:
     cutoff_ms = (now - HF_DIVERSITY_WINDOW_S) * 1000.0
     by_pair: dict = {}
     longs, shorts = 0, 0
+    horizons: list[float] = []
     for s in subs or ():
         if not isinstance(s, (tuple, list)) or len(s) < 3:
             continue
@@ -1067,16 +1112,22 @@ def hf_diversity(subs, now: float) -> dict:
         # unpaired record can only ever be our own bookkeeping.
         lp = by_pair.setdefault(str(pair) if pair else "", [0, 0])
         lp[0 if d == "LONG" else 1] += 1
+        # Element 3 is the declared horizon where the record has one. Absent on
+        # legacy rows, and an empty list leaves the floor exactly as it was.
+        if len(s) > 3 and s[3]:
+            horizons.append(float(s[3]))
     n = longs + shorts
     # THE per-pair sum. min() is applied INSIDE each pair and then pooled, so a
     # pair can only donate the two-sidedness it actually has. See the note above.
     minority = sum(min(l, s) for l, s in by_pair.values())
     pairs = {p for p in by_pair if p}
     share = (minority / n) if n else 0.0
-    floor = hf_diversity_floor(len(pairs))
+    mean_h = (sum(hz for hz in horizons) / len(horizons)) if horizons else None
+    floor = hf_diversity_floor(len(pairs), mean_h)
     applies = HF_DIVERSITY_ENABLED and n >= HF_DIVERSITY_MIN_SUBS
     return {"n": n, "pairs": len(pairs), "long": longs, "short": shorts,
             "minority": minority, "share": share, "floor": floor,
+            "mean_horizon_s": mean_h,
             "by_pair": {p: tuple(v) for p, v in sorted(by_pair.items())},
             "applies": applies, "ok": (not applies) or share >= floor}
 

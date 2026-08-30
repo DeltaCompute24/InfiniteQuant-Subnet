@@ -303,6 +303,13 @@ def _db(cache_dir: str) -> sqlite3.Connection:
     c.execute("CREATE TABLE IF NOT EXISTS submissions ("
               "key TEXT PRIMARY KEY, hk TEXT, t0_ms INTEGER, pair TEXT, "
               "direction TEXT)")
+    # The declared horizon, for the diversity floor. Drift capture scales with
+    # sqrt(H), so a one-sided book is harder to catch the longer the window --
+    # the floor has to scale with it. NULL on legacy rows, which the floor reads
+    # as the board horizon, i.e. exactly the behaviour before this column.
+    _sub_cols = {r[1] for r in c.execute("PRAGMA table_info(submissions)")}
+    if "horizon_s" not in _sub_cols:
+        c.execute("ALTER TABLE submissions ADD COLUMN horizon_s INTEGER")
     c.execute("CREATE INDEX IF NOT EXISTS submissions_hk ON submissions(hk)")
     c.execute("CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT)")
     row = c.execute("SELECT v FROM meta WHERE k='grader_version'").fetchone()
@@ -431,8 +438,11 @@ def sync_and_grade(base: str, cache_dir: str, now: float) -> None:
             # correlates with the direction. Anything measuring miner BEHAVIOUR has to
             # be sampled here, above the filters, or it measures our coverage instead.
             if t0_ms:
-                db.execute("INSERT OR REPLACE INTO submissions VALUES (?,?,?,?,?)",
-                           (key, hk, int(t0_ms), pair, p.get("direction")))
+                db.execute("INSERT OR REPLACE INTO submissions "
+                           "(key, hk, t0_ms, pair, direction, horizon_s) "
+                           "VALUES (?,?,?,?,?,?)",
+                           (key, hk, int(t0_ms), pair, p.get("direction"),
+                            int(p["horizon_s"]) if p.get("horizon_s") else None))
             board = hf.hf_bands_as_of(t0_ms / 1000.0) if t0_ms else None
             if not board or pair not in board:
                 continue
@@ -670,11 +680,14 @@ def _history(cache_dir: str, as_of: float | None = None):
     fs: dict = {}
     subs: dict = {}
     graded: dict = {}
-    for hk, t0_ms, pair, direction in db.execute(
-            "SELECT hk, t0_ms, pair, direction FROM submissions"):
+    for hk, t0_ms, pair, direction, horizon_s in db.execute(
+            "SELECT hk, t0_ms, pair, direction, horizon_s FROM submissions"):
         if cut_ms is not None and int(t0_ms) > cut_ms:
             continue                      # not submitted yet at as_of
-        subs.setdefault(hk, []).append((int(t0_ms), pair, direction))
+        # Element 3 is the declared horizon, for the diversity floor. APPENDED,
+        # never inserted: hf_diversity unpacks s[0], s[1], s[2] positionally and
+        # so does every other reader of subs.
+        subs.setdefault(hk, []).append((int(t0_ms), pair, direction, horizon_s))
     for hk, t0_ms, status, open_until_ms, g_tp, g_sl, g_hz in db.execute(
             "SELECT hk, t0_ms, status, open_until_ms, tp_bps, sl_bps, horizon_s "
             "FROM grades"):
