@@ -36,6 +36,36 @@ from sn89_signals import config, hf, hf_grade
 
 LIVE = os.path.expanduser(os.getenv("SN89_HF_GRADE_CACHE", "~/.sn89/hf-grade"))
 KEEP = os.getenv("SN89_PARITY_KEEP") == "1"
+ALLOW_REMOTE = os.getenv("SN89_PARITY_ALLOW_REMOTE") == "1"
+
+
+def guard_remote_base(base: str) -> None:
+    """A cold rebuild fetches EVERY published window. Against a local mirror that
+    is free; against the live public host it is a sustained ~2.5 hour load on the
+    same process that serves the miner dashboard.
+
+    That is not hypothetical. On 2026-08-30 a manual mainnet run of THIS SCRIPT
+    saturated partner-webhook for ~2.5 h: /api/sn89/closers/series stopped
+    responding, so ClosersPanel fell through to its `candles.length < 2` sentinel
+    and every miner's chart rendered BLANK with a 0-to-1 axis. A trader reported
+    it in the group before we noticed. File routes on the same process went from
+    ~20 ms to 25 s. Killing the job restored everything within seconds.
+
+    So a remote base now has to be asked for out loud. The scheduled timer reads
+    a LOCAL mirror and is unaffected.
+    """
+    if ALLOW_REMOTE:
+        return
+    host = base.split("//", 1)[-1].split("/", 1)[0].split(":")[0]
+    if host in ("127.0.0.1", "localhost", "::1"):
+        return
+    raise SystemExit(
+        "REFUSING: %s is not local.\n"
+        "  A cold rebuild fetches every published window and will saturate the\n"
+        "  process that also serves the miner dashboard -- it blanked every\n"
+        "  chart for ~2.5 h on 2026-08-30.\n"
+        "  Run it against a local mirror, or set SN89_PARITY_ALLOW_REMOTE=1 and\n"
+        "  WATCH /api/sn89/closers/series while it runs." % base)
 
 
 def rows(db_path: str) -> dict:
@@ -57,6 +87,7 @@ def main() -> int:
         print("no live grade cache at %s -- nothing to compare" % LIVE)
         return 0
 
+    guard_remote_base(hf.HF_PUBLIC_BASE)
     scratch = tempfile.mkdtemp(prefix="sn89-parity-")
     print("netuid %s · rebuilding from %s" % (config.NETUID, hf.HF_PUBLIC_BASE))
     print("live cache: %d graded calls" % len(live))
