@@ -339,6 +339,33 @@ HF_POINTS_WINDOW_S = int(os.getenv("SN89_HF_POINTS_WINDOW_S", str(30 * 24 * 3600
 HF_POINTS_DAILY_CAP = int(os.getenv("SN89_HF_POINTS_DAILY_CAP", "8"))
 
 
+# -- excess wash ------------------------------------------------------------
+# A wash is NOT penalised. It already pays zero, burns one of the day's calls
+# and holds the pair lock, and the miner set its probability themselves when
+# they drew the shape.
+#
+# Measured: a flat per-wash cost above ~0.10 points -- under a tenth of one
+# board win -- collapses the optimal shape to the easy corner for every skill
+# level, because a wider band mechanically washes more and so widening would buy
+# expected punishment. A 24h emission cut is worth far more than 0.10, so a
+# routine wash penalty and miner-chosen widths cannot coexist.
+#
+# What IS penalised is washing more than your own declared shapes predicted.
+# Since a wider band raises predicted washes as much as actual ones, that test
+# is neutral to width and can be as harsh as we like.
+#
+#   S = (observed - sum q(z)) / sqrt(sum q(z)(1-q(z)))
+#
+# The debt is denominated in POINTS, not in a suspension. 'No emissions for 24h'
+# costs an earner a lot and a non-earner exactly nothing -- free for precisely
+# the miners most likely to spray. A points debt lands on both: an earner loses
+# roughly a day's earnings, a non-earner goes further below zero and must climb
+# back before earning at all.
+HF_WASH_EXCESS_Z = float(os.getenv("SN89_HF_WASH_EXCESS_Z", "2.0"))
+HF_WASH_DEBT_HOURS = float(os.getenv("SN89_HF_WASH_DEBT_HOURS", "24.0"))
+HF_WASH_DEBT_MAX_FRAC = float(os.getenv("SN89_HF_WASH_DEBT_MAX_FRAC", "1.0"))
+
+
 def points_enforced_as_of(t0_unix: float) -> bool:
     """Whether a call at t0 is scored in signed points rather than counted wins."""
     return bool(HF_POINTS_FROM and t0_unix >= HF_POINTS_FROM)

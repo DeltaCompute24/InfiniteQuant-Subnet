@@ -1272,6 +1272,59 @@ def qualified_calls(decisive: list[tuple], first_seen_unix: float,
     return out
 
 
+def wash_surprise(resolved: list[tuple[float, bool, float]]) -> float:
+    """How far a miner's washes exceed what their own shapes predicted.
+
+    `resolved` is [(t0, was_wash, q)] where q = 1 - p_res(z) is the wash
+    probability the miner DECLARED by drawing that shape. Returns a standard
+    score; only positive values mean anything, and 0 when there is nothing to
+    judge.
+
+    Neutral to band width by construction: a wider band raises q as much as it
+    raises the wash count, so drawing bold does not buy expected punishment.
+    That is the whole reason this is measured against the declaration rather
+    than against a fixed prior -- efficiency_multiplier's fixed 0.40 charges a
+    miner for choosing wide on top of the payout that already prices it.
+    """
+    n = len(resolved or ())
+    if n == 0:
+        return 0.0
+    obs = sum(1 for _t, w, _q in resolved if w)
+    exp = sum(q for _t, _w, q in resolved)
+    var = sum(q * (1.0 - q) for _t, _w, q in resolved)
+    if var <= 0.0:
+        return 0.0                       # every shape was a near-certainty
+    return (obs - exp) / math.sqrt(var)
+
+
+def wash_debt(tally: float, surprise: float, standing_pct: float = 0.0,
+              window_s: float | None = None) -> float:
+    """Points deducted for washing beyond what the miner's shapes predicted.
+
+    Zero unless the surprise clears HF_WASH_EXCESS_Z, so an honest miner washing
+    at their declared rate never pays. Sized as HF_WASH_DEBT_HOURS of that
+    miner's OWN recent earning rate, so it self-scales instead of needing a
+    constant that would be wrong for every miner but one.
+
+    standing_pct is the miner's percentile in the field (0 = bottom, 1 = top).
+    The top of the board pays nothing and the bottom pays the full debt, which
+    is the ranked behaviour asked for: a good miner who washes sits above a
+    worse one who washes at the same moment. Continuous, so nobody sits on a
+    threshold.
+
+    NEVER eliminates. A wash says nothing about whether the miner was right, so
+    elimination stays the lifetime Wilson upper bound.
+    """
+    if surprise < config.HF_WASH_EXCESS_Z:
+        return 0.0
+    W = config.HF_POINTS_WINDOW_S if window_s is None else window_s
+    if W <= 0:
+        return 0.0
+    day_rate = abs(tally) * (config.HF_WASH_DEBT_HOURS * 3600.0) / W
+    ranked = max(0.0, min(1.0, 1.0 - standing_pct))
+    return day_rate * ranked * config.HF_WASH_DEBT_MAX_FRAC
+
+
 def decayed_points_tally(calls: list[tuple[float, float]], now_unix: float) -> float:
     """Signed, time-decayed points over the rolling window. May be NEGATIVE.
 
