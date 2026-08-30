@@ -78,6 +78,8 @@ RESERVED_HOTKEYS = {"owner", "vali", "vali2", "miner", "default"}
 #   0.001  ~2x MinBurn   cheapest, slowest
 #   0.010  ~20x          much faster, ~1.1 TAO for 93 keys -- needs a faucet top-up
 BURN_SETPOINT_TAO = float(os.getenv("SN89_BETA_BURN_SETPOINT", "0.001"))
+EXTRINSIC_FEE_TAO = 0.0022   # measured on 496: burned_register's own fee,
+                             # paid in free TAO on TOP of the recycle burn
 POLL_S = 30                  # how often to re-check the burn while waiting
 MIN_GAP_S = 13               # MaxRegistrationsPerBlock is 1; never go under a block
 BURN_ABORT_TAO = 0.05        # 100x MinBurn -- survives one reprice, catches a runaway.
@@ -121,6 +123,21 @@ def record_seed(wallet_name: str, hotkey_name: str, ss58: str, captured: str) ->
                              "hotkey": hotkey_name, "ss58": ss58,
                              "creation_output": captured}) + "\n")
     os.chmod(SEED_PATH, 0o600)
+
+
+def funding_coldkey_ss58() -> str:
+    """The coldkey that pays the burn, read straight off coldkeypub.txt.
+
+    Deliberately does NOT construct a bt.Wallet. A wallet object here points at
+    whatever hotkey name it was opened with, and the first version of this script
+    called create_new_hotkey on one -- which targeted `owner`, the validator's own
+    signing key at UID 0 with 358k stake. Reading a public key needs no wallet, so
+    it gets no wallet.
+    """
+    p = os.path.join(os.path.expanduser("~/.bittensor/wallets"),
+                     FUNDING_WALLET, "coldkeypub.txt")
+    with open(p) as fh:
+        return json.load(fh)["ss58Address"]
 
 
 def main() -> int:
@@ -175,6 +192,31 @@ def main() -> int:
             waited += POLL_S
         if waited:
             print("   waited %ds for burn to fall to %.6f" % (waited, burn), flush=True)
+
+        # ── can this registration actually succeed? ──────────────────────────
+        # Read for free BEFORE creating a key and paying an extrinsic fee. Without
+        # this the run does not stop when the coldkey empties: burned_register
+        # simply fails, retries once, records registered=false, and moves to the
+        # next candidate -- so an empty wallet produces a HOTKEY AND A ROSTER ROW
+        # FOR EVERY REMAINING CANDIDATE, none of them registered, all needing
+        # reconciliation afterwards.
+        #
+        # Same rule as the alpha sweep that burned 7.63 alpha retrying a
+        # transfer_stake whose fee could never be paid: a precondition that can be
+        # read for free must never be discovered by spending money on an extrinsic
+        # that cannot succeed.
+        free = float(str(s.get_balance(funding_coldkey_ss58())).lstrip("τ"))
+        need = burn + EXTRINSIC_FEE_TAO
+        if free < need:
+            left = len(todo) - i + 1
+            print("\nSTOPPING: insufficient free balance.\n"
+                  "  have      τ%.6f\n"
+                  "  need      τ%.6f  (burn %.6f + fee %.6f)\n"
+                  "  remaining %d keys, about τ%.4f to finish\n"
+                  "  Top up the coldkey from the testnet faucet, then re-run --\n"
+                  "  the script is resumable and skips every key already issued."
+                  % (free, need, burn, EXTRINSIC_FEE_TAO, left, left * need))
+            return 5
 
         seq = len(roster["issued"]) + 1
         hk_name = "sn89beta-%03d-%s" % (seq, rand4())
