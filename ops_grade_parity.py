@@ -43,8 +43,9 @@ def rows(db_path: str) -> dict:
         return {}
     db = sqlite3.connect("file:%s?mode=ro" % db_path, uri=True)
     try:
-        return {k: (st, rsn) for k, st, rsn in
-                db.execute("SELECT key, status, reason FROM grades")}
+        return {k: (st, rsn, hk, t0, pr) for k, st, rsn, hk, t0, pr in
+                db.execute("SELECT key, status, reason, hk, t0_ms, pair "
+                           "FROM grades")}
     finally:
         db.close()
 
@@ -97,9 +98,14 @@ def main() -> int:
     print("void disagree:      %d  (%.3f%%)  disagreed the call was VALID"
           % (len(void_bad), len(void_bad) / n * 100))
 
+    # Print the hotkey AND t0 AND pair, never a truncated composite key. The key
+    # is "<hotkey>:<t0_ns>" and a hotkey is 48 chars, so truncating identified the
+    # miner and never the call -- which is exactly the row you need to chase.
     for label, bad in (("OUTCOME", out_bad), ("VOID", void_bad)):
         for k, a, b in bad[:8]:
-            print("  %-7s %s  live=%-5s rebuild=%-5s" % (label, k[:40], a, b))
+            hk, t0, pr = live[k][2], live[k][3], live[k][4]
+            print("  %-7s %s… %s t0=%s  live=%-5s rebuild=%-5s\n           key=%s"
+                  % (label, hk[:10], pr, t0, a, b, k))
         if len(bad) > 8:
             print("  %-7s ... and %d more" % (label, len(bad) - 8))
 
