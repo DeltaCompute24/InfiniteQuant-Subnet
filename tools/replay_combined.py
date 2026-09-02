@@ -35,12 +35,15 @@ from sn89_signals import (closers, competitions, config, hf,  # noqa: E402
 
 def lf_vector(db_path: str, uid_by_hotkey: dict, now: float) -> dict:
     db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    # exit_at_ms carries the causal as-of window (config.CAUSAL_QWIN_FROM).
+    # An auditor replaying without it reproduces the pre-2026-08-21 rule and
+    # will report a false delta against the chain.
     sig_rows = [
         {"commit_hex": ch, "hotkey": hk, "t0_unix": t0, "status": st,
-         "is_copy": int(cp or 0), "plaintext": pt}
-        for ch, hk, t0, st, cp, pt in db.execute(
-            "SELECT commit_hex, hotkey, t0_unix, status, is_copy, plaintext "
-            "FROM signals")]
+         "is_copy": int(cp or 0), "plaintext": pt, "exit_at_ms": ex}
+        for ch, hk, t0, st, cp, pt, ex in db.execute(
+            "SELECT commit_hex, hotkey, t0_unix, status, is_copy, plaintext, "
+            "exit_at_ms FROM signals")]
     meta = {hk: {"first_seen_unix": fs, "strikes": int(sk or 0)}
             for hk, fs, sk in db.execute(
                 "SELECT hotkey, first_seen_unix, strikes FROM hotkey_meta")}

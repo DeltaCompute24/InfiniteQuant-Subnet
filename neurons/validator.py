@@ -749,12 +749,20 @@ class Validator:
         # docs/single-validator-model.md). Hand it the journal and let it re-derive
         # eliminations, copy penalty, gate, tier and emission identically; the copy
         # forensics above persist `is_copy`/`copier_flags` only for the dashboard.
+        # exit_at_ms is NOT optional. scoring.qualified_wins builds the causal
+        # as-of window from it (config.CAUSAL_QWIN_FROM, armed 2026-08-21), and
+        # without the column every row falls back to legacy treatment and the
+        # window is a no-op -- so this vector was still letting a loss that
+        # OPENED before a win but GRADED after it un-bank a win already paid.
+        # Measured 2026-09-02: 26 miners carried a different weight here than
+        # build_dashboard.py (fixed 08-26) showed them, and 5Ct3Nn/5ECPh9 were
+        # shown a share while this vector paid them nothing.
         sig_rows = [
             {"commit_hex": ch, "hotkey": hk, "t0_unix": t0, "status": st,
-             "is_copy": int(cp or 0), "plaintext": pt}
-            for ch, hk, t0, st, cp, pt in self.db.execute(
-                "SELECT commit_hex, hotkey, t0_unix, status, is_copy, plaintext "
-                "FROM signals")]
+             "is_copy": int(cp or 0), "plaintext": pt, "exit_at_ms": ex}
+            for ch, hk, t0, st, cp, pt, ex in self.db.execute(
+                "SELECT commit_hex, hotkey, t0_unix, status, is_copy, plaintext, "
+                "exit_at_ms FROM signals")]
         meta = {hk: {"first_seen_unix": fs, "strikes": int(sk or 0)}
                 for hk, fs, sk in self.db.execute(
                     "SELECT hotkey, first_seen_unix, strikes FROM hotkey_meta")}
