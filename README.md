@@ -222,7 +222,8 @@ Same transport and countersigned receipt as HF — one more payload kind on the
 same ingest. Grading: the vol-normalized move over the horizon after your
 call, + for HOLD if the position improved, + for CLOSE if it deteriorated,
 winsorized at ±3σ; the sum over the rolling window ranks you on the Closers
-board. Capped per UTC day; entry requires being a qualified LF or HF miner.
+board. 30 submissions per UTC day, at least 60 seconds apart; entry requires
+being a qualified LF or HF miner.
 USDC-quoted (Hyperliquid) positions grade against their USD spot twin's tick
 series — the alias table is committed in
 `scripts/closers_positions_publisher.py`.
