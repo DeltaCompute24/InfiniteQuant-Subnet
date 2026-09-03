@@ -62,7 +62,10 @@ from . import config, hf
 CLOSERS_HORIZON_S = int(os.getenv("SN89_CLOSERS_HORIZON_S", "3600"))
 CLOSERS_WINDOW_S = int(os.getenv("SN89_CLOSERS_WINDOW_S", str(60 * 24 * 3600)))
 CLOSERS_MAX_PER_DAY = int(os.getenv("SN89_CLOSERS_MAX_PER_DAY", "30"))
-CLOSERS_MIN_GAP_MS = int(os.getenv("SN89_CLOSERS_MIN_GAP_MS", "10000"))
+# 60 s (was 10 s until 2026-09-03): a miner was re-voting HOLD on the SAME
+# position 20-40 s apart, each vote a separate graded entry and a separate
+# operator alert. Score is a decayed sum, so under a 10 s gap repetition paid.
+CLOSERS_MIN_GAP_MS = int(os.getenv("SN89_CLOSERS_MIN_GAP_MS", "60000"))
 CLOSERS_MIN_CALLS = int(os.getenv("SN89_CLOSERS_MIN_CALLS", "10"))
 CLOSERS_WINSOR_Z = float(os.getenv("SN89_CLOSERS_WINSOR_Z", "3.0"))
 # Eligibility: on mainnet a closers entrant must already be a qualified HF or LF
