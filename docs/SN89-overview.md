@@ -158,8 +158,11 @@ Rules (all enforced consensus-side; `REFERRAL_*` in `sn89_signals/config.py`):
   both bonuses lapse and resume on re-earn. Bonuses redistribute inside the miner pool — nothing
   new is minted.
 - **Strict no-copy inside the pair.** Shadowing between the two hotkeys (a stricter, pair-scoped
-  version of the §7.5 detector: 2 sharp episodes or 3 live-overlap episodes, either direction)
-  suspends the pair's bonus until 30 days after the last copy event. Base emission is untouched.
+  version of the §7.5 detector: 4 sharp episodes or 8 live-overlap episodes in 30 days) suspends
+  the bonus of the side that FOLLOWED until 30 days after its last copy event; the other side
+  keeps its bonus, and base emission is untouched on both. A call counts as live from its commit
+  until its journaled close (or the board horizon if it is still open) — entering the same pair
+  and direction after the other side's call has already resolved is not an overlap.
 - **Sequencing.** `CommitmentOf` is one latest-wins slot per hotkey: don't commit a referral
   within ~90s of your last signal (either could go unobserved), hold your next signal ~90s, and
   register the recruit only after the referral appears in the checkpoint. The `refer` subcommand

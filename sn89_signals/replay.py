@@ -202,10 +202,12 @@ def _referral_pair_rows(signals: list[dict], pairs: list[tuple[str, str]],
                 or not s.get("plaintext") or s["t0_unix"] < pcut):
             continue
         sig = Signal.from_bytes(s["plaintext"].encode())
+        _ex = s.get("exit_at_ms")          # held-to-exit: see scoring.mark_copies
         rows.append(scoring.GradedRow(
             hotkey=s["hotkey"], trade_pair=sig.trade_pair, direction=sig.direction,
             t0_unix=s["t0_unix"], status=s["status"],
-            horizon_h=config.horizon_h_for(sig.trade_pair, s["t0_unix"])))
+            horizon_h=config.horizon_h_for(sig.trade_pair, s["t0_unix"]),
+            exit_unix=(_ex / 1000.0) if _ex else None))
     return rows
 
 

@@ -225,6 +225,39 @@ class TestPairNoCopyDirection:
             rows += [_row("A", t), _row("B", t + HOUR)]
         assert scoring.referral_pair_suspended_until(rows, "A", "B", NOW) is not None
 
+    def test_overlap_ends_at_journaled_exit_not_horizon(self):
+        # HELD-TO-EXIT (2026-09-05). Same shape as the test above, but every
+        # leader call RESOLVED (exit_unix) before the follower entered. A call
+        # that has already hit its band is not held by anyone, so none of these
+        # is an overlap and the pair is clean. Harold/5HNCsrgx: 4 of the 8
+        # events that tripped the recruiter were entries after the recruit's
+        # call had closed, one of them 79 min after a TAOUSD win.
+        rows = []
+        for i in range(config.REFERRAL_PAIR_OVERLAP_EPISODES):
+            t = NOW - 2 * DAY + i * 10 * HOUR
+            lead = _row("A", t)
+            lead.exit_unix = t + 30 * 60          # resolved 30 min in
+            rows += [lead, _row("B", t + HOUR)]   # B enters 30 min AFTER the close
+        assert scoring.referral_pair_followers(rows, "A", "B", NOW) == {}
+
+    def test_overlap_still_counts_while_leader_is_open(self):
+        # exit_unix AFTER the follower's entry: the call was live, still a copy.
+        rows = []
+        for i in range(config.REFERRAL_PAIR_OVERLAP_EPISODES):
+            t = NOW - 2 * DAY + i * 10 * HOUR
+            lead = _row("A", t)
+            lead.exit_unix = t + 3 * HOUR
+            rows += [lead, _row("B", t + HOUR)]
+        assert set(scoring.referral_pair_followers(rows, "A", "B", NOW)) == {"B"}
+
+    def test_pending_leader_keeps_horizon_end(self):
+        # no exit_unix (still open / caller did not supply): horizon rule as before
+        rows = []
+        for i in range(config.REFERRAL_PAIR_OVERLAP_EPISODES):
+            t = NOW - 2 * DAY + i * 10 * HOUR
+            rows += [_row("A", t, status="pending"), _row("B", t + HOUR)]
+        assert set(scoring.referral_pair_followers(rows, "A", "B", NOW)) == {"B"}
+
     def test_ttl_self_clears(self, monkeypatch):
         # widen the window so the events still COUNT, but their TTL has expired:
         # the trip is computed, yet the suspension has already self-cleared.

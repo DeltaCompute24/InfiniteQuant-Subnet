@@ -151,6 +151,12 @@ class GradedRow:
     void_reason: str | None = None
     horizon_h: int = config.MAX_HORIZON_H   # holding window, for copy-overlap
     is_copy: bool = False                   # set by mark_copies (§7.5)
+    exit_unix: float | None = None          # journaled resolution time (exit_at_ms/1000).
+                                            # When set, mark_copies closes the held
+                                            # interval here instead of at t0+horizon:
+                                            # a call that has already hit its band is
+                                            # not held by anyone. Only the referral
+                                            # pair gate feeds it today (2026-09-05).
 
 
 # ── validity (deterministic re-derivation of the live gateway checks) ─────────
@@ -333,6 +339,15 @@ def mark_copies(rows: list[GradedRow],
     for r in live:
         key = (r.trade_pair, r.direction)
         end = r.t0_unix + (r.horizon_h or config.MAX_HORIZON_H) * 3600
+        # HELD-TO-EXIT (2026-09-05): a resolved call stops being "held" at its
+        # journaled close. Before this, a recruiter entering TAOUSD 79 min after
+        # its recruit's TAOUSD call had already hit target counted as a live
+        # overlap, and 4 of the 8 events that tripped that pair were entries
+        # after the leader had resolved. Rows without exit_unix (pending, or
+        # callers that do not supply it) keep the horizon end, so the global
+        # §7.5 detector is unchanged unless its callers opt in.
+        if r.exit_unix is not None and r.t0_unix < r.exit_unix < end:
+            end = r.exit_unix
         r.is_copy = any(
             start <= r.t0_unix < e and hk != r.hotkey
             and (eligible_leaders is None or hk in eligible_leaders)
@@ -753,7 +768,8 @@ def referral_pair_followers(pair_rows: list[GradedRow], hk_a: str, hk_b: str,
     # live-overlap follows (fresh copies of the rows — mark_copies mutates is_copy)
     marked = mark_copies([GradedRow(hotkey=r.hotkey, trade_pair=r.trade_pair,
                                     direction=r.direction, t0_unix=r.t0_unix,
-                                    status=r.status, horizon_h=r.horizon_h)
+                                    status=r.status, horizon_h=r.horizon_h,
+                                    exit_unix=r.exit_unix)
                           for r in rows], eligible_leaders=pair_hk)
     overlap_ts: dict[str, list[float]] = defaultdict(list)
     for r in marked:
