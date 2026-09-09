@@ -819,6 +819,11 @@ class MinerState:
     # Resolved history as [(t0, was_wash, q)], q being the wash probability the
     # miner DECLARED by drawing that shape. Only the excess over it is charged.
     wash_hist: list[tuple[float, bool, float]] = field(default_factory=list)
+    # When each wash RESOLVED (t0 + horizon), unix seconds. Read by the per-wash
+    # emission cut only. Separate from wash_hist because wash_surprise unpacks
+    # that as 3-tuples, and the cut keys on the resolution time, not on t0: a
+    # wash is not knowable until its window closes.
+    wash_resolved: list[float] = field(default_factory=list)
 
 
 def score_inputs(decisive: list[tuple[float, bool, bool]], first_seen_unix: float,
@@ -1035,6 +1040,20 @@ def compute_weights(states: list[MinerState], now_unix: float,
         if debts:
             _base = base
             base = {hk: v - debts.get(hk, 0.0) for hk, v in _base.items()}
+
+    # ── per-wash emission cut ───────────────────────────────────────────────────
+    # A wash that resolved inside the last HF_WASH_CUT_S cuts the miner's share
+    # for the rest of that window. Per event and non-stacking; applied only to a
+    # positive tally, because a miner already at or below zero has no share to
+    # cut and the excess debt above is what reaches them. KEEP is floored in
+    # config, so this can lower a miner and can never dust one.
+    if points_mode and config.wash_cut_enforced_as_of(now_unix):
+        keep = config.wash_cut_keep()
+        cut = {s.hotkey for s in states if wash_cut_active(s.wash_resolved, now_unix)}
+        if cut:
+            _base = base
+            base = {hk: (v * keep if (hk in cut and v > 0) else v)
+                    for hk, v in _base.items()}
 
     # ── distribute the pool by decayed qualified-win tally (relative share) ──────
     earners = [s for s in states if s.uid not in excluded_uids and eff(s) > 0]
@@ -1429,6 +1448,20 @@ def wash_debt(tally: float, surprise: float, standing_pct: float = 0.0,
     day_rate = abs(tally) * (config.HF_WASH_DEBT_HOURS * 3600.0) / W
     ranked = max(0.0, min(1.0, 1.0 - standing_pct))
     return day_rate * ranked * config.HF_WASH_DEBT_MAX_FRAC
+
+
+def wash_cut_active(wash_resolved: list[float], now_unix: float,
+                    window_s: float | None = None) -> bool:
+    """Whether a miner is inside the per-wash cut window at now.
+
+    True if ANY wash resolved in (now - window, now]. A wash resolving in the
+    future is not knowable yet and is ignored -- the same rule every as-of
+    reader in this package follows. Pure and deterministic.
+    """
+    W = config.HF_WASH_CUT_S if window_s is None else window_s
+    if W <= 0:
+        return False
+    return any(0.0 <= now_unix - float(t) < W for t in (wash_resolved or ()))
 
 
 def decayed_points_tally(calls: list[tuple[float, float]], now_unix: float) -> float:

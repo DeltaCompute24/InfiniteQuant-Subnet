@@ -327,6 +327,18 @@ def main() -> None:
     weights = hf.hf_compute_weights(dec, fs, uid_by_hk, now, subs, graded, washes)
     wsum = sum(weights.values()) or 1.0
 
+    # Per-wash emission cut (testnet only): when a miner is inside the window,
+    # the board says so and until when, read from the same resolved-wash times
+    # the vector was built from. None = not cut, never a stale timestamp.
+    cut_armed = config.wash_cut_enforced_as_of(now)
+
+    def cut_until(hk):
+        if not cut_armed:
+            return None
+        r = hf._wash_resolved(washes.get(hk), now)
+        live = [t for t in r if 0.0 <= now - t < config.HF_WASH_CUT_S]
+        return int(max(live) + config.HF_WASH_CUT_S) if live else None
+
     rows = []
     for hk, d in dec.items():
         calls = scoring.qualified_calls(d, fs.get(hk, 0.0),
@@ -351,6 +363,7 @@ def main() -> None:
             "n_carried": max(0, gate["n"] - len(d)),
             "detail": custom_detail(hk),
             "calls": custom_calls(hk, calls, now),
+            "wash_cut_until": cut_until(hk),
             "qualified": gate["qualified"],
             "beta": hk in handles,
             # None (renders as an em dash), never 0.0 -- a miner absent from the
@@ -395,6 +408,9 @@ def main() -> None:
         "netuid": config.NETUID,
         "network": config.NETWORK,
         "points_armed": config.points_enforced_as_of(now),
+        "wash_cut_armed": cut_armed,
+        "wash_cut_keep": config.wash_cut_keep() if cut_armed else None,
+        "wash_cut_hours": round(config.HF_WASH_CUT_S / 3600, 1),
         "gamma": config.HF_POINTS_GAMMA,
         "window_days": round(config.HF_POINTS_WINDOW_S / 86400, 1),
         "rows": rows,

@@ -366,6 +366,37 @@ HF_WASH_DEBT_HOURS = float(os.getenv("SN89_HF_WASH_DEBT_HOURS", "24.0"))
 HF_WASH_DEBT_MAX_FRAC = float(os.getenv("SN89_HF_WASH_DEBT_MAX_FRAC", "1.0"))
 
 
+# -- per-wash emission cut (Whit, 2026-09-09) ---------------------------------
+# On TOP of the excess debt above: any wash that RESOLVED inside the last
+# HF_WASH_CUT_S multiplies the miner's earning tally by HF_WASH_CUT_KEEP before
+# the pool is split. Per event, non-stacking (two washes in a day cut once),
+# and it is a cut and never dust: KEEP is floored at HF_WASH_CUT_KEEP_FLOOR in
+# code, so no env value can zero a miner.
+#
+# The 2026-08-27 analysis in SN89-UNIFIED-COMPETITION-SPEC.md s3 stands: at the
+# board cap of 30 calls/day and a ~20% wash rate nearly every active miner is
+# inside the window at any moment, so on a busy field this is close to a flat
+# haircut. Whit's call on 2026-09-09 was to run it anyway, on the custom-sizing
+# beta only, and measure.
+#
+# 0 = OFF on every network. Armed from .env.test only -- same rule as
+# HF_POINTS_FROM: a timestamp does not know which chain it is on.
+HF_WASH_CUT_FROM = int(os.getenv("SN89_HF_WASH_CUT_FROM", "0"))
+HF_WASH_CUT_S = int(os.getenv("SN89_HF_WASH_CUT_S", str(24 * 3600)))
+HF_WASH_CUT_KEEP = float(os.getenv("SN89_HF_WASH_CUT_KEEP", "0.5"))
+HF_WASH_CUT_KEEP_FLOOR = 0.05
+
+
+def wash_cut_enforced_as_of(now_unix: float) -> bool:
+    """Whether the per-wash emission cut applies to a vector built at now."""
+    return bool(HF_WASH_CUT_FROM and now_unix >= HF_WASH_CUT_FROM)
+
+
+def wash_cut_keep() -> float:
+    """Fraction of tally a cut miner keeps. Floored so a cut is never dust."""
+    return max(HF_WASH_CUT_KEEP_FLOOR, min(1.0, HF_WASH_CUT_KEEP))
+
+
 def points_enforced_as_of(t0_unix: float) -> bool:
     """Whether a call at t0 is scored in signed points rather than counted wins."""
     return bool(HF_POINTS_FROM and t0_unix >= HF_POINTS_FROM)

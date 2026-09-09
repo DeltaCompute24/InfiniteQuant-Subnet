@@ -1568,6 +1568,23 @@ def hf_scoring_config(now: float | None = None):
             setattr(config, k, v)
 
 
+def _wash_resolved(rows, now: float) -> list:
+    """Resolution times of the washes in [(t0, is_wash, tp, hz, pair)].
+
+    A wash resolves when its window closes, t0 + hz. Only washes already
+    resolved at `now` are returned, so a replay at an earlier instant does not
+    see a cut that had not happened yet.
+    """
+    out = []
+    for t0, is_wash, _tp, hz, _pair in rows or ():
+        if not is_wash or not hz:
+            continue
+        r = float(t0) + float(hz)
+        if r <= now:
+            out.append(r)
+    return out
+
+
 def _wash_hist(rows, ) -> list:
     """[(t0, is_wash, q)] from [(t0, is_wash, tp, hz, pair)].
 
@@ -1660,7 +1677,8 @@ def hf_compute_weights(decisive_by_hk: dict, first_seen_by_hk: dict,
                 hotkey=hk, uid=uid, first_seen_unix=eligible,
                 rep_wins=rep_won, rep_decisive=rep_dec, trailing_wins=won_all,
                 qwins=qwins, qcalls=qcalls,
-                wash_hist=_wash_hist((washes_by_hk or {}).get(hk))))
+                wash_hist=_wash_hist((washes_by_hk or {}).get(hk)),
+                wash_resolved=_wash_resolved((washes_by_hk or {}).get(hk), now)))
         return scoring.compute_weights(states, now)
 
 
