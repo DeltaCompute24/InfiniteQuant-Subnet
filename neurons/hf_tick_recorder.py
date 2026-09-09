@@ -138,6 +138,11 @@ ASSETS = sorted(set(ASSETS) | {a.strip().upper() for a in
 # pair in it is callable, so every pair in it must be recording. Empty on a
 # network that has not, so the mainnet recorder's list is unchanged.
 ASSETS = sorted(set(ASSETS) | set(hf.hf_custom_universe_as_of(hf.time.time())))
+# Record EVERY asset the bus serves (testnet corpus for the Custom Sizing
+# universe). The bus adds Hyperliquid markets by itself, hourly, so a static
+# list here would lag it; with this set the poll iterates the bus's own keys
+# and ASSETS is only the floor. Off on mainnet, where the list is the board.
+ALL_BUS_ASSETS = os.getenv("SN89_HF_TICK_ALL_BUS", "0") == "1"
 STALE_MS = int(os.getenv("SN89_HF_TICK_STALE_MS", "30000"))
 # A tick is filed under ITS OWN src_ts, so one whose timestamp predates the current
 # window can still arrive after that window ended (feed lag). Sealing on the boundary
@@ -174,7 +179,7 @@ class TickRecorder:
         self.polls += 1
         n = 0
         fresh: list = []
-        for a in ASSETS:
+        for a in (sorted(set(ASSETS) | set(ticks)) if ALL_BUS_ASSETS else ASSETS):
             d = ticks.get(a)
             if not d:
                 continue
