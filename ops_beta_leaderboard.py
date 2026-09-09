@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import tempfile
 import time
 
@@ -94,9 +95,229 @@ def _uids() -> dict:
         return {}
 
 
+
+# ── carrying a mainnet record into the beta ──────────────────────────────────
+# The spec's whole basis for not needing a grandfather clause: on a FIXED board
+# the points test reduces to a monotone function of wins/N, which is what the
+# Wilson gate already tested. So a trader who qualified on mainnet HF or LF has
+# already passed this test, and the honest way to say so is to REPLAY their calls
+# through it rather than whitelist them.
+#
+# Points shown on the board stay TESTNET-ONLY -- points are what the beta pays.
+# Only QUALIFICATION reads the full record, which is what the spec asks for:
+# one test, applied to whatever evidence exists.
+LF_DB = "/opt/iq-platform/data/live/iq_admin_dash.db"
+
+
+def _lf_board_sigma(pair, t0_unix):
+    """Sigma for a pair that may be on the LF board but not the HF one."""
+    s = hf._board_sigma_for(pair, t0_unix)
+    if s:
+        return s
+    try:
+        b = (config.bands_as_of(t0_unix) or {}).get(str(pair).upper())
+        if not b:
+            return 0.0
+        tp = float(b.get("tp_bps") if isinstance(b, dict) else b[0])
+        hz = int(config.horizon_h_for(pair, t0_unix) * 3600)
+        return scoring.sigma_from_board(tp, hz) if tp and hz else 0.0
+    except Exception:                                              # noqa: BLE001
+        return 0.0
+
+
+def mainnet_record(mainnet_hk, user_id=None):
+    """Decisive mainnet calls for one trader, priced, HF then LF."""
+    out = []
+    try:
+        db = sqlite3.connect("file:%s/hf_grades.db?mode=ro"
+                             % os.path.expanduser("~/.sn89/hf-grade"), uri=True)
+        for t0, pair, st, tp, sl, hz in db.execute(
+                "SELECT t0_ms, pair, status, tp_bps, sl_bps, horizon_s FROM grades "
+                "WHERE hk=? AND status IN ('won','lost')", (mainnet_hk,)):
+            if tp is None or hz is None:
+                # Predates the band columns. The board it traded under is knowable
+                # as-of t0, and on a fixed board that IS the band it traded.
+                b = (hf.hf_bands_as_of(t0 / 1000.0) or {}).get(pair)
+                if not b:
+                    continue
+                tp, sl, hz = float(b[0]), float(b[1]), int(b[2])
+            out.append((t0 / 1000.0, st == "won", False, None,
+                        float(tp), int(hz), pair))
+        db.close()
+    except Exception as e:                                         # noqa: BLE001
+        print("  ! HF record unreadable for %s: %s" % (mainnet_hk[:10], e))
+    if user_id is None:
+        return out
+    try:
+        c = sqlite3.connect("file:%s?mode=ro" % LF_DB, uri=True)
+        for a, tpb, slb, hh, stt, t0a, t0b, created in c.execute(
+                "SELECT asset, tp_bps, sl_bps, horizon_hours, "
+                "COALESCE(onchain_status,status), onchain_t0_ms, anchor_t0_ms, created_at "
+                "FROM signals_submissions WHERE signals_user_id=? "
+                "AND COALESCE(onchain_status,status) IN ('won','lost')", (user_id,)):
+            t0 = (t0a or t0b)
+            if not t0:
+                continue
+            out.append((t0 / 1000.0, stt == "won", False, None,
+                        float(tpb), int(hh) * 3600, str(a).upper()))
+        c.close()
+    except Exception as e:                                         # noqa: BLE001
+        print("  ! LF record unreadable for user %s: %s" % (user_id, e))
+    return out
+
+
+
+def custom_detail(hk):
+    """Per-pair breakdown of THIS trader's beta calls, for the row drawer.
+
+    Beta calls only. The qualification test also reads their mainnet record, but
+    that record is not what this competition is about, and mixing the two into one
+    count is what made the Calls column read 354/30 next to an unqualified badge.
+    """
+    out = {}
+    try:
+        db = sqlite3.connect("file:%s/hf_grades.db?mode=ro" % CACHE, uri=True)
+        for pair, st, tp, hz in db.execute(
+                "SELECT pair, status, tp_bps, horizon_s FROM grades WHERE hk=?", (hk,)):
+            r = out.setdefault(pair, {"pair": pair, "n": 0, "won": 0, "lost": 0,
+                                      "wash": 0, "_tp": [], "_hz": []})
+            r["n"] += 1
+            if st in ("won", "lost", "wash"):
+                r[st] += 1
+            if tp:
+                r["_tp"].append(float(tp))
+            if hz:
+                r["_hz"].append(int(hz))
+        db.close()
+    except Exception as e:                                          # noqa: BLE001
+        print("  ! detail unreadable for %s: %s" % (hk[:10], e))
+        return []
+    rows = []
+    for r in out.values():
+        tp, hz = r.pop("_tp"), r.pop("_hz")
+        r["band_bps"] = round(sum(tp) / len(tp), 1) if tp else None
+        r["mins"] = round(sum(hz) / len(hz) / 60) if hz else None
+        rows.append(r)
+    rows.sort(key=lambda r: -r["n"])
+    return rows
+
+
+# How many calls the drawer carries per trader. The qualify rule is stated over
+# 30 resolved calls, so a reader can see the whole window that decides it plus a
+# little history; `n` on the row still counts every call.
+CALLS_SHOWN = 40
+
+
+def custom_calls(hk, calls, now):
+    """Every beta call by THIS trader, newest first, each with the points it
+    banked -- for the row drawer.
+
+    `calls` is scoring.qualified_calls' output for the same hotkey: the signed
+    points the VALIDATOR credited, keyed by t0. That join is the whole design.
+    A call missing from it earned nothing, and the drawer says so per row
+    rather than re-deriving the gate here and disagreeing with the chain later
+    (the qualify_report.py failure, again).
+
+    Per-call fields:
+      shape  what a WIN on this band/window pays (points_for). Informational:
+             it is what the trader chose to risk, whether or not it banked.
+      pts    signed points that entered the tally: +shape on a win, -shape on a
+             loss, 0 on a wash. None = never entered (below the gate at t0,
+             void, or unpriceable), with `note` saying which.
+      live   pts after the rolling-window decay and the per-day cap, i.e. this
+             call's contribution to the tally right now. None outside the
+             window or when the day's cap dropped it (`note`: expired / capped).
+    The per-call `live` values are summed and checked against
+    scoring.decayed_points_tally so the drawer cannot drift from the number on
+    the row.
+    """
+    banked = {}
+    for t0, p in calls:
+        banked[round(float(t0), 3)] = p
+    rows = []
+    try:
+        db = sqlite3.connect("file:%s/hf_grades.db?mode=ro" % CACHE, uri=True)
+        q = db.execute(
+            "SELECT t0_ms, pair, direction, status, tp_bps, sl_bps, horizon_s "
+            "FROM grades WHERE hk=? ORDER BY t0_ms ASC", (hk,))
+        for t0_ms, pair, direction, st, tp, sl, hz in q:
+            t0 = t0_ms / 1000.0
+            sigma = hf._board_sigma_for(pair, t0) if (pair and tp and hz) else 0.0
+            shape = (scoring.points_for(float(tp), int(hz), sigma)
+                     if (tp and hz and sigma > 0) else None)
+            pts = None
+            note = None
+            if st == "wash":
+                pts = 0.0
+            elif st in ("won", "lost"):
+                p = banked.get(round(t0, 3))
+                if p is not None:
+                    pts = p
+                elif shape is None:
+                    note = "unpriceable"
+                else:
+                    note = "gate"
+            elif st == "void":
+                note = "void"
+            rows.append({
+                "t0": int(t0), "pair": pair, "dir": direction or "",
+                "result": st,
+                "tp_bps": float(tp) if tp else None,
+                "sl_bps": float(sl) if sl else None,
+                "mins": round(int(hz) / 60) if hz else None,
+                "shape": round(shape, 2) if shape is not None else None,
+                "pts": round(pts, 2) if pts is not None else None,
+                "live": None, "note": note,
+            })
+        db.close()
+    except Exception as e:                                          # noqa: BLE001
+        print("  ! calls unreadable for %s: %s" % (hk[:10], e))
+        return []
+
+    # Live contribution: the same window + chronological per-day cap that
+    # decayed_points_tally applies, written per call so the drawer can show
+    # which calls are still paying. A wash is in the window but worth 0.
+    W = config.HF_POINTS_WINDOW_S
+    per_day = {}
+    total = 0.0
+    for r in rows:                                # ascending t0 already
+        if r["pts"] is None:
+            continue
+        age = now - r["t0"]
+        if not (0.0 <= age < W):
+            r["note"] = r["note"] or "expired"
+            continue
+        day = int(r["t0"] // 86_400)
+        k = per_day.get(day, 0)
+        if k >= config.HF_POINTS_DAILY_CAP:
+            r["note"] = r["note"] or "capped"
+            continue
+        per_day[day] = k + 1
+        r["live"] = round(r["pts"] * (1.0 - age / W), 3)
+        total += r["pts"] * (1.0 - age / W)
+    ref = scoring.decayed_points_tally(calls, now)
+    if abs(total - ref) > 0.05:
+        print("  ! per-call live sum %.3f != tally %.3f for %s -- drawer and "
+              "row disagree, check the cap/window replica" % (total, ref, hk[:10]))
+    rows.reverse()                                # newest first for the reader
+    return rows[:CALLS_SHOWN]
+
+
 def main() -> None:
     now = time.time()
     handles, issued = _handles()
+    main_of = {r["testnet_hotkey"]: r.get("mainnet_hotkey")
+               for r in issued if r.get("testnet_hotkey")}
+    uid_of = {}
+    try:
+        c = sqlite3.connect("file:%s?mode=ro" % LF_DB, uri=True)
+        by_main = {m: i for i, m in c.execute(
+            "SELECT id, sn89_hotkey FROM signals_users "
+            "WHERE sn89_hotkey IS NOT NULL AND sn89_hotkey<>''")}
+        uid_of = {t: by_main[m] for t, m in main_of.items() if m in by_main}
+        c.close()
+    except Exception as e:                                         # noqa: BLE001
+        print("  ! could not map hotkeys to signals users: %s" % e)
     uid_by_hk = _uids()
 
     # The validator's own history read. as_of=now so the causal windows match.
@@ -111,7 +332,10 @@ def main() -> None:
         calls = scoring.qualified_calls(d, fs.get(hk, 0.0),
                                         sigma_for=hf._board_sigma_for)
         pts = scoring.decayed_points_tally(calls, now)
-        gate = scoring.points_test(d, sigma_for=hf._board_sigma_for)
+        # QUALIFY ON THE FULL RECORD: this beta's calls plus whatever the trader
+        # already did on mainnet HF and LF. Same statistic, more evidence.
+        prior = mainnet_record(main_of.get(hk), uid_of.get(hk)) if main_of else []
+        gate = scoring.points_test(list(d) + prior, sigma_for=_lf_board_sigma)
         uid = uid_by_hk.get(hk)
         w = weights.get(uid) if uid is not None else None
         rows.append({
@@ -120,12 +344,43 @@ def main() -> None:
             "points": round(pts, 3),
             "staked": round(gate["staked"], 1),
             "t": round(gate["t"], 3),
-            "n": gate["n"],
+            # CALLS IS THIS COMPETITION'S CALLS. The gate reads the carried mainnet
+            # record too, but showing that total here put "354/30" beside a row
+            # that was not qualified, which reads as a broken board.
+            "n": len(d),
+            "n_carried": max(0, gate["n"] - len(d)),
+            "detail": custom_detail(hk),
+            "calls": custom_calls(hk, calls, now),
             "qualified": gate["qualified"],
             "beta": hk in handles,
             # None (renders as an em dash), never 0.0 -- a miner absent from the
             # vector has NOT been assigned a zero weight, and printing one is the
             # not-fetched-value-as-a-measured-zero bug.
+            "weight_pct": None if w is None else round(w / wsum * 100.0, 2),
+        })
+
+    # A trader who already qualified on mainnet belongs on the board BEFORE their
+    # first beta call. The panel promises "already qualified on the standard or
+    # high-frequency board? You are qualified here", and a promise the reader
+    # cannot see applied to them is one they have to take on trust.
+    # They carry points 0 -- they have earned nothing in the beta yet -- but their
+    # record and their qualified flag are real.
+    for thk, mhk in (main_of or {}).items():
+        if thk in dec:
+            continue
+        prior = mainnet_record(mhk, uid_of.get(thk))
+        if not prior:
+            continue
+        g = scoring.points_test(prior, sigma_for=_lf_board_sigma)
+        if not g["qualified"]:
+            continue
+        uid = uid_by_hk.get(thk)
+        w = weights.get(uid) if uid is not None else None
+        rows.append({
+            "hotkey": thk, "handle": handles.get(thk, thk[:6] + "\u2026"),
+            "points": 0.0, "staked": round(g["staked"], 1), "t": round(g["t"], 3),
+            "n": 0, "n_carried": g["n"], "detail": [], "calls": [],
+            "qualified": True, "beta": True, "carried": True,
             "weight_pct": None if w is None else round(w / wsum * 100.0, 2),
         })
 
