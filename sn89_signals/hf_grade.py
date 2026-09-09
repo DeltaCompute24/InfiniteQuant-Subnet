@@ -744,8 +744,13 @@ def mecid1_weights(uid_by_hk: dict, now: float | None = None,
         os.getenv("SN89_HF_GRADE_CACHE", "~/.sn89/hf-grade"))
     sync_and_grade(base, cache_dir, now)
     dec, fs, subs, graded, washes = _history(cache_dir, as_of=now)
+    # Beta only: carried mainnet records as gate evidence. {} unless
+    # SN89_BETA_ROSTER is set, so mainnet is byte-identical.
+    from . import beta_carry
+    prior = beta_carry.load_prior_by_hk()
     return hf.hf_compute_weights(dec, fs, uid_by_hk, now, subs, graded,
-                                 washes)
+                                 washes, prior_by_hk=prior or None,
+                                 prior_sigma_for=beta_carry.carry_sigma_for)
 
 
 def mecid1_tallies(uid_by_hk: dict, now: float | None = None,
@@ -759,4 +764,8 @@ def mecid1_tallies(uid_by_hk: dict, now: float | None = None,
         os.getenv("SN89_HF_GRADE_CACHE", "~/.sn89/hf-grade"))
     sync_and_grade(base, cache_dir, now)
     dec, fs, subs, graded, _washes = _history(cache_dir, as_of=now)
-    return hf.hf_compute_tallies(dec, fs, uid_by_hk, now, subs, graded)
+    from . import beta_carry
+    prior = beta_carry.load_prior_by_hk()
+    return hf.hf_compute_tallies(dec, fs, uid_by_hk, now, subs, graded,
+                                 prior_by_hk=prior or None,
+                                 prior_sigma_for=beta_carry.carry_sigma_for)

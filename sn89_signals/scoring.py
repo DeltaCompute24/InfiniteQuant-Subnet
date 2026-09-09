@@ -1277,7 +1277,9 @@ def qualified_wins(decisive: list[tuple], first_seen_unix: float,
 
 def qualified_calls(decisive: list[tuple], first_seen_unix: float,
                     habitual: bool = False,
-                    sigma_for=None) -> list[tuple[float, float]]:
+                    sigma_for=None,
+                    prior: list[tuple] | None = None,
+                    prior_sigma_for=None) -> list[tuple[float, float]]:
     """Post-warmup calls scored in SIGNED POINTS, as [(t0, points)].
 
     The points analogue of qualified_wins, and it differs in one way that
@@ -1294,10 +1296,33 @@ def qualified_calls(decisive: list[tuple], first_seen_unix: float,
     tests/test_decisive_tuple_layout.py for why that ordering is asserted.
     A row with no band falls back to the board via the caller, and a row we
     cannot price at all contributes nothing rather than a guess.
+
+    THE GATE IS THE POINTS TEST, AS OF EACH CALL (Whit, 2026-09-09). A call at
+    t0 earns iff points_test over everything resolved before t0 -- the miner's
+    `prior` record (mainnet HF + LF, carried in by the caller) plus their earlier
+    calls here -- says qualified. That is the same test that puts the QUALIFIED
+    badge on the board, so the badge and the tally can no longer disagree, and
+    a miner who already qualified on the standard or high-frequency board earns
+    from their FIRST call here. Before this the gate was the per-call Wilson
+    window over THIS record alone, which no carried miner could pass on two
+    calls; every beta call sat at 'gate' and the HF vector was 100% burn.
+
+    Prior rows are the same tuple shape and are priced with `prior_sigma_for`
+    (default: `sigma_for`), because an LF pair may have no HF board row.
+    Still as-of and causal: a prior row counts only if its t0 precedes the call.
     """
     warmup_end = first_seen_unix + config.IMMUNITY_S
     dec = sorted(decisive, key=lambda d: d[0])
     out: list[tuple[float, float]] = []
+    psf = prior_sigma_for or sigma_for
+    pri = []                              # [(t0, won, priced_points)] from prior
+    for r in (prior or ()):
+        p = _price_row(r, psf)
+        if p is not None:
+            pri.append((r[0], bool(r[1]), p))
+    pri.sort(key=lambda x: x[0])
+    pi = 0
+    acc = _PointsAcc()
     for i, row in enumerate(dec):
         t0, won, cp = row[0], row[1], row[2]
         if t0 < warmup_end or (habitual and cp):
@@ -1306,16 +1331,15 @@ def qualified_calls(decisive: list[tuple], first_seen_unix: float,
         hz = row[5] if len(row) > 5 else None
         if not tp or not hz:
             continue                     # unpriceable: contribute nothing
-        rep_cut = t0 - config.HIT_RATE_WINDOW_S
-        if config.causal_qwin_enforced_as_of(t0):
-            window = [d for d in dec[:i] if d[0] >= rep_cut and _resolved_by(d, t0)]
-            window.append(row)
-        else:
-            window = [d for d in dec[:i + 1] if d[0] >= rep_cut]
-        window = window[-config.hit_rate_window_trades_as_of(t0):]
-        rw = sum(1 for d in window if d[1])
-        rd = len(window)
-        if not _qualifies(rw, rd):
+        # Gate: the points test over everything known before this call.
+        while pi < len(pri) and pri[pi][0] < t0:
+            acc.add(pri[pi][1], pri[pi][2])
+            pi += 1
+        if not acc.qualified():
+            # this call still becomes evidence for the NEXT one
+            _p = _price_row(row, sigma_for)
+            if _p is not None:
+                acc.add(won, _p)
             continue
         # SIGMA COMES FROM THE PAIR'S BOARD ROW, never from this call's own band.
         # sigma_from_board(tp, hz) on the call's OWN numbers is circular: it
@@ -1333,7 +1357,56 @@ def qualified_calls(decisive: list[tuple], first_seen_unix: float,
         pts = signed_points("won" if won else "lost",
                             float(tp), int(hz), sigma)
         out.append((t0, pts))
+        acc.add(won, abs(pts))
     return out
+
+
+def _price_row(row, sigma_for) -> float | None:
+    """points_for on one decisive row, or None if it cannot be priced."""
+    tp = row[4] if len(row) > 4 else None
+    hz = row[5] if len(row) > 5 else None
+    pair = row[6] if len(row) > 6 else None
+    if not tp or not hz:
+        return None
+    sigma = sigma_for(pair, row[0]) if (sigma_for and pair) else 0.0
+    if sigma <= 0:
+        return None
+    p = points_for(float(tp), int(hz), sigma)
+    return p if p > 0 else None
+
+
+class _PointsAcc:
+    """Running sums behind points_test, so the as-of gate in qualified_calls is
+    O(n) instead of re-running the test on a growing prefix. Same arithmetic,
+    same verdict -- tests assert the two agree."""
+    __slots__ = ("sx", "sp", "svar", "n")
+
+    def __init__(self):
+        self.sx = self.sp = self.svar = 0.0
+        self.n = 0
+
+    def add(self, won: bool, p: float) -> None:
+        self.sx += p if won else -p
+        self.sp += p
+        self.svar += p * p
+        self.n += 1
+
+    def qualified(self) -> bool:
+        return _points_verdict(self.sx, self.sp, self.svar, self.n)["qualified"]
+
+
+def _points_verdict(sx: float, sp: float, svar: float, n: int) -> dict:
+    if n == 0 or svar <= 0:
+        return {"t": 0.0, "staked": 0.0, "n": 0, "qualified": False}
+    t = (sx - config.POINTS_QUALIFY_EPS * sp) / math.sqrt(svar)
+    return {
+        "t": t,
+        "staked": sp,
+        "n": n,
+        "qualified": bool(t >= config.POINTS_QUALIFY_Z
+                          and n >= config.POINTS_QUALIFY_MIN_RESOLVED
+                          and sp >= config.POINTS_QUALIFY_MIN_STAKED),
+    }
 
 
 def points_test(decisive: list[tuple], sigma_for=None) -> dict:
@@ -1384,17 +1457,7 @@ def points_test(decisive: list[tuple], sigma_for=None) -> dict:
         # basis for letting an already-qualified miner migrate without re-testing.
         svar += p * p
         n += 1
-    if n == 0 or svar <= 0:
-        return {"t": 0.0, "staked": 0.0, "n": 0, "qualified": False}
-    t = (sx - config.POINTS_QUALIFY_EPS * sp) / math.sqrt(svar)
-    return {
-        "t": t,
-        "staked": sp,
-        "n": n,
-        "qualified": bool(t >= config.POINTS_QUALIFY_Z
-                          and n >= config.POINTS_QUALIFY_MIN_RESOLVED
-                          and sp >= config.POINTS_QUALIFY_MIN_STAKED),
-    }
+    return _points_verdict(sx, sp, svar, n)
 
 
 def wash_surprise(resolved: list[tuple[float, bool, float]]) -> float:

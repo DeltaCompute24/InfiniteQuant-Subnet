@@ -32,7 +32,7 @@ def board_sigma(pair, t0):
 
 @pytest.fixture
 def always_qualified(monkeypatch):
-    monkeypatch.setattr(scoring, "_qualifies", lambda w, d: True)
+    monkeypatch.setattr(scoring._PointsAcc, "qualified", lambda self: True)
 
 
 class TestLossesAreInTheTally:

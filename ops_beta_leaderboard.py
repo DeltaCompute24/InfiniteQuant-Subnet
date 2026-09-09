@@ -96,75 +96,12 @@ def _uids() -> dict:
 
 
 
-# ── carrying a mainnet record into the beta ──────────────────────────────────
-# The spec's whole basis for not needing a grandfather clause: on a FIXED board
-# the points test reduces to a monotone function of wins/N, which is what the
-# Wilson gate already tested. So a trader who qualified on mainnet HF or LF has
-# already passed this test, and the honest way to say so is to REPLAY their calls
-# through it rather than whitelist them.
-#
-# Points shown on the board stay TESTNET-ONLY -- points are what the beta pays.
-# Only QUALIFICATION reads the full record, which is what the spec asks for:
-# one test, applied to whatever evidence exists.
-LF_DB = "/opt/iq-platform/data/live/iq_admin_dash.db"
-
-
-def _lf_board_sigma(pair, t0_unix):
-    """Sigma for a pair that may be on the LF board but not the HF one."""
-    s = hf._board_sigma_for(pair, t0_unix)
-    if s:
-        return s
-    try:
-        b = (config.bands_as_of(t0_unix) or {}).get(str(pair).upper())
-        if not b:
-            return 0.0
-        tp = float(b.get("tp_bps") if isinstance(b, dict) else b[0])
-        hz = int(config.horizon_h_for(pair, t0_unix) * 3600)
-        return scoring.sigma_from_board(tp, hz) if tp and hz else 0.0
-    except Exception:                                              # noqa: BLE001
-        return 0.0
-
-
-def mainnet_record(mainnet_hk, user_id=None):
-    """Decisive mainnet calls for one trader, priced, HF then LF."""
-    out = []
-    try:
-        db = sqlite3.connect("file:%s/hf_grades.db?mode=ro"
-                             % os.path.expanduser("~/.sn89/hf-grade"), uri=True)
-        for t0, pair, st, tp, sl, hz in db.execute(
-                "SELECT t0_ms, pair, status, tp_bps, sl_bps, horizon_s FROM grades "
-                "WHERE hk=? AND status IN ('won','lost')", (mainnet_hk,)):
-            if tp is None or hz is None:
-                # Predates the band columns. The board it traded under is knowable
-                # as-of t0, and on a fixed board that IS the band it traded.
-                b = (hf.hf_bands_as_of(t0 / 1000.0) or {}).get(pair)
-                if not b:
-                    continue
-                tp, sl, hz = float(b[0]), float(b[1]), int(b[2])
-            out.append((t0 / 1000.0, st == "won", False, None,
-                        float(tp), int(hz), pair))
-        db.close()
-    except Exception as e:                                         # noqa: BLE001
-        print("  ! HF record unreadable for %s: %s" % (mainnet_hk[:10], e))
-    if user_id is None:
-        return out
-    try:
-        c = sqlite3.connect("file:%s?mode=ro" % LF_DB, uri=True)
-        for a, tpb, slb, hh, stt, t0a, t0b, created in c.execute(
-                "SELECT asset, tp_bps, sl_bps, horizon_hours, "
-                "COALESCE(onchain_status,status), onchain_t0_ms, anchor_t0_ms, created_at "
-                "FROM signals_submissions WHERE signals_user_id=? "
-                "AND COALESCE(onchain_status,status) IN ('won','lost')", (user_id,)):
-            t0 = (t0a or t0b)
-            if not t0:
-                continue
-            out.append((t0 / 1000.0, stt == "won", False, None,
-                        float(tpb), int(hh) * 3600, str(a).upper()))
-        c.close()
-    except Exception as e:                                         # noqa: BLE001
-        print("  ! LF record unreadable for user %s: %s" % (user_id, e))
-    return out
-
+# Carrying a mainnet record: moved to sn89_signals/beta_carry.py so the
+# VALIDATOR applies it too (Whit 2026-09-09: carried miners earn from call one).
+from sn89_signals import beta_carry
+mainnet_record = beta_carry.mainnet_record
+_lf_board_sigma = beta_carry.carry_sigma_for
+LF_DB = beta_carry.LF_DB
 
 
 def custom_detail(hk):
@@ -324,7 +261,10 @@ def main() -> None:
     dec, fs, subs, graded, washes = hf_grade._history(CACHE, as_of=now)
 
     # The validator's own weight vector, from the same five structures.
-    weights = hf.hf_compute_weights(dec, fs, uid_by_hk, now, subs, graded, washes)
+    prior_by_hk = beta_carry.load_prior_by_hk()
+    weights = hf.hf_compute_weights(dec, fs, uid_by_hk, now, subs, graded, washes,
+                                    prior_by_hk=prior_by_hk or None,
+                                    prior_sigma_for=beta_carry.carry_sigma_for)
     wsum = sum(weights.values()) or 1.0
 
     # Per-wash emission cut (testnet only): when a miner is inside the window,
@@ -341,12 +281,14 @@ def main() -> None:
 
     rows = []
     for hk, d in dec.items():
+        prior = prior_by_hk.get(hk, [])
         calls = scoring.qualified_calls(d, fs.get(hk, 0.0),
-                                        sigma_for=hf._board_sigma_for)
+                                        sigma_for=hf._board_sigma_for,
+                                        prior=prior,
+                                        prior_sigma_for=beta_carry.carry_sigma_for)
         pts = scoring.decayed_points_tally(calls, now)
         # QUALIFY ON THE FULL RECORD: this beta's calls plus whatever the trader
         # already did on mainnet HF and LF. Same statistic, more evidence.
-        prior = mainnet_record(main_of.get(hk), uid_of.get(hk)) if main_of else []
         gate = scoring.points_test(list(d) + prior, sigma_for=_lf_board_sigma)
         uid = uid_by_hk.get(hk)
         w = weights.get(uid) if uid is not None else None
@@ -381,7 +323,7 @@ def main() -> None:
     for thk, mhk in (main_of or {}).items():
         if thk in dec:
             continue
-        prior = mainnet_record(mhk, uid_of.get(thk))
+        prior = prior_by_hk.get(thk, [])
         if not prior:
             continue
         g = scoring.points_test(prior, sigma_for=_lf_board_sigma)

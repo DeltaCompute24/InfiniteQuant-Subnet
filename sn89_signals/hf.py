@@ -1606,8 +1606,14 @@ def _wash_hist(rows, ) -> list:
 def hf_compute_weights(decisive_by_hk: dict, first_seen_by_hk: dict,
                        uid_by_hk: dict, now: float, subs_by_hk: dict,
                        graded_by_hk: dict | None = None,
-                       washes_by_hk: dict | None = None) -> dict:
+                       washes_by_hk: dict | None = None,
+                       prior_by_hk: dict | None = None,
+                       prior_sigma_for=None) -> dict:
     """{uid: normalized_weight} for mecid 1, from HF-ONLY graded outcomes.
+
+    `prior_by_hk` (beta only, see beta_carry.py): each hotkey's carried mainnet
+    decisive record, used ONLY as evidence for the as-of points gate inside
+    qualified_calls. Carried rows never earn points here.
 
     Reuses the SAME battle-tested tally as mecid 0 (scoring.qualified_wins,
     scoring.compute_weights, scoring._qualifies) — a win still qualifies only if the
@@ -1671,8 +1677,9 @@ def hf_compute_weights(decisive_by_hk: dict, first_seen_by_hk: dict,
             # the chain has armed. Building only the armed one would mean a network
             # arming points has no history until fresh calls land, which is a
             # silent reset of everyone's standing at the cutover.
-            qcalls = scoring.qualified_calls(decisive, eligible, habitual=False,
-                                             sigma_for=_board_sigma_for)
+            qcalls = scoring.qualified_calls(
+                decisive, eligible, habitual=False, sigma_for=_board_sigma_for,
+                prior=(prior_by_hk or {}).get(hk), prior_sigma_for=prior_sigma_for)
             states.append(scoring.MinerState(
                 hotkey=hk, uid=uid, first_seen_unix=eligible,
                 rep_wins=rep_won, rep_decisive=rep_dec, trailing_wins=won_all,
@@ -1703,7 +1710,9 @@ def _board_sigma_for(pair: str, t0_unix: float) -> float:
 
 def hf_compute_tallies(decisive_by_hk: dict, first_seen_by_hk: dict,
                        uid_by_hk: dict, now: float, subs_by_hk: dict,
-                       graded_by_hk: dict | None = None) -> dict:
+                       graded_by_hk: dict | None = None,
+                       prior_by_hk: dict | None = None,
+                       prior_sigma_for=None) -> dict:
     """{hotkey: decayed qualified-win tally} over HF-only outcomes — the RAW
     earning currency behind hf_compute_weights, before any floor or cap.
 
@@ -1744,7 +1753,9 @@ def hf_compute_tallies(decisive_by_hk: dict, first_seen_by_hk: dict,
                 # negative contribution there has no meaning.
                 t = scoring.decayed_points_tally(
                     scoring.qualified_calls(decisive, eligible, habitual=False,
-                                            sigma_for=_board_sigma_for), now)
+                                            sigma_for=_board_sigma_for,
+                                            prior=(prior_by_hk or {}).get(hk),
+                                            prior_sigma_for=prior_sigma_for), now)
             else:
                 qwins = scoring.qualified_wins(
                     decisive, eligible, habitual=False,
