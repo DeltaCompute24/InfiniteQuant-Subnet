@@ -363,9 +363,12 @@ def fire(row: sqlite3.Row, signers: dict, feed_tokens: dict,
         # checks the payload against the board as of the receive instant.
         pair = str(payload["trade_pair"]).upper()
         board = hf.hf_bands_as_of(time.time()) or {}
-        if pair not in board:
+        cls = hf.hf_asset_class_as_of(pair, time.time())
+        if cls is None:
             return {"kind": "error", "reason": f"pair_not_on_hf_board:{pair}"}
-        tp, sl, hz, cls = board[pair]
+        _row = board.get(pair)
+        # A custom-universe pair has no board band; the miner's own is required.
+        tp, sl, hz = (_row[0], _row[1], _row[2]) if _row else (None, None, None)
         # A band the miner DREW survives the rest. Stamping the board over it
         # here would submit a different trade from the one on their screen --
         # same shape as the ratchet reading the previous position's P&L: the
@@ -379,6 +382,8 @@ def fire(row: sqlite3.Row, signers: dict, feed_tokens: dict,
             tp = float(payload.get("tp_bps") or tp)
             sl = float(payload.get("sl_bps") or sl)
             hz = int(payload.get("horizon_s") or hz)
+        if tp is None or sl is None or hz is None:
+            return {"kind": "error", "reason": f"band_required:{pair}"}
         payload = {"trade_pair": pair, "direction": payload["direction"],
                    "asset_class": cls, "tp_bps": tp, "sl_bps": sl,
                    "horizon_s": hz}

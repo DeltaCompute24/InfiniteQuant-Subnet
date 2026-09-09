@@ -75,11 +75,18 @@ def read_anchor(st, netuid: int, hotkey: str) -> str | None:
 
 # ── grade ────────────────────────────────────────────────────────────────────
 def grade_window(receipts: list, ticks_by_asset: dict, t0_unix: float) -> list:
-    board = hf.hf_bands_as_of(t0_unix)
+    board = hf.hf_bands_as_of(t0_unix) or {}
     out = []
     for r in receipts:
         pair = r["pair"]
-        tp, sl, horizon, _ = board[pair]
+        row = board.get(pair)
+        _p = r.get("payload") or r
+        tp = _p.get("tp_bps") if row is None else row[0]
+        sl = _p.get("sl_bps") if row is None else row[1]
+        horizon = _p.get("horizon_s") if row is None else row[2]
+        if tp is None or sl is None or horizon is None:
+            continue                     # not callable at t0; nothing to grade
+        tp, sl, horizon = float(tp), float(sl), int(horizon)
         series = ticks_by_asset.get(pair, [])
         entry = hf.price_at(series, r["grid_t0_ms"])
         g = hf.grade(pair, r["direction"], entry, tp, sl,

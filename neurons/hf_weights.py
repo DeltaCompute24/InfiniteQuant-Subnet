@@ -104,9 +104,10 @@ def grade_new_calls(now_ms: int) -> int:
             pair, direction = p.get("trade_pair"), p.get("direction")
             t0_ms = rcpt.get("grid_t0_ms")
             board = hf.hf_bands_as_of(t0_ms / 1000.0) if t0_ms else None
-            if not board or pair not in board:
+            if not board or not hf.hf_callable_as_of(pair, t0_ms / 1000.0):
                 continue
-            tp, sl, horizon_s, _ = board[pair]
+            row = board.get(pair)
+            tp, sl, horizon_s = (row[0], row[1], row[2]) if row else (None, None, None)
             # Custom sizing: grade what the miner called, not what the board would
             # have imposed. The receipt payload is the authority; absent a declared
             # band this is the board value, i.e. exactly the pre-existing behaviour.
@@ -115,6 +116,8 @@ def grade_new_calls(now_ms: int) -> int:
                 tp = float(_p.get("tp_bps", tp) or tp)
                 sl = float(_p.get("sl_bps", sl) or sl)
                 horizon_s = int(_p.get("horizon_s", horizon_s) or horizon_s)
+            if tp is None or sl is None or horizon_s is None:
+                continue                 # universe pair with no declared band
             end_ms = int(t0_ms) + horizon_s * 1000
             if now_ms < end_ms:
                 continue                                  # not resolved yet

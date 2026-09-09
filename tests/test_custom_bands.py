@@ -73,12 +73,10 @@ class TestEnvelopeWhenArmed:
             hf.validate_submission(_payload(tp_bps=40.0, sl_bps=20.0), T0_UNIX)
         assert "band_not_symmetric" in str(e.value)
 
-    def test_band_under_the_spread_floor_refused(self):
-        # EURUSD spread 0.53 bps x 8.0 => 4.24 bps floor. Below it the outcome is
-        # microstructure, which is the same test that earns a pair a board slot.
-        with pytest.raises(hf.HFRejected) as e:
-            hf.validate_submission(_payload(tp_bps=1.0, sl_bps=1.0), T0_UNIX)
-        assert "band_under_spread_floor" in str(e.value)
+    def test_no_spread_floor_on_a_drawn_band(self):
+        # Dropped 2026-09-09: the band is the miner's claim. A band under the
+        # old 8x-spread floor is accepted and priced by the symmetric payout.
+        hf.validate_submission(_payload(tp_bps=1.0, sl_bps=1.0), T0_UNIX)
 
     def test_horizon_outside_the_envelope_refused(self):
         for hz in (60, 60 * 60 * 96):
@@ -86,18 +84,57 @@ class TestEnvelopeWhenArmed:
                 hf.validate_submission(_payload(horizon_s=hz), T0_UNIX)
             assert "horizon_out_of_range" in str(e.value)
 
-    def test_pair_with_no_measured_spread_refused(self):
-        # A band that cannot be floored is a band whose outcome we cannot vouch
-        # for. The quiet direction here would be to wave it through.
-        board = dict(hf.hf_bands_as_of(T0_UNIX))
-        board["ZZZUSD"] = (10.0, 10.0, 1800, "crypto")
-        import unittest.mock as m
-        with m.patch.object(hf, "hf_bands_as_of", return_value=board):
-            with pytest.raises(hf.HFRejected) as e:
-                hf.validate_submission(
-                    _payload(trade_pair="ZZZUSD", asset_class="crypto",
-                             tp_bps=10.0, sl_bps=10.0, horizon_s=1800), T0_UNIX)
-        assert "no_spread_for_pair" in str(e.value)
+    def test_universe_pair_off_the_board_is_accepted(self):
+        # The bench has no board: any pair the network records is callable.
+        pair = next(p for p in hf.HF_CUSTOM_UNIVERSE_V1
+                    if p not in hf.hf_bands_as_of(T0_UNIX))
+        cls, sigma = hf.HF_CUSTOM_UNIVERSE_V1[pair]
+        hf.validate_submission(
+            _payload(trade_pair=pair, asset_class=cls,
+                     tp_bps=10.0, sl_bps=10.0, horizon_s=1800), T0_UNIX)
+        assert hf.hf_asset_class_as_of(pair, T0_UNIX) == cls
+        assert hf._board_sigma_for(pair, T0_UNIX) == pytest.approx(sigma)
+
+    def test_universe_pair_needs_its_class(self):
+        pair = next(p for p in hf.HF_CUSTOM_UNIVERSE_V1
+                    if p not in hf.hf_bands_as_of(T0_UNIX))
+        with pytest.raises(hf.HFRejected) as e:
+            hf.validate_submission(
+                _payload(trade_pair=pair, asset_class="equities",
+                         tp_bps=10.0, sl_bps=10.0, horizon_s=1800), T0_UNIX)
+        assert "asset_class_mismatch" in str(e.value)
+
+    def test_unknown_pair_still_refused(self):
+        with pytest.raises(hf.HFRejected) as e:
+            hf.validate_submission(
+                _payload(trade_pair="ZZZUSD", asset_class="crypto",
+                         tp_bps=10.0, sl_bps=10.0, horizon_s=1800), T0_UNIX)
+        assert "pair_not_on_hf_board" in str(e.value)
+
+    def test_board_pair_keeps_its_board_sigma(self):
+        from sn89_signals import scoring
+        tp, _sl, hz, _ = _board_row()
+        assert hf._board_sigma_for(PAIR, T0_UNIX) == pytest.approx(
+            scoring.sigma_from_board(tp, hz))
+
+
+class TestUniverseInvisibleWhenDisarmed:
+    def test_universe_pair_refused_on_an_unarmed_network(self):
+        pair = next(p for p in hf.HF_CUSTOM_UNIVERSE_V1
+                    if p not in hf.hf_bands_as_of(T0_UNIX))
+        assert hf.hf_custom_universe_as_of(T0_UNIX) == {}
+        assert hf.hf_callable_as_of(pair, T0_UNIX) is False
+        assert hf._board_sigma_for(pair, T0_UNIX) == 0.0
+        with pytest.raises(hf.HFRejected) as e:
+            hf.validate_submission(
+                _payload(trade_pair=pair, asset_class="crypto",
+                         tp_bps=10.0, sl_bps=10.0, horizon_s=1800), T0_UNIX)
+        assert "pair_not_on_hf_board" in str(e.value)
+
+    def test_every_universe_entry_is_well_formed(self):
+        for p, (cls, sigma) in hf.HF_CUSTOM_UNIVERSE_V1.items():
+            assert cls in hf.GRID_MS_BY_CLASS, p
+            assert 0 < sigma < 10, p
 
 
 class TestPendingCarriesTheBand:

@@ -203,6 +203,110 @@ def hf_horizon_s(pair: str, t0_unix: float) -> int | None:
     return None if row is None else int(row[2])
 
 
+# ── custom-sizing universe (CONSENSUS, armed per network) ───────────────────
+# The Custom Sizing competition has NO board. The miner draws the band and the
+# wash window, so a pair does not need a solved band to be callable — only a
+# recorded tick series (to grade it) and a sigma (to price the points). This is
+# the set of pairs the network records for it: the asset class picks the tick
+# grid, and sigma is bps per sqrt(second), the std of 180 s window-close log
+# returns on the recorder's own corpus (2026-09-02..09-09, 1,058–3,397 windows
+# per pair). A pair that is ALSO on the HF board keeps the sigma derived from
+# its board row; the value here is read only for a pair with no board row.
+#
+# There is deliberately NO spread floor on this path (Whit, 2026-09-09). The
+# band is the miner's claim; a band tighter than the spread resolves as a coin
+# toss and is priced as one by the symmetric payout. The floor stays where it
+# always was — on the BOARD listing rule, which this table does not touch.
+#
+# Read ONLY when config.custom_bands_enforced_as_of(t0). On a network that has
+# not armed custom bands this table is invisible and every pair on it that is
+# not on the board is refused as pair_not_on_hf_board, exactly as before, so
+# mainnet replay is byte-identical.
+HF_CUSTOM_UNIVERSE_V1 = {
+    "AAVEUSD": ("crypto", 1.1775),
+    "ADAUSD": ("crypto", 1.4908),
+    "ALGOUSD": ("crypto", 1.6303),
+    "ARBUSD": ("crypto", 2.7757),
+    "ASTERUSD": ("crypto", 1.6233),
+    "AUDNZD": ("forex", 0.1258),
+    "AUDUSD": ("forex", 0.1414),
+    "AVAXUSD": ("crypto", 1.1728),
+    "BCHUSD": ("crypto", 1.3558),
+    "BNBUSD": ("crypto", 0.6935),
+    "BTCUSD": ("crypto", 0.5934),
+    "CRVUSD": ("crypto", 1.7441),
+    "DOGEUSD": ("crypto", 1.1486),
+    "DOTUSD": ("crypto", 2.5515),
+    "ENAUSD": ("crypto", 1.7801),
+    "ETHUSD": ("crypto", 0.8146),
+    "EURUSD": ("forex", 0.1040),
+    "GBPCAD": ("forex", 0.0982),
+    "GBPJPY": ("forex", 0.2239),
+    "GBPUSD": ("forex", 0.1122),
+    "HYPEUSD": ("crypto", 1.1227),
+    "KPEPEUSD": ("crypto", 1.4609),
+    "LINKUSD": ("crypto", 1.3108),
+    "LTCUSD": ("crypto", 1.2951),
+    "NEARUSD": ("crypto", 2.1247),
+    "NZDCHF": ("forex", 0.1619),
+    "NZDJPY": ("forex", 0.2556),
+    "NZDUSD": ("forex", 0.1964),
+    "PUMPUSD": ("crypto", 2.8872),
+    "SOLUSD": ("crypto", 1.0015),
+    "SUIUSD": ("crypto", 1.6961),
+    "TAOUSD": ("crypto", 1.8260),
+    "TRXUSD": ("crypto", 0.2759),
+    "UNIUSD": ("crypto", 1.8614),
+    "USDCAD": ("forex", 0.1211),
+    "USDCHF": ("forex", 0.1697),
+    "USDJPY": ("forex", 0.2836),
+    "WLDUSD": ("crypto", 2.7265),
+    "XAGUSD": ("forex-commodities", 0.6831),
+    "XAUUSD": ("forex-commodities", 0.4338),
+    "XMRUSD": ("crypto", 1.6972),
+    "XRPUSD": ("crypto", 1.1203),
+    "ZECUSD": ("crypto", 1.9331),
+    "ZROUSD": ("crypto", 2.1314),
+}
+# (effective_from_unix, universe). Versioned like the board so a later listing
+# reprices only calls made after it. The stamp is 0 because the ARMING stamp
+# (HF_CUSTOM_BANDS_FROM, per network) already gates it.
+HF_CUSTOM_UNIVERSE_HISTORY = ((0, HF_CUSTOM_UNIVERSE_V1),)
+
+
+def hf_custom_universe_table_as_of(t0_unix: float) -> dict:
+    """The universe TABLE in force at t0, ignoring whether the network has armed
+    custom bands. For surfaces (the dashboard bench) that route to a network
+    which has; consensus code must use hf_custom_universe_as_of."""
+    uni: dict = {}
+    for eff, u in HF_CUSTOM_UNIVERSE_HISTORY:
+        if t0_unix >= eff:
+            uni = u
+    return uni
+
+
+def hf_custom_universe_as_of(t0_unix: float) -> dict:
+    """{pair: (asset_class, sigma)} callable under custom sizing at t0, or {}
+    on a network that has not armed it."""
+    if not config.custom_bands_enforced_as_of(t0_unix):
+        return {}
+    return hf_custom_universe_table_as_of(t0_unix)
+
+
+def hf_asset_class_as_of(pair: str, t0_unix: float) -> str | None:
+    """Canonical class for a pair at t0: the board row if it has one, else the
+    custom universe when armed, else None (not callable)."""
+    row = (hf_bands_as_of(t0_unix) or {}).get(str(pair).upper())
+    if row:
+        return row[3]
+    u = hf_custom_universe_as_of(t0_unix).get(str(pair).upper())
+    return u[0] if u else None
+
+
+def hf_callable_as_of(pair: str, t0_unix: float) -> bool:
+    return hf_asset_class_as_of(pair, t0_unix) is not None
+
+
 # ── submission limits (CONSENSUS) ────────────────────────────────────────────
 # (effective_from_unix, max_per_utc_day, min_gap_ms, max_open_per_pair)
 #
@@ -396,7 +500,12 @@ def grid_ms_for(pair: str, t0_unix: float = 0.0) -> int:
     # an unknown pair.
     board = hf_bands_as_of(t0_unix) or HF_BOARD_V1
     row = board.get(str(pair).upper())
-    return GRID_MS_DEFAULT if row is None else GRID_MS_BY_CLASS.get(row[3], GRID_MS_DEFAULT)
+    if row is None:
+        # A custom-universe pair has a class too; the grid is a property of
+        # its feed exactly as it is for a board pair.
+        u = hf_custom_universe_as_of(t0_unix).get(str(pair).upper())
+        return GRID_MS_DEFAULT if u is None else GRID_MS_BY_CLASS.get(u[0], GRID_MS_DEFAULT)
+    return GRID_MS_BY_CLASS.get(row[3], GRID_MS_DEFAULT)
 
 
 def grid_t0_ms(t_recv_ms: int, pair: str = None, t0_unix: float = 0.0) -> int:
@@ -602,15 +711,25 @@ def validate_submission(payload: dict, t0_unix: float) -> None:
     if board is None:
         raise HFRejected("hf_not_live_at_t0")
     pair = str(payload.get("trade_pair", "")).upper()
-    if pair not in board:
-        raise HFRejected(f"pair_not_on_hf_board:{pair}")
-    tp_bps, sl_bps, horizon_s, cls = board[pair]
+    custom = config.custom_bands_enforced_as_of(t0_unix)
+    row = board.get(pair)
+    if row is None:
+        # Custom sizing has no board: any pair the network records is callable.
+        # On a network that has not armed it the universe is empty and this is
+        # the same refusal it always was.
+        u = hf_custom_universe_as_of(t0_unix).get(pair) if custom else None
+        if u is None:
+            raise HFRejected(f"pair_not_on_hf_board:{pair}")
+        tp_bps = sl_bps = horizon_s = None
+        cls = u[0]
+    else:
+        tp_bps, sl_bps, horizon_s, cls = row
     if str(payload.get("direction")) not in ("LONG", "SHORT"):
         raise HFRejected("bad_direction")
     if str(payload.get("asset_class")) != cls:
         raise HFRejected(f"asset_class_mismatch:expected {cls}")
 
-    if config.custom_bands_enforced_as_of(t0_unix):
+    if custom:
         # CUSTOM SIZING. The board stops being an equality test and becomes an
         # envelope. What the miner may not do is pick a shape whose outcome is
         # microstructure rather than opinion, which is the SAME spread test that
@@ -643,16 +762,11 @@ def _validate_custom_band(payload: dict, pair: str) -> None:
         raise HFRejected(f"band_out_of_range:{tp}")
     if not (config.HF_CUSTOM_MIN_HORIZON_S <= hz <= config.HF_CUSTOM_MAX_HORIZON_S):
         raise HFRejected(f"horizon_out_of_range:{hz}")
-
-    spread = HF_TYPICAL_SPREAD_BPS.get(pair)
-    if spread is None:
-        # No measured spread means no floor can be applied, and a band that cannot
-        # be floored is a band whose outcome we cannot vouch for. Refuse rather
-        # than wave it through -- the quiet direction here is the wrong one.
-        raise HFRejected(f"no_spread_for_pair:{pair}")
-    floor = spread * MIN_BAND_SPREAD_RATIO
-    if tp < floor:
-        raise HFRejected(f"band_under_spread_floor:{tp}<{floor:.2f}")
+    # No spread floor (Whit, 2026-09-09). Until then this refused a band under
+    # MIN_BAND_SPREAD_RATIO x HF_TYPICAL_SPREAD_BPS, and refused every pair the
+    # spread table did not carry — which is why the pairs recorded for the
+    # bench never reached it. The floor is a BOARD listing rule; the band on
+    # this path is the miner's claim and the symmetric payout prices it.
 
 
 def check_rate(prior_ts_ms: list, t_ms: int, t0_unix: float) -> None:
@@ -1295,7 +1409,9 @@ def _board_sigma_for(pair: str, t0_unix: float) -> float:
     board = hf_bands_as_of(t0_unix) or {}
     row = board.get(str(pair).upper())
     if not row:
-        return 0.0
+        # No board row: a custom-universe pair carries its own measured sigma.
+        u = hf_custom_universe_as_of(t0_unix).get(str(pair).upper())
+        return float(u[1]) if u else 0.0
     tp, _sl, hz, _cls = row
     return scoring.sigma_from_board(float(tp), int(hz))
 

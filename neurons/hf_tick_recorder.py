@@ -134,6 +134,10 @@ ASSETS = [a.strip().upper() for a in os.getenv(
 ASSETS = sorted(set(ASSETS) | {a.strip().upper() for a in
                                os.getenv("SN89_HF_TICK_EXTRA", "").split(",")
                                if a.strip()})
+# The custom-sizing universe: on a network that has armed custom bands every
+# pair in it is callable, so every pair in it must be recording. Empty on a
+# network that has not, so the mainnet recorder's list is unchanged.
+ASSETS = sorted(set(ASSETS) | set(hf.hf_custom_universe_as_of(hf.time.time())))
 STALE_MS = int(os.getenv("SN89_HF_TICK_STALE_MS", "30000"))
 # A tick is filed under ITS OWN src_ts, so one whose timestamp predates the current
 # window can still arrive after that window ended (feed lag). Sealing on the boundary

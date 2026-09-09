@@ -444,9 +444,13 @@ def sync_and_grade(base: str, cache_dir: str, now: float) -> None:
                            (key, hk, int(t0_ms), pair, p.get("direction"),
                             int(p["horizon_s"]) if p.get("horizon_s") else None))
             board = hf.hf_bands_as_of(t0_ms / 1000.0) if t0_ms else None
-            if not board or pair not in board:
+            if not board or not hf.hf_callable_as_of(pair, t0_ms / 1000.0):
                 continue
-            b_tp, b_sl, b_hz, _ = board[pair]
+            _row = board.get(pair)
+            # A custom-universe pair has no board row: its band is the one the
+            # miner declared and nothing else. None here means no band was
+            # declared for a pair that has no fallback — skip, never guess.
+            b_tp, b_sl, b_hz = (_row[0], _row[1], _row[2]) if _row else (None, None, None)
             # The band the MINER declared, when they were allowed to declare one.
             # Falls back to the board otherwise, so a fixed-board call stores
             # exactly what the board would have supplied at grade time.
@@ -456,6 +460,8 @@ def sync_and_grade(base: str, cache_dir: str, now: float) -> None:
                 hz_d = int(p.get("horizon_s", b_hz) or b_hz)
             else:
                 tp_d, sl_d, hz_d = b_tp, b_sl, b_hz
+            if tp_d is None or sl_d is None or hz_d is None:
+                continue
             db.execute(
                 "INSERT OR REPLACE INTO pending "
                 "(key, hk, t0_ms, pair, direction, end_ms, tp_bps, sl_bps, horizon_s) "
@@ -520,11 +526,14 @@ def _resolve_pending(db, base: str, tick_dir: str, row, now_ms: int,
     stored = row[6:9] if len(row) >= 9 else (None, None, None)
     early = walk_to is not None
     board = hf.hf_bands_as_of(t0_ms / 1000.0)
-    if not board or pair not in board:
+    _row = (board or {}).get(pair)
+    # A custom-universe pair is gradeable only off its stored band.
+    if _row is None and not (stored[0] is not None
+                             and hf.hf_callable_as_of(pair, t0_ms / 1000.0)):
         if not early:
             db.execute("DELETE FROM pending WHERE key=?", (key,))
         return
-    tp, sl, horizon_s, _ = board[pair]
+    tp, sl, horizon_s = (_row[0], _row[1], _row[2]) if _row else (None, None, None)
     # Grade what the miner actually called. NULL means the row predates custom
     # sizing, and the board value it falls back to IS the value that row was
     # graded against before -- so every historical grade reproduces exactly.

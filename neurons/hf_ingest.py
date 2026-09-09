@@ -660,7 +660,15 @@ class Ingest:
         # near-identical and, again, only advisory. `grid` (not t_recv_ms) is t0 so
         # the tracked window matches the receipt the grader will read.
         px = self.last_px.get(pair)
-        _tp, _sl, _hor, _ = hf.hf_bands_as_of(t0)[pair]
+        _row = (hf.hf_bands_as_of(t0) or {}).get(pair)
+        _tp, _sl, _hor = ((float(_row[0]), float(_row[1]), int(_row[2]))
+                          if _row else (None, None, None))
+        if hf.config.custom_bands_enforced_as_of(t0):
+            # The position this call holds is the one the miner DREW, and a
+            # custom-universe pair has no board row to fall back to.
+            _tp = float(payload.get("tp_bps") or _tp or 0)
+            _sl = float(payload.get("sl_bps") or _sl or 0)
+            _hor = int(payload.get("horizon_s") or _hor or 0)
         self.open_calls.setdefault((hk, pair), []).append(
             hf.OpenCall(pair, str(payload["direction"]), px[1] if px else None,
                         _tp, _sl, grid, _hor))
