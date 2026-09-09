@@ -210,7 +210,9 @@ def hf_horizon_s(pair: str, t0_unix: float) -> int | None:
 # the set of pairs the network records for it: the asset class picks the tick
 # grid, and sigma is bps per sqrt(second), the std of 180 s window-close log
 # returns on the recorder's own corpus (2026-09-02..09-09, 1,058–3,397 windows
-# per pair). A pair that is ALSO on the HF board keeps the sigma derived from
+# per pair). The 16 FX crosses added 2026-09-09 (AUDCAD … NZDCAD) had no corpus yet,
+# so theirs is the same statistic off Polygon 3-minute bars over the trailing 7 days;
+# re-measure off the corpus once it holds a week of them. A pair that is ALSO on the HF board keeps the sigma derived from
 # its board row; the value here is read only for a pair with no board row.
 #
 # There is deliberately NO spread floor on this path (Whit, 2026-09-09). The
@@ -228,26 +230,42 @@ HF_CUSTOM_UNIVERSE_V1 = {
     "ALGOUSD": ("crypto", 1.6303),
     "ARBUSD": ("crypto", 2.7757),
     "ASTERUSD": ("crypto", 1.6233),
+    "AUDCAD": ("forex", 0.1706),
+    "AUDCHF": ("forex", 0.3324),
+    "AUDJPY": ("forex", 0.2517),
     "AUDNZD": ("forex", 0.1258),
     "AUDUSD": ("forex", 0.1414),
     "AVAXUSD": ("crypto", 1.1728),
     "BCHUSD": ("crypto", 1.3558),
     "BNBUSD": ("crypto", 0.6935),
     "BTCUSD": ("crypto", 0.5934),
+    "CADCHF": ("forex", 0.3863),
+    "CADJPY": ("forex", 0.2704),
+    "CHFJPY": ("forex", 0.2560),
     "CRVUSD": ("crypto", 1.7441),
     "DOGEUSD": ("crypto", 1.1486),
     "DOTUSD": ("crypto", 2.5515),
     "ENAUSD": ("crypto", 1.7801),
     "ETHUSD": ("crypto", 0.8146),
+    "EURAUD": ("forex", 0.1108),
+    "EURCAD": ("forex", 0.1079),
+    "EURCHF": ("forex", 0.1006),
+    "EURGBP": ("forex", 0.0812),
+    "EURJPY": ("forex", 0.2387),
+    "EURNZD": ("forex", 0.1697),
     "EURUSD": ("forex", 0.1040),
+    "GBPAUD": ("forex", 0.1120),
     "GBPCAD": ("forex", 0.0982),
+    "GBPCHF": ("forex", 0.1466),
     "GBPJPY": ("forex", 0.2239),
+    "GBPNZD": ("forex", 0.2118),
     "GBPUSD": ("forex", 0.1122),
     "HYPEUSD": ("crypto", 1.1227),
     "KPEPEUSD": ("crypto", 1.4609),
     "LINKUSD": ("crypto", 1.3108),
     "LTCUSD": ("crypto", 1.2951),
     "NEARUSD": ("crypto", 2.1247),
+    "NZDCAD": ("forex", 0.2341),
     "NZDCHF": ("forex", 0.1619),
     "NZDJPY": ("forex", 0.2556),
     "NZDUSD": ("forex", 0.1964),
