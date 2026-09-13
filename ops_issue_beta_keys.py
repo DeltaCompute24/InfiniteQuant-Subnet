@@ -83,7 +83,10 @@ EXTRINSIC_FEE_TAO = 0.0022   # measured on 496: burned_register's own fee,
 POLL_S = 30                  # how often to re-check the burn while waiting
 MIN_GAP_S = 13               # MaxRegistrationsPerBlock is 1; never go under a block
 BURN_ABORT_TAO = 0.05        # 100x MinBurn -- survives one reprice, catches a runaway.
-MAX_KEYS = 94
+# Ceiling on the COHORT read, not on a run: --limit bounds a run. Raised from
+# 94 (the original point-in-time cohort) when eligibility became 'submitted in
+# the last 3 weeks', which is 147 and grows.
+MAX_KEYS = 400
 
 
 def rand4() -> str:
@@ -145,14 +148,28 @@ def main() -> int:
     ap.add_argument("--go", action="store_true", help="actually create and register")
     ap.add_argument("--plan", action="store_true", help="show what would happen")
     ap.add_argument("--limit", type=int, default=MAX_KEYS)
+    ap.add_argument("--only", default=None, metavar="MAINNET_HOTKEY",
+                    help="issue for this one cohort member only")
+    ap.add_argument("--allow-evict", action="store_true",
+                    help="register into a FULL subnet for a handful of keys. 496 has "
+                         "been full since 2026-09-10 (118 of 128 ours); the chain "
+                         "prunes the lowest-score, then OLDEST, non-immune UID, so "
+                         "check who that is before passing this. Capped at 3 per run.")
     args = ap.parse_args()
     if not (args.go or args.plan):
         ap.error("pass --plan or --go")
 
-    cohort = load_cohort()[: args.limit]
+    # DIFF FIRST, THEN LIMIT. Both caps used to truncate the cohort BEFORE the
+    # roster diff, so --limit 24 against a 147-strong cohort of which 88 were
+    # already issued took the first 24 rows -- nearly all of them done -- and
+    # registered almost nothing. The limit is meant to bound how many NEW keys a
+    # run creates, which is only true on this side of the diff.
+    cohort = load_cohort()
     roster = load_roster()
     done = {e["mainnet_hotkey"] for e in roster["issued"]}
-    todo = [c for c in cohort if c["mainnet_hotkey"] not in done]
+    todo = [c for c in cohort if c["mainnet_hotkey"] not in done][: args.limit]
+    if args.only:
+        todo = [c for c in cohort if c["mainnet_hotkey"] == args.only and c["mainnet_hotkey"] not in done]
 
     s = bt.Subtensor(network=ENDPOINT)
     mg = s.metagraph(NETUID)
@@ -163,7 +180,10 @@ def main() -> int:
     print("496: %d UIDs in use, %d free · burn %s" % (mg.n, free, burn))
     print("adaptive: register while burn <= %.6f, else wait (poll %ds)"
           % (BURN_SETPOINT_TAO, POLL_S))
-    if len(todo) > free:
+    if len(todo) > free and args.allow_evict and len(todo) <= 3:
+        print("EVICTING: %d key(s) past the free slots, by explicit --allow-evict"
+              % (len(todo) - free))
+    elif len(todo) > free:
         print("REFUSING: %d keys needed but only %d free slots -- registering past "
               "the free slots evicts neurons, and during a paced run the evicted "
               "ones can be keys issued earlier in this same run." % (len(todo), free))
