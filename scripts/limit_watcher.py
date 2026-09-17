@@ -277,6 +277,38 @@ async def fire_ws(kp: Keypair, payload: dict) -> dict:
         return json.loads(await ws.recv())
 
 
+# One chain handle for the life of the process. submit() with ch=None builds a
+# fresh chain.Chain() -> bt.Subtensor per LF order and nothing closes it. Over
+# six days (2026-09-10 -> 09-16, 268 LF fills) that held 242 of this host's
+# ~250 finney websocket slots: finney caps CONCURRENT connections per IP
+# (x-ratelimit-policy: concurrent_connections), so every OTHER chain reader on
+# iq-main got HTTP 429 -- selffund onboarding (no wallets generated), challenge
+# payments, holdings, hf-scoreboard, the checkpoint -- and 82 trader LF orders
+# were rejected in one day, while this process logged nothing wrong.
+_LF_CHAIN = None
+
+
+def _lf_chain():
+    global _LF_CHAIN
+    if _LF_CHAIN is None:
+        from sn89_signals import chain as _chain
+        _LF_CHAIN = _chain.Chain()
+    return _LF_CHAIN
+
+
+def _drop_lf_chain() -> None:
+    """Close and forget the cached handle; the next order rebuilds it."""
+    global _LF_CHAIN
+    ch, _LF_CHAIN = _LF_CHAIN, None
+    if ch is None:
+        return
+    for st in (getattr(ch, "st", None), getattr(ch, "_archive_st", None)):
+        try:
+            st.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def fire_lf(hk: str, signers: dict, payload: dict, feed_tokens: dict,
             con: sqlite3.Connection) -> dict:
     """On-chain LF commit via the normal miner path (build_signal + submit).
@@ -332,8 +364,9 @@ def fire_lf(hk: str, signers: dict, payload: dict, feed_tokens: dict,
     # so stamping the comment here (after the id exists) is what gets committed.
     sig.comment = f"iq-follow:{sub_id}"
     try:
-        res = submit(w, sig)
+        res = submit(w, sig, ch=_lf_chain())
     except Exception as e:  # noqa: BLE001
+        _drop_lf_chain()
         con.execute("UPDATE signals_submissions SET status='failed', "
                     "fire_error=?, updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') "
                     "WHERE id=?", (f"{type(e).__name__}: {e}", sub_id))
