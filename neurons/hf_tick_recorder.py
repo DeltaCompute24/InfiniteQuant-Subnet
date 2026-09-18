@@ -125,7 +125,8 @@ def _lf_board() -> list:
 LF_BOARD = _lf_board()
 ASSETS = [a.strip().upper() for a in os.getenv(
     "SN89_HF_TICK_ASSETS",
-    ",".join(sorted(set(hf.HF_BOARD_V1) | set(LF_BOARD)))).split(",") if a.strip()]
+    ",".join(sorted({p for _e, _b in hf.HF_BANDS_HISTORY for p in _b}
+                    | set(LF_BOARD)))).split(",") if a.strip()]
 # ADDITIVE, unlike SN89_HF_TICK_ASSETS which replaces the list above. Use this to record a
 # CANDIDATE pair before it is listed: the HF gate needs its typical spread measured on this
 # very corpus, so a pair that is not recording cannot be measured and cannot be listed --

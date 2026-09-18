@@ -1063,5 +1063,172 @@
     "tp_bps": 17
    }
   }
+ },
+ {
+  "version": "cryptoalts21-20260921",
+  "effective_from_unix": 1789948800,
+  "note": "Lists 21 crypto alts, effective 2026-09-21T00:00:00Z (Whit's call, 2026-09-18): every crypto perp Vanta trades that has a measurable band. Vanta lists 30 tradeable Hyperliquid crypto perps; BTC ETH SOL XRP TAO HYPE were already on the board. Bands solved on scripts/recalibrate_bands.py's own solver, LF target 40% structural wash, 8h crypto horizon, 45d window 2026-08-04..2026-09-18 of 1m bars (Polygon spot; KPEPEUSD is X:PEPEUSD x1000, the Hyperliquid contract unit), rounded to integer bps. Alts grade on the hyperliquid-ws tick line, the same line as the crypto majors. Existing pairs are unchanged. HELD: ASTERUSD, WLDUSD, PUMPUSD have under 4 days of 1m bars, below the solver's 80% coverage floor. HF lists the same 21 in HF_BOARD_V5 at the same boundary: 17 at 1800s and DOT BCH ARB ALGO at 7200s, gated at 8.0x the measured spread on p75 and p90.",
+  "bands": {
+   "BTCUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 105,
+    "tp_bps": 105
+   },
+   "ETHUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 138,
+    "tp_bps": 138
+   },
+   "SOLUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 134,
+    "tp_bps": 134
+   },
+   "XRPUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 123,
+    "tp_bps": 123
+   },
+   "XAUUSD": {
+    "asset_class": "forex-commodities",
+    "sl_bps": 96,
+    "tp_bps": 96
+   },
+   "XAGUSD": {
+    "asset_class": "forex-commodities",
+    "sl_bps": 195,
+    "tp_bps": 195
+   },
+   "USDCAD": {
+    "asset_class": "forex",
+    "sl_bps": 17,
+    "tp_bps": 17
+   },
+   "AUDUSD": {
+    "asset_class": "forex",
+    "sl_bps": 28,
+    "tp_bps": 28
+   },
+   "TAOUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 165,
+    "tp_bps": 165
+   },
+   "HYPEUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 184,
+    "tp_bps": 184
+   },
+   "EURUSD": {
+    "asset_class": "forex",
+    "sl_bps": 17,
+    "tp_bps": 17
+   },
+   "BNBUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 94,
+    "tp_bps": 94
+   },
+   "DOGEUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 133,
+    "tp_bps": 133
+   },
+   "ADAUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 195,
+    "tp_bps": 195
+   },
+   "AVAXUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 150,
+    "tp_bps": 150
+   },
+   "LINKUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 163,
+    "tp_bps": 163
+   },
+   "DOTUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 186,
+    "tp_bps": 186
+   },
+   "TRXUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 51,
+    "tp_bps": 51
+   },
+   "LTCUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 121,
+    "tp_bps": 121
+   },
+   "BCHUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 151,
+    "tp_bps": 151
+   },
+   "SUIUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 176,
+    "tp_bps": 176
+   },
+   "ARBUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 311,
+    "tp_bps": 311
+   },
+   "NEARUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 257,
+    "tp_bps": 257
+   },
+   "ALGOUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 199,
+    "tp_bps": 199
+   },
+   "UNIUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 280,
+    "tp_bps": 280
+   },
+   "AAVEUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 184,
+    "tp_bps": 184
+   },
+   "CRVUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 294,
+    "tp_bps": 294
+   },
+   "XMRUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 216,
+    "tp_bps": 216
+   },
+   "ZECUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 298,
+    "tp_bps": 298
+   },
+   "ENAUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 295,
+    "tp_bps": 295
+   },
+   "ZROUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 317,
+    "tp_bps": 317
+   },
+   "KPEPEUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 203,
+    "tp_bps": 203
+   }
+  }
  }
 ]

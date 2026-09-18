@@ -87,6 +87,33 @@ HF_TYPICAL_SPREAD_BPS = {
     # excluded (p50 0.570), taking the upper quartile because the whole point of the gate
     # is that the listing survives a bad spread day and not merely a median one.
     "AUDUSD": 0.85,
+    # Added 2026-09-18 for the v5 crypto-alt listing. Direct measurements: crypto and
+    # metals grade on hyperliquid-ws ticks, which carry top-of-book, so the trades-only
+    # caveat on the rows above no longer applies to a new listing. p75 of the quoted
+    # spread over 503 sealed testnet-recorder windows, 2026-09-10..09-18 (8 days, the
+    # depth of the all-market corpus; the v4 precedent was 14). The listing was gated on
+    # the p90 as well -- see HF_BOARD_V5.
+    "BNBUSD": 0.681,
+    "DOGEUSD": 0.599,
+    "ADAUSD": 1.488,
+    "AVAXUSD": 1.36,
+    "LINKUSD": 0.921,
+    "DOTUSD": 2.445,
+    "TRXUSD": 0.299,
+    "LTCUSD": 1.12,
+    "BCHUSD": 2.202,
+    "SUIUSD": 1.173,
+    "ARBUSD": 2.696,
+    "NEARUSD": 1.879,
+    "ALGOUSD": 3.188,
+    "UNIUSD": 1.429,
+    "AAVEUSD": 1.701,
+    "CRVUSD": 2.499,
+    "XMRUSD": 1.742,
+    "ZECUSD": 0.923,
+    "ENAUSD": 2.158,
+    "ZROUSD": 2.888,
+    "KPEPEUSD": 3.009,
 }
 MIN_BAND_SPREAD_RATIO = 8.0
 
@@ -175,11 +202,65 @@ HF_BOARD_V4 = {k: v for k, v in HF_BOARD_V3.items()
 HF_BOARD_V4["AUDUSD"] = (8.4, 8.4, 7200, "forex")
 HF_V4_FROM = int(os.getenv("SN89_HF_V4_FROM", "1786579200"))   # 2026-08-13T00:00:00Z
 
+# v5 -- the crypto-alt listing (Whit, 2026-09-18): every crypto perp Vanta trades that
+# clears the spread gate. Vanta lists 30 tradeable Hyperliquid crypto perps; six were
+# already here, 24 were candidates. Alts grade on the same hyperliquid-ws line as the
+# majors, which is also where Vanta fills them.
+#
+# Solved on scripts/recalibrate_bands.py's own solver, 14% structural-wash target, 45d
+# calendar window 2026-08-04..2026-09-18 of 1m bars (Polygon spot; KPEPEUSD is
+# X:PEPEUSD x1000, the Hyperliquid contract unit). Controls on the same run: TAOUSD
+# 58.7 and HYPEUSD 61.7 at 7200s against a listed 53.1 / 62.6, both inside the deadband.
+# Gate: band >= 8.0x the measured Hyperliquid spread on the p75 AND the p90, the fxpoll3
+# standard (a listing that depends on which estimator you picked is microstructure).
+#
+#   1800s  BNB 11.3 (16.6x/11.6x)  DOGE 20.0 (33/18)   ADA 29.4 (20/14)   AVAX 21.7 (16/11)
+#          LINK 24.8 (27/14)       TRX 7.0 (23/12)     LTC 20.9 (19/12.5) SUI 23.6 (20/12)
+#          NEAR 33.6 (18/11)       UNI 40.6 (28/16)    AAVE 27.1 (16/11)  CRV 37.3 (15/11)
+#          XMR 34.9 (20/13.5)      ZEC 41.9 (45/19)    ENA 44.1 (20/13)   ZRO 43.9 (15/11)
+#          KPEPE 34.4 (11.4/11.1)
+#   7200s  DOT 54.9 (22/18.5)  BCH 40.7 (18.5/15)  ARB 74.8 (28/18)  ALGO 53.2 (17/11)
+#
+# The four on 7200s are the TAOUSD-v3 remedy. BCH (8.8x/7.3x) and ALGO (7.7x/5.0x) fail
+# the 30-minute clock outright. DOT (10.4x/8.6x) and ARB (13.4x/8.5x) pass it, but within
+# 0.6x of the gate on the p90 of an 8-day spread sample -- the HYPEUSD-v3 reasoning: too
+# near 8.0x to rest on an estimate. Revisit both once the corpus holds 14 days.
+#
+# HELD: ASTERUSD, WLDUSD, PUMPUSD. Under 4 days of 1m bars anywhere we can read (Polygon
+# does not carry them), so MIN_COVERAGE holds them, and they carry the widest measured
+# spreads of the 24 (PUMP p90 5.4 bps). TONUSDC is delisted and PAXGUSDC blocked upstream.
+HF_BOARD_V5 = dict(HF_BOARD_V4)
+HF_BOARD_V5.update({
+    "BNBUSD": (11.3, 11.3, 1800, "crypto"),
+    "DOGEUSD": (20.0, 20.0, 1800, "crypto"),
+    "ADAUSD": (29.4, 29.4, 1800, "crypto"),
+    "AVAXUSD": (21.7, 21.7, 1800, "crypto"),
+    "LINKUSD": (24.8, 24.8, 1800, "crypto"),
+    "TRXUSD": (7.0, 7.0, 1800, "crypto"),
+    "LTCUSD": (20.9, 20.9, 1800, "crypto"),
+    "SUIUSD": (23.6, 23.6, 1800, "crypto"),
+    "NEARUSD": (33.6, 33.6, 1800, "crypto"),
+    "UNIUSD": (40.6, 40.6, 1800, "crypto"),
+    "AAVEUSD": (27.1, 27.1, 1800, "crypto"),
+    "CRVUSD": (37.3, 37.3, 1800, "crypto"),
+    "XMRUSD": (34.9, 34.9, 1800, "crypto"),
+    "ZECUSD": (41.9, 41.9, 1800, "crypto"),
+    "ENAUSD": (44.1, 44.1, 1800, "crypto"),
+    "ZROUSD": (43.9, 43.9, 1800, "crypto"),
+    "KPEPEUSD": (34.4, 34.4, 1800, "crypto"),
+    "DOTUSD": (54.9, 54.9, 7200, "crypto"),
+    "BCHUSD": (40.7, 40.7, 7200, "crypto"),
+    "ARBUSD": (74.8, 74.8, 7200, "crypto"),
+    "ALGOUSD": (53.2, 53.2, 7200, "crypto"),
+})
+HF_V5_FROM = int(os.getenv("SN89_HF_V5_FROM", "1789948800"))   # 2026-09-21T00:00:00Z
+
 HF_BANDS_HISTORY = (
     (HF_LAUNCH_FROM, HF_BOARD_V1),
     (HF_V2_FROM, HF_BOARD_V2),
     (HF_V3_FROM, HF_BOARD_V3),
     (HF_V4_FROM, HF_BOARD_V4),
+    (HF_V5_FROM, HF_BOARD_V5),
 )
 
 
@@ -1439,6 +1520,37 @@ def hf_diversity_floor(n_pairs: int, mean_horizon_s: float | None = None) -> flo
     return min(HF_DIVERSITY_FLOOR_CEIL, base * x)
 
 
+def _hf_pair_class_any(pair: str) -> str | None:
+    """Asset class of a pair from ANY board version, newest first, then the recorded
+    universe table. Static, so it is identical on every validator at every `now`."""
+    p = str(pair).upper()
+    for _eff, board in reversed(HF_BANDS_HISTORY):
+        row = board.get(p)
+        if row:
+            return row[3]
+    u = HF_CUSTOM_UNIVERSE_V1.get(p)
+    return u[0] if u else None
+
+
+def hf_diversity_breadth(pairs, now: float) -> int:
+    """How many INDEPENDENT decisions a set of pairs represents, for the floor ladder.
+
+    Until HF_V5_FROM this is the pair count, unchanged. From v5 every crypto pair
+    counts as ONE between them. The ladder's premise is that a miner covering seven
+    pairs has made seven decisions and may be lopsided; that held on an 8-pair board
+    spanning crypto, metals and FX. With 27 crypto pairs that move with BTC, seven
+    long-only alts are one decision restated, and the 3% floor would be reachable by
+    breadth that carries no information. Measured on the live board 2026-09-18, 98
+    hotkeys under the gate: 97 pass today, 94 pass under this rule, and the three that
+    flip all hold zero emission weight.
+    """
+    ps = [p for p in pairs if p]
+    if now < HF_V5_FROM:
+        return len(ps)
+    crypto = sum(1 for p in ps if _hf_pair_class_any(p) == "crypto")
+    return len(ps) - crypto + (1 if crypto else 0)
+
+
 def hf_diversity(subs, now: float) -> dict:
     """Diversity verdict for ONE hotkey over the trailing window.
 
@@ -1504,9 +1616,10 @@ def hf_diversity(subs, now: float) -> dict:
     pairs = {p for p in by_pair if p}
     share = (minority / n) if n else 0.0
     mean_h = (sum(hz for hz in horizons) / len(horizons)) if horizons else None
-    floor = hf_diversity_floor(len(pairs), mean_h)
+    breadth = hf_diversity_breadth(pairs, now)
+    floor = hf_diversity_floor(breadth, mean_h)
     applies = HF_DIVERSITY_ENABLED and n >= HF_DIVERSITY_MIN_SUBS
-    return {"n": n, "pairs": len(pairs), "long": longs, "short": shorts,
+    return {"n": n, "pairs": len(pairs), "breadth": breadth, "long": longs, "short": shorts,
             "minority": minority, "share": share, "floor": floor,
             "mean_horizon_s": mean_h,
             "by_pair": {p: tuple(v) for p, v in sorted(by_pair.items())},
