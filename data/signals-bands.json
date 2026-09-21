@@ -1,7 +1,7 @@
 {
- "version": "fxpoll3-20260821",
+ "version": "cryptoalts21-20260921",
  "vol_window_days": 30,
- "note": "Forex rebuilt from the miner poll (pair_poll_votes fx-board-2026-08d, 24 voters), effective 2026-08-21T00:00:00Z, matching history entry fxpoll3-20260821. Adds EURUSD (17 votes), keeps AUDUSD (14) and USDCAD (10), drops USDCHF (4). Reverses half of fxmacro3-20260813 by intent -- miners trade the pairs they read. EURUSD lists at 17 bps; USDCAD moves 20 -> 17 because 20 washed 53.5% against a 40% target; AUDUSD is unchanged at 28 (43.4% wash, inside the 7pp deadband, so the solver holds it). Crypto and metals untouched. HF unchanged: AUDUSD stays the only FX pair on the HF board -- EURUSD solves to 4.7 bps and clears the 8x band/spread gate on the spread p50 and p75 but only 7.75x on the p90, so it is LF-only.",
+ "note": "Lists 21 crypto alts, effective 2026-09-21T00:00:00Z, matching history entry cryptoalts21-20260921: BNB DOGE ADA AVAX LINK DOT TRX LTC BCH SUI ARB NEAR ALGO UNI AAVE CRV XMR ZEC ENA ZRO KPEPE. LF target 40% structural wash, 8h, 45d window 2026-08-04..2026-09-18. Existing pairs unchanged. Values are copied from the history entry in force, never recomputed here. HF lists the same 21 in HF_BOARD_V5 (17 at 1800s; DOT BCH ARB ALGO at 7200s).",
  "bands": {
   "BTCUSD": {
    "asset_class": "crypto",
@@ -57,6 +57,111 @@
    "asset_class": "forex",
    "sl_bps": 17,
    "tp_bps": 17
+  },
+  "BNBUSD": {
+   "asset_class": "crypto",
+   "sl_bps": 94,
+   "tp_bps": 94
+  },
+  "DOGEUSD": {
+   "asset_class": "crypto",
+   "sl_bps": 133,
+   "tp_bps": 133
+  },
+  "ADAUSD": {
+   "asset_class": "crypto",
+   "sl_bps": 195,
+   "tp_bps": 195
+  },
+  "AVAXUSD": {
+   "asset_class": "crypto",
+   "sl_bps": 150,
+   "tp_bps": 150
+  },
+  "LINKUSD": {
+   "asset_class": "crypto",
+   "sl_bps": 163,
+   "tp_bps": 163
+  },
+  "DOTUSD": {
+   "asset_class": "crypto",
+   "sl_bps": 186,
+   "tp_bps": 186
+  },
+  "TRXUSD": {
+   "asset_class": "crypto",
+   "sl_bps": 51,
+   "tp_bps": 51
+  },
+  "LTCUSD": {
+   "asset_class": "crypto",
+   "sl_bps": 121,
+   "tp_bps": 121
+  },
+  "BCHUSD": {
+   "asset_class": "crypto",
+   "sl_bps": 151,
+   "tp_bps": 151
+  },
+  "SUIUSD": {
+   "asset_class": "crypto",
+   "sl_bps": 176,
+   "tp_bps": 176
+  },
+  "ARBUSD": {
+   "asset_class": "crypto",
+   "sl_bps": 311,
+   "tp_bps": 311
+  },
+  "NEARUSD": {
+   "asset_class": "crypto",
+   "sl_bps": 257,
+   "tp_bps": 257
+  },
+  "ALGOUSD": {
+   "asset_class": "crypto",
+   "sl_bps": 199,
+   "tp_bps": 199
+  },
+  "UNIUSD": {
+   "asset_class": "crypto",
+   "sl_bps": 280,
+   "tp_bps": 280
+  },
+  "AAVEUSD": {
+   "asset_class": "crypto",
+   "sl_bps": 184,
+   "tp_bps": 184
+  },
+  "CRVUSD": {
+   "asset_class": "crypto",
+   "sl_bps": 294,
+   "tp_bps": 294
+  },
+  "XMRUSD": {
+   "asset_class": "crypto",
+   "sl_bps": 216,
+   "tp_bps": 216
+  },
+  "ZECUSD": {
+   "asset_class": "crypto",
+   "sl_bps": 298,
+   "tp_bps": 298
+  },
+  "ENAUSD": {
+   "asset_class": "crypto",
+   "sl_bps": 295,
+   "tp_bps": 295
+  },
+  "ZROUSD": {
+   "asset_class": "crypto",
+   "sl_bps": 317,
+   "tp_bps": 317
+  },
+  "KPEPEUSD": {
+   "asset_class": "crypto",
+   "sl_bps": 203,
+   "tp_bps": 203
   }
  },
  "refreshed_at": "2026-07-21T18:45:00Z"

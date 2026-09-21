@@ -62,7 +62,7 @@ your weight ∝ (your qualified wins × tier, each decaying linearly to 0 over 7
 
 | Class | Pairs |
 |---|---|
-| Crypto | BTCUSD · ETHUSD · SOLUSD · XRPUSD · TAOUSD · HYPEUSD |
+| Crypto | BTCUSD · ETHUSD · SOLUSD · XRPUSD · TAOUSD · HYPEUSD · BNBUSD · DOGEUSD · ADAUSD · AVAXUSD · LINKUSD · DOTUSD · TRXUSD · LTCUSD · BCHUSD · SUIUSD · ARBUSD · NEARUSD · ALGOUSD · UNIUSD · AAVEUSD · CRVUSD · XMRUSD · ZECUSD · ENAUSD · ZROUSD · KPEPEUSD |
 | Metals | XAUUSD · XAGUSD |
 | Forex | AUDUSD · EURUSD · USDCAD |
 
