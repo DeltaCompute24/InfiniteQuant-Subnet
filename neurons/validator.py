@@ -95,6 +95,14 @@ CREATE TABLE IF NOT EXISTS referral_transfers (
   observed_unix    REAL NOT NULL,
   PRIMARY KEY (from_hk, to_hk)
 );
+CREATE TABLE IF NOT EXISTS referrer_successions (
+  from_hk          TEXT NOT NULL,     -- earlier recruiter hotkey
+  to_hk            TEXT NOT NULL,     -- its attested successor
+  commit_block     INTEGER NOT NULL,  -- LATEST inclusion block of this sn89refs attestation
+  first_seen_block INTEGER NOT NULL,
+  observed_unix    REAL NOT NULL,
+  PRIMARY KEY (from_hk, to_hk)
+);
 CREATE TABLE IF NOT EXISTS copier_flags (
   follower      TEXT NOT NULL,
   leader        TEXT NOT NULL,
@@ -213,6 +221,28 @@ class Validator:
             print(f"  ⇄ referral base transfer {frm[:8]}… → {to[:8]}… "
                   f"commit_block={c.get('commit_block') or block}")
 
+    def _journal_referrer_succession(self, c: dict, block: int, now: float):
+        """Journal one sn89refs succession attestation — ONLY from
+        config.SUCCESSION_ATTESTOR_HK. Upsert keeps the LATEST commit_block per
+        (from, to), so re-attesting A→B after a mistaken A→C makes B win again.
+        Which attestation counts, and when, is re-derived at replay by
+        scoring.apply_referrer_succession."""
+        if c.get("hotkey") != config.SUCCESSION_ATTESTOR_HK:
+            return                             # not the attestor — ignored, by design
+        frm, to = c["from"], c["to"]
+        cb = int(c.get("commit_block") or block)
+        prev = self.db.execute(
+            "SELECT commit_block FROM referrer_successions WHERE from_hk=? AND to_hk=?",
+            (frm, to)).fetchone()
+        if prev and int(prev[0]) >= cb:
+            return
+        self.db.execute(
+            "INSERT INTO referrer_successions (from_hk, to_hk, commit_block, "
+            "first_seen_block, observed_unix) VALUES (?,?,?,?,?) "
+            "ON CONFLICT(from_hk, to_hk) DO UPDATE SET commit_block=excluded.commit_block",
+            (frm, to, cb, block, now))
+        print(f"  ⇢ referrer succession {frm[:8]}… → {to[:8]}… commit_block={cb}")
+
     def refresh_referrals(self, mg):
         """Fill recruit_reg_block ONCE at the recruit's first metagraph sighting.
 
@@ -267,6 +297,8 @@ class Validator:
                 self._journal_referral(c, block, now)
             elif c.get("kind") == "referral_transfer":
                 self._journal_referral_transfer(c, block, now)
+            elif c.get("kind") == "referrer_succession":
+                self._journal_referrer_succession(c, block, now)
             else:
                 self._journal_commit(c, block, now)
         self.db.commit()
@@ -889,6 +921,11 @@ class Validator:
                             for f, t, cb in self.db.execute(
                                 "SELECT from_hk, to_hk, commit_block "
                                 "FROM referral_transfers")]
+                        succession_rows = [
+                            {"from_hk": f, "to_hk": t, "commit_block": cb}
+                            for f, t, cb in self.db.execute(
+                                "SELECT from_hk, to_hk, commit_block "
+                                "FROM referrer_successions")]
                         # § referrer multicomp: a recruiter is paid for what
                         # their recruits earn, and two thirds of that is not in
                         # the signals journal. HF and Closers grade off the
@@ -918,7 +955,8 @@ class Validator:
                             sig_rows, meta, uid_by_hotkey, now,
                             referrals=referral_rows,
                             referral_transfers=transfer_rows,
-                            extra_tallies=extra)
+                            extra_tallies=extra,
+                            referrer_successions=succession_rows)
                     else:
                         # merge-era parking: all-burn while the split ramps.
                         # Committing the HF vector here would DOUBLE-pay HF.

@@ -1202,6 +1202,36 @@ def referrer_multicomp_active(now_unix: float) -> bool:
     return REFERRER_MULTICOMP or (
         REFERRER_MULTICOMP_FROM_UNIX > 0
         and now_unix >= REFERRER_MULTICOMP_FROM_UNIX)
+
+
+# § referrer succession (2026-10-02). A recruiter whose credited hotkey holds no
+# UID (deregistered, then re-rolled) used to have its whole referral base burn:
+# 36 of 174 valid pairs sat on five dead recruiter hotkeys that day. An sn89refx
+# transfer cannot rescue them — it must be signed by the old hotkey, and a
+# deregistered hotkey cannot commit — and matching by owner coldkey is wrong
+# (custody swaps put several people's keys under one coldkey, and a re-roll can
+# land on a new coldkey: 1 of 4 real cases misrouted, 1 missed).
+#
+# So the hosted-miner operator ATTESTS it: SUCCESSION_ATTESTOR_HK commits
+# "sn89refs:1:<old_ss58>:<new_ss58>" and the validator journals it ONLY from
+# that hotkey. Replay credits a pair to the successor while the credited hotkey
+# holds no UID, chaining through repeated re-rolls; the latest attestation per
+# old hotkey wins, so a wrong one is corrected by attesting again.
+# The attestor is chef (UID 42), NOT the owner hotkey 5FCN4P1K…, whose slot
+# carries the HF Merkle anchors and must hold nothing else.
+SUCCESSION_ATTESTOR_HK = os.getenv(
+    "SN89_SUCCESSION_ATTESTOR_HK", "5HBg742kVS1KXhKQGJhEMsyNcxatQzpyttipazfqGJSBS98o")
+REFERRER_SUCCESSION_FROM_UNIX = int(
+    os.getenv("SN89_REFERRER_SUCCESSION_FROM", "1790971200"))  # 2026-10-02T20:00:00Z
+REFERRER_SUCCESSION_MAX_HOPS = 8
+
+
+def referrer_succession_active(now_unix: float) -> bool:
+    """Whether dead recruiter hotkeys are credited to their coldkey's live successor."""
+    return (REFERRER_SUCCESSION_FROM_UNIX > 0
+            and now_unix >= REFERRER_SUCCESSION_FROM_UNIX)
+
+
 COMBINED_WEIGHTS = os.getenv("SN89_COMBINED_WEIGHTS", "0") == "1"
 
 

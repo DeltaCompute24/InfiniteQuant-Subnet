@@ -264,6 +264,7 @@ def referrer_weights_from_journal(
     referrals: list[dict] | None = None,
     referral_transfers: list[dict] | None = None,
     extra_tallies: dict[str, dict[str, float]] | None = None,
+    referrer_successions: list[dict] | None = None,
 ) -> dict[int, float]:
     """§ referrer mechanism (mecid 1) — PURE rebuild, the auditor's mirror of
     the validator's referrer vector. Pipeline:
@@ -313,6 +314,14 @@ def referrer_weights_from_journal(
     # traded; withheld only while the follower is STILL the credited recruiter,
     # so a transfer hands the destination a clean pair rather than the penalty.
     withheld = referrer_withheld_recruits(signals, orig, pairs, now)
+
+    # § referrer succession: a recruiter whose hotkey lost its UID is credited
+    # on its coldkey's live successor. After the withheld set on purpose — that
+    # set is keyed by RECRUIT, so a recruiter shadowing its own recruit carries
+    # the penalty onto its new key (same person) instead of shedding it.
+    if config.referrer_succession_active(now):
+        pairs = scoring.apply_referrer_succession(
+            pairs, referrer_successions or [], uid_by_hotkey)
 
     recruit_hks = {recruit for _, recruit in pairs}
     lf_tally = referrer_recruit_tallies(signals, meta, now, recruit_hks)

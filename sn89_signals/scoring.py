@@ -589,6 +589,55 @@ def apply_referral_transfers(pairs: list[tuple[str, str]],
                   for recruiter, recruit in pairs)
 
 
+def apply_referrer_succession(pairs: list[tuple[str, str]],
+                              successions: list[dict],
+                              uid_by_hk: dict[str, int]) -> list[tuple[str, str]]:
+    """Credit a pair whose recruiter hotkey holds NO UID to that recruiter's
+    live successor (§ referrer succession). Runs AFTER apply_referral_transfers.
+
+    successions: [{from_hk, to_hk, commit_block}] — sn89refs attestations
+    journaled ONLY from config.SUCCESSION_ATTESTOR_HK. The LATEST attestation
+    per from_hk wins, so a mistaken one is corrected by attesting again.
+
+      * Only a recruiter WITHOUT a UID moves. A registered hotkey keeps its
+        own pairs, so this can never take a base from a live key.
+      * CHAINS (A dead → B dead → C live), up to REFERRER_SUCCESSION_MAX_HOPS,
+        with a cycle guard. Safe here where transfers are not: every hop is
+        the same person re-rolling, attested by the operator who did it.
+      * If the chain ends on a hotkey with no UID either, the pair stays on
+        its recruiter (it burns, exactly as before).
+      * A pair whose successor IS the recruit is dropped (no self-referral).
+    """
+    best: dict[str, tuple[int, str]] = {}
+    for s in successions or []:
+        frm, to, ob = s.get("from_hk"), s.get("to_hk"), s.get("commit_block")
+        if not frm or not to or frm == to or ob is None:
+            continue
+        cand = (int(ob), to)
+        if frm not in best or cand > best[frm]:
+            best[frm] = cand
+    nxt = {frm: to for frm, (_, to) in best.items()}
+
+    def resolve(hk: str) -> str:
+        cur, seen = hk, {hk}
+        for _ in range(config.REFERRER_SUCCESSION_MAX_HOPS):
+            if uid_by_hk.get(cur) is not None:
+                return cur
+            n = nxt.get(cur)
+            if n is None or n in seen:
+                break
+            seen.add(n)
+            cur = n
+        return cur if uid_by_hk.get(cur) is not None else hk
+
+    out = []
+    for recruiter, recruit in pairs:
+        eff = resolve(recruiter)
+        if eff != recruit:
+            out.append((eff, recruit))
+    return sorted(out)
+
+
 def referrer_scores(pairs: list[tuple[str, str]],
                     tally_by_hk: dict[str, float],
                     withheld_recruits: set[str] | None = None) -> dict[str, float]:

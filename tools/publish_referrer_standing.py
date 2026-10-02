@@ -67,6 +67,19 @@ def load_journal(db_path):
     return sig_rows, meta, referrals, transfers
 
 
+def load_successions(db_path):
+    """§ referrer succession rows. Missing on a pre-succession DB, not an error."""
+    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        return [{"from_hk": f, "to_hk": t, "commit_block": cb}
+                for f, t, cb in con.execute(
+                    "SELECT from_hk, to_hk, commit_block FROM referrer_successions")]
+    except sqlite3.OperationalError:
+        return []
+    finally:
+        con.close()
+
+
 def competition_tallies(sig_rows, meta, uid_by_hotkey, now):
     """{competition: {hotkey: raw tally}} over the FULL field of each.
 
@@ -126,6 +139,15 @@ def main() -> int:
     # on-chain vector cannot state different rules (the canon check below would
     # catch it, by refusing to write at all).
     withheld = replay.referrer_withheld_recruits(sig_rows, orig_pairs, pairs, now)
+    # § referrer succession — same order as replay: after the withheld set.
+    successions = load_successions(config.DB_PATH)
+    succeeded_from: dict = {}
+    if config.referrer_succession_active(now):
+        before = {recruit: recruiter for recruiter, recruit in pairs}
+        pairs = scoring.apply_referrer_succession(pairs, successions, uid_by_hotkey)
+        for recruiter, recruit in pairs:
+            if before.get(recruit) not in (None, recruiter):
+                succeeded_from.setdefault(recruiter, set()).add(before[recruit])
 
     fields, missing = competition_tallies(sig_rows, meta, uid_by_hotkey, now)
     multicomp = config.referrer_multicomp_active(now)
@@ -167,7 +189,8 @@ def main() -> int:
     canon = replay.referrer_weights_from_journal(
         sig_rows, meta, uid_by_hotkey, now,
         referrals=referrals, referral_transfers=transfers,
-        extra_tallies={k: v for k, v in fields.items() if k != "lf"})
+        extra_tallies={k: v for k, v in fields.items() if k != "lf"},
+        referrer_successions=successions)
     if set(canon) != set(weights) or any(
             abs(canon[u] - weights[u]) > 1e-9 for u in canon):
         print("REFUSING TO WRITE — breakdown disagrees with replay vector.\n"
@@ -223,6 +246,9 @@ def main() -> int:
             "hotkey": recruiter,
             "uid": uid,
             "registered": uid is not None,
+            # earlier hotkeys of this recruiter (no UID, attested sn89refs
+            # succession) whose referrals are now credited here
+            "succeeded_from": sorted(succeeded_from.get(recruiter, ())),
             "score": round(score, 6),
             "pool_share": round(share, 8),
             "tao_day": round(share * field_day, 6) if payable else 0.0,

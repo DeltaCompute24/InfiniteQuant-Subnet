@@ -46,6 +46,16 @@ _REFX_PREFIX = "sn89refx"
 _REFX_V = 1
 _REFX_RE = re.compile(rf"^{_REFX_PREFIX}:(\d+):(5[1-9A-HJ-NP-Za-km-z]{{46,50}})$")
 
+# Referrer SUCCESSION (§ referrer succession): config.SUCCESSION_ATTESTOR_HK
+# commits "sn89refs:1:<old_ss58>:<new_ss58>" when a hosted recruiter re-rolls,
+# so a deregistered recruiter hotkey's referral base is credited to its
+# successor. ~108 raw bytes, inside the 128-byte budget. Journaled ONLY from the
+# attestor hotkey; anyone else committing this payload is ignored.
+_REFS_PREFIX = "sn89refs"
+_REFS_V = 1
+_REFS_RE = re.compile(rf"^{_REFS_PREFIX}:(\d+):(5[1-9A-HJ-NP-Za-km-z]{{46,50}})"
+                      rf":(5[1-9A-HJ-NP-Za-km-z]{{46,50}})$")
+
 
 def url_tag(url: str) -> str:
     return hashlib.sha256(url.encode()).hexdigest()[:16]
@@ -119,6 +129,28 @@ def decode_referral_transfer(data: str) -> dict | None:
     return {"to": to}
 
 
+def encode_referrer_succession(from_ss58: str, to_ss58: str) -> str:
+    return f"{_REFS_PREFIX}:{_REFS_V}:{from_ss58}:{to_ss58}"
+
+
+def decode_referrer_succession(data: str) -> dict | None:
+    """Decode an sn89refs succession attestation, or None. Both ss58s are
+    checksum-verified and a self-succession is dropped."""
+    m = _REFS_RE.match((data or "").strip())
+    if not m:
+        return None
+    v, frm, to = m.groups()
+    if int(v) != _REFS_V or frm == to:
+        return None
+    try:
+        from scalecodec.utils.ss58 import ss58_decode
+        ss58_decode(frm)
+        ss58_decode(to)
+    except Exception:  # noqa: BLE001
+        return None
+    return {"from": frm, "to": to}
+
+
 def _decode_any(data: str | None) -> dict | None:
     """Decode a commitment payload of either kind. Signal entries keep their
     exact legacy shape plus kind="signal" (existing consumers ignore unknown
@@ -137,6 +169,10 @@ def _decode_any(data: str | None) -> dict | None:
     if refx:
         refx["kind"] = "referral_transfer"
         return refx
+    refs = decode_referrer_succession(data)
+    if refs:
+        refs["kind"] = "referrer_succession"
+        return refs
     return None
 
 
@@ -263,6 +299,16 @@ class Chain:
         """One-time referral-base transfer commitment (sn89refx). IRREVERSIBLE
         by protocol: only the earliest transfer from this hotkey ever counts."""
         data = encode_referral_transfer(to_ss58)
+        return self.st.set_commitment(wallet=wallet, netuid=self.netuid, data=data,
+                                      wait_for_finalization=False)
+
+    def commit_referrer_succession(self, wallet: "bt.Wallet", from_ss58: str,
+                                   to_ss58: str) -> bool:
+        """Attest that `to_ss58` succeeds `from_ss58` as the same recruiter
+        (sn89refs). Counts only when signed by config.SUCCESSION_ATTESTOR_HK.
+        One latest-wins slot: commit the next attestation only after the
+        validator has journaled this one."""
+        data = encode_referrer_succession(from_ss58, to_ss58)
         return self.st.set_commitment(wallet=wallet, netuid=self.netuid, data=data,
                                       wait_for_finalization=False)
 

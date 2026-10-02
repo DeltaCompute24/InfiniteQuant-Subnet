@@ -129,3 +129,145 @@ class TestBonusRetirement:
         # recruit-boosted uid 2; recruit bonus still applies either way
         assert w_on[1] < w_off[1]
         assert w_on[2] > w_on[1] * 0.99  # recruit keeps its 10% boost
+
+
+class TestReferrerSuccession:
+    """§ referrer succession — a recruiter whose hotkey lost its UID is credited
+    on its attested successor."""
+    PAIRS = [(A, R1), (A, R2), (B, R3)]
+
+    def test_dead_recruiter_moves_to_successor(self):
+        uid = {B: 1, C: 2, R1: 10, R2: 11, R3: 12}          # A has no UID
+        out = scoring.apply_referrer_succession(
+            self.PAIRS, [{"from_hk": A, "to_hk": C, "commit_block": 5}], uid)
+        assert out == sorted([(C, R1), (C, R2), (B, R3)])
+
+    def test_live_recruiter_never_moves(self):
+        uid = {A: 0, B: 1, C: 2}
+        out = scoring.apply_referrer_succession(
+            self.PAIRS, [{"from_hk": A, "to_hk": C, "commit_block": 5}], uid)
+        assert out == sorted(self.PAIRS)
+
+    def test_chains_through_repeated_rerolls(self):
+        uid = {B: 1, D: 3}                                    # A and C both dead
+        out = scoring.apply_referrer_succession(
+            self.PAIRS, [{"from_hk": A, "to_hk": C, "commit_block": 5},
+                         {"from_hk": C, "to_hk": D, "commit_block": 9}], uid)
+        assert (D, R1) in out and (D, R2) in out
+
+    def test_latest_observation_wins(self):
+        uid = {B: 1, C: 2, D: 3}
+        out = scoring.apply_referrer_succession(
+            self.PAIRS, [{"from_hk": A, "to_hk": C, "commit_block": 5},
+                         {"from_hk": A, "to_hk": D, "commit_block": 9}], uid)
+        assert (D, R1) in out and not any(r == C for r, _ in out)
+
+    def test_dead_end_chain_leaves_pair_in_place(self):
+        uid = {B: 1}                                          # successor C also dead
+        out = scoring.apply_referrer_succession(
+            self.PAIRS, [{"from_hk": A, "to_hk": C, "commit_block": 5}], uid)
+        assert out == sorted(self.PAIRS)
+
+    def test_cycle_is_safe(self):
+        uid = {B: 1}
+        out = scoring.apply_referrer_succession(
+            self.PAIRS, [{"from_hk": A, "to_hk": C, "commit_block": 5},
+                         {"from_hk": C, "to_hk": A, "commit_block": 6}], uid)
+        assert out == sorted(self.PAIRS)
+
+    def test_successor_that_is_the_recruit_is_dropped(self):
+        uid = {R1: 10, B: 1}
+        out = scoring.apply_referrer_succession(
+            [(A, R1)], [{"from_hk": A, "to_hk": R1, "commit_block": 5}], uid)
+        assert out == []
+
+    def test_after_transfer(self):
+        # A's base was transferred to C; C then deregistered and re-rolled to D
+        moved = scoring.apply_referral_transfers(
+            self.PAIRS, [{"from_hk": A, "to_hk": C, "commit_block": 100}])
+        out = scoring.apply_referrer_succession(
+            moved, [{"from_hk": C, "to_hk": D, "commit_block": 200}], {B: 1, D: 3})
+        assert (D, R1) in out and (D, R2) in out
+
+    def test_gate_off_before_activation(self):
+        assert not config.referrer_succession_active(
+            config.REFERRER_SUCCESSION_FROM_UNIX - 1)
+        assert config.referrer_succession_active(config.REFERRER_SUCCESSION_FROM_UNIX)
+
+    def test_replay_pays_successor_and_not_before_activation(self):
+        from sn89_signals import replay
+        t = config.REFERRER_SUCCESSION_FROM_UNIX + 10
+        refs = [{"recruiter_hk": A, "recruit_hk": R1, "commit_block": 1,
+                 "recruit_reg_block": 100}]
+        succ = [{"from_hk": A, "to_hk": C, "commit_block": 5}]
+        uid = {C: 7, R1: 10}
+        sigs, meta = [], {}
+        # no recruit tally -> burn either way; the remap itself is what we check
+        w_on = replay.referrer_weights_from_journal(
+            sigs, meta, uid, t, referrals=refs, referrer_successions=succ)
+        assert set(w_on) <= {config.BURN_UID, 7}
+
+
+class TestSuccessionCommitment:
+    OLD = "5HbkgCR1nx7T9vga9ZCCTTadnefMxWhA3vYFSaic7uA8aGQ2"
+    NEW = "5HBg742kVS1KXhKQGJhEMsyNcxatQzpyttipazfqGJSBS98o"
+
+    def test_roundtrip_and_fits_budget(self):
+        data = chain.encode_referrer_succession(self.OLD, self.NEW)
+        assert len(data.encode()) <= 128
+        assert chain.decode_referrer_succession(data) == {"from": self.OLD, "to": self.NEW}
+
+    def test_bad_checksum_dropped(self):
+        bad = self.NEW[:-1] + ("3" if self.NEW[-1] != "3" else "4")
+        assert chain.decode_referrer_succession(f"sn89refs:1:{self.OLD}:{bad}") is None
+
+    def test_self_succession_dropped(self):
+        assert chain.decode_referrer_succession(f"sn89refs:1:{self.OLD}:{self.OLD}") is None
+
+    def test_decode_any_kind(self):
+        d = chain._decode_any(chain.encode_referrer_succession(self.OLD, self.NEW))
+        assert d and d["kind"] == "referrer_succession"
+        assert d["from"] == self.OLD and d["to"] == self.NEW
+
+    def test_not_confused_with_transfer(self):
+        assert chain.decode_referral_transfer(
+            chain.encode_referrer_succession(self.OLD, self.NEW)) is None
+
+
+class TestSuccessionJournal:
+    """Validator journals sn89refs ONLY from the attestor, latest block wins."""
+
+    def _v(self):
+        import importlib.util, pathlib, sqlite3, types
+        path = pathlib.Path(__file__).resolve().parents[1] / "neurons" / "validator.py"
+        spec = importlib.util.spec_from_file_location("_validator_under_test", path)
+        V = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(V)
+        db = sqlite3.connect(":memory:")
+        db.executescript(V.SCHEMA)
+        v = types.SimpleNamespace(db=db)
+        v.j = lambda c, b: V.Validator._journal_referrer_succession(v, c, b, 0.0)
+        return v
+
+    def test_only_attestor_counts(self):
+        v = self._v()
+        v.j({"hotkey": "someone", "from": A, "to": B, "commit_block": 5}, 6)
+        assert v.db.execute("SELECT COUNT(*) FROM referrer_successions").fetchone()[0] == 0
+        v.j({"hotkey": config.SUCCESSION_ATTESTOR_HK, "from": A, "to": B,
+             "commit_block": 5}, 6)
+        assert v.db.execute("SELECT from_hk, to_hk, commit_block FROM "
+                            "referrer_successions").fetchall() == [(A, B, 5)]
+
+    def test_reattest_moves_block_forward_only(self):
+        v = self._v()
+        at = config.SUCCESSION_ATTESTOR_HK
+        v.j({"hotkey": at, "from": A, "to": B, "commit_block": 5}, 6)
+        v.j({"hotkey": at, "from": A, "to": C, "commit_block": 7}, 8)
+        v.j({"hotkey": at, "from": A, "to": B, "commit_block": 9}, 10)
+        v.j({"hotkey": at, "from": A, "to": B, "commit_block": 3}, 11)   # stale replay
+        rows = dict(((f, t), cb) for f, t, cb in v.db.execute(
+            "SELECT from_hk, to_hk, commit_block FROM referrer_successions"))
+        assert rows == {(A, B): 9, (A, C): 7}
+        succ = [{"from_hk": f, "to_hk": t, "commit_block": cb}
+                for (f, t), cb in rows.items()]
+        assert scoring.apply_referrer_succession([(A, R1)], succ, {B: 1, C: 2}) == [(B, R1)]
