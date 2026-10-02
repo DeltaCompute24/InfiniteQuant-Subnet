@@ -62,9 +62,13 @@ def commit(ch, w, frm: str, to: str) -> bool:
     if to not in set(ch.metagraph().hotkeys):
         print(f"  ✗ {to[:8]}… holds no UID on {config.NETUID} — not attesting")
         return False
-    ok = ch.commit_referrer_succession(w, frm, to)
-    print(f"  {'⇢' if ok else '✗'} sn89refs {frm[:8]}… → {to[:8]}… submitted={ok}")
-    return bool(ok)
+    resp = ch.commit_referrer_succession(w, frm, to)
+    # SDK 10 returns an ExtrinsicResponse (truthy object); older SDKs a bool.
+    ok = bool(getattr(resp, "success", resp))
+    msg = getattr(resp, "message", "") or ""
+    print(f"  {'⇢' if ok else '✗'} sn89refs {frm[:8]}… → {to[:8]}… submitted={ok}"
+          + (f" ({str(msg)[:120]})" if msg and not ok else ""))
+    return ok
 
 
 def drain(args, ch, w) -> int:
