@@ -876,7 +876,8 @@ def compute_weights(states: list[MinerState], now_unix: float,
                     excluded_uids: set[int] | None = None,
                     referral_pairs: list[tuple[str, str]] | None = None,
                     referral_suspended: set[str] | None = None,
-                    use_points: bool | None = None) -> dict[int, float]:
+                    use_points: bool | None = None,
+                    probation_only: list[MinerState] | None = None) -> dict[int, float]:
     """{uid: normalized_weight}. Immune miners get the dust floor; the pool is
     split across miners by a time-decayed, tier-weighted tally of their QUALIFIED
     wins (a relative competition of recent qualified wins); a probation dust floor
@@ -916,6 +917,14 @@ def compute_weights(states: list[MinerState], now_unix: float,
 
     Eliminated hotkeys must be filtered out by the caller before this — they get
     nothing, not dust.
+
+    probation_only: miners a caller's own gate is holding at zero (HF diversity,
+    config.HF_GATED_PROBATION_FROM). They are seen by the probation floor and by
+    nothing else — no tally, no referral, no wash-debt standing, no pro-rata share —
+    so every other miner's weight is unchanged except for the dust they take out
+    of the pool. Unlike `states`, a live tally does not delay their floor: the gate
+    already holds their earning at zero, so the floor runs from the end of warmup
+    to the same close an ungated miner's probation would have.
     """
     excluded_uids = excluded_uids or set()
     weights: dict[int, float] = {}
@@ -980,6 +989,17 @@ def compute_weights(states: list[MinerState], now_unix: float,
             earn_close = (last_qwin + config.EMISSION_DECAY_S) if last_qwin else warmup_end
             anchor = max(warmup_end, earn_close)
             if 0.0 <= now_unix - anchor < config.PROBATION_S:
+                weights[s.uid] = config.DUST_WEIGHT
+        for s in probation_only or ():
+            if s.uid in excluded_uids or s.uid in weights:
+                continue
+            last_qwin = max((t0 for t0, _ in s.qwins), default=0.0)
+            if not (last_qwin or _qualifies(s.rep_wins, s.rep_decisive)):
+                continue                                     # never qualified → no floor
+            warmup_end = s.first_seen_unix + config.IMMUNITY_S
+            earn_close = (last_qwin + config.EMISSION_DECAY_S) if last_qwin else warmup_end
+            anchor = max(warmup_end, earn_close)
+            if now_unix >= warmup_end and now_unix - anchor < config.PROBATION_S:
                 weights[s.uid] = config.DUST_WEIGHT
 
     # ── referral bonus (§ referral) — from BASE tallies only, never boosted ones ─

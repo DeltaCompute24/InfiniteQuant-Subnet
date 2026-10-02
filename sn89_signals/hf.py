@@ -1764,6 +1764,8 @@ def hf_compute_weights(decisive_by_hk: dict, first_seen_by_hk: dict,
 
     with hf_scoring_config(now):
         states = []
+        blocked = []                             # diversity-held: probation floor only
+        gated_probation = config.hf_gated_probation_as_of(now)
         for hk, decisive in decisive_by_hk.items():
             uid = uid_by_hk.get(hk)
             if uid is None:
@@ -1772,7 +1774,8 @@ def hf_compute_weights(decisive_by_hk: dict, first_seen_by_hk: dict,
             eligible = hf_eligible_from(subs)
             if eligible is None:
                 continue                         # < 50 subs or < 8 trading days → no weight
-            if not hf_diversity_ok(subs, now):
+            div_ok = hf_diversity_ok(subs, now)
+            if not div_ok and not gated_probation:
                 continue                         # one-sided on a narrow universe → no weight
             # Owner-hosted integrity verdict. ADDITIVE to the gate above, deliberately:
             # the published floor stays exactly where it is, so a miner tuning to clear it
@@ -1793,13 +1796,16 @@ def hf_compute_weights(decisive_by_hk: dict, first_seen_by_hk: dict,
             qcalls = scoring.qualified_calls(
                 decisive, eligible, habitual=False, sigma_for=_board_sigma_for,
                 prior=(prior_by_hk or {}).get(hk), prior_sigma_for=prior_sigma_for)
-            states.append(scoring.MinerState(
+            # A diversity-failing miner earns nothing (the gate still holds), but from
+            # HF_GATED_PROBATION_FROM it keeps the probation dust instead of being
+            # dropped where the floor cannot see it.
+            (states if div_ok else blocked).append(scoring.MinerState(
                 hotkey=hk, uid=uid, first_seen_unix=eligible,
                 rep_wins=rep_won, rep_decisive=rep_dec, trailing_wins=won_all,
                 qwins=qwins, qcalls=qcalls,
                 wash_hist=_wash_hist((washes_by_hk or {}).get(hk)),
                 wash_resolved=_wash_resolved((washes_by_hk or {}).get(hk), now)))
-        return scoring.compute_weights(states, now)
+        return scoring.compute_weights(states, now, probation_only=blocked)
 
 
 def _board_sigma_for(pair: str, t0_unix: float) -> float:

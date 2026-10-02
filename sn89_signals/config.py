@@ -666,6 +666,25 @@ DUST_WEIGHT = 1e-4                  # normalized floor during immunity
 # clock runs from the close of the miner's earning window (last post-warmup win +
 # EMISSION_DECAY_S), or from warmup end if it has no post-warmup win. 0 disables.
 PROBATION_S = int(os.getenv("SN89_PROBATION_S", str(30 * 24 * 3600)))
+# HF probation for miners the DIVERSITY gate holds at zero. hf_compute_weights used
+# to drop a diversity-failing miner before compute_weights, so it never reached the
+# probation floor above: a qualified HF miner that slipped under the both-sides floor
+# went straight to zero weight and could be pruned within a day. 5HaxM3Fj (UID 109)
+# was paid HF for one tempo on 2026-09-28, failed diversity at 20.2% vs 24.6%, and
+# was recycled on 2026-10-02 with 36 qualified wins on its record.
+#
+# From this stamp a diversity-blocked miner is passed to compute_weights as
+# probation-only: it earns NO pro-rata share (the gate still holds its earning at
+# zero) but keeps DUST_WEIGHT until the same window an ungated miner's probation
+# would close (last qualified win + EMISSION_DECAY_S + PROBATION_S). Eligibility and
+# integrity failures still get nothing. As-of by the weight cycle's clock, so a
+# replay before the stamp reproduces the old vectors byte for byte.
+HF_GATED_PROBATION_FROM = int(os.getenv("SN89_HF_GATED_PROBATION_FROM", "1790956800"))  # 2026-10-02T16:00:00Z
+
+
+def hf_gated_probation_as_of(now_unix: float) -> bool:
+    """Whether a diversity-blocked HF miner keeps the probation dust floor."""
+    return bool(HF_GATED_PROBATION_FROM and now_unix >= HF_GATED_PROBATION_FROM)
 BURN_UID = 0                        # absorbs weight when nobody qualifies
 # Miner emission cap (Mantis-sn123-style). The field of real miners collectively
 # receives at most this fraction of the total incentive weight; the remainder
