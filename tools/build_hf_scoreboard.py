@@ -380,10 +380,19 @@ def _grades():
             # miner called. A pre-v5 cache has no such table; fall back so the page
             # still renders rather than 500s mid-upgrade.
             try:
-                subs_rows = list(c.execute(
-                    "SELECT hk, t0_ms, pair, direction FROM submissions"))
+                # horizon_s rides along because hf_diversity_floor scales with
+                # the mean declared horizon. Without it the board quoted the base
+                # floor while the validator gated on the horizon-scaled one, so a
+                # miner read "both sides ✓, earning" at zero chain weight and was
+                # pruned (5HaxM3Fj, 2026-10-02: 20.2% vs 20.0% shown, 24.6% applied).
+                try:
+                    subs_rows = list(c.execute(
+                        "SELECT hk, t0_ms, pair, direction, horizon_s FROM submissions"))
+                except sqlite3.Error:     # pre-horizon cache: keep pair/direction
+                    subs_rows = list(c.execute(
+                        "SELECT hk, t0_ms, pair, direction, NULL FROM submissions"))
             except sqlite3.Error:
-                subs_rows = [(hk, t, None, None) for hk, t, _ in rows]
+                subs_rows = [(hk, t, None, None, None) for hk, t, _ in rows]
             held = {k: v for k, v in c.execute(
                 "SELECT key, open_until_ms FROM grades WHERE open_until_ms IS NOT NULL")}
             c.close()
@@ -525,13 +534,14 @@ def _identity():
 
 
 def _submissions_by_hk(grades_rows) -> dict:
-    """hotkey -> [(t0_ms, pair, direction) of every resolved submission]
+    """hotkey -> [(t0_ms, pair, direction, horizon_s) of every resolved submission]
     (won/lost/wash/void), the accepted-submission set the HF gates count.
     Resolved-only and in the same tuple shape, so it matches the validator's own
-    source exactly (hf_grade._history) and both gates read identical input."""
+    source exactly (hf_grade._history) and both gates read identical input.
+    horizon_s is element 3 there too; dropping it lowers the diversity floor."""
     subs: dict = {}
-    for hk, t0_ms, pair, direction in grades_rows:
-        subs.setdefault(hk, []).append((int(t0_ms), pair, direction))
+    for hk, t0_ms, pair, direction, horizon_s in grades_rows:
+        subs.setdefault(hk, []).append((int(t0_ms), pair, direction, horizon_s))
     return subs
 
 
