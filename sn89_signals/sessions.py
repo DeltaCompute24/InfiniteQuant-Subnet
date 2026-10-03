@@ -26,7 +26,9 @@ _FX_WEEK_BOUNDARY_NY_HOUR = 17
 
 # Asset classes that observe the FX session calendar. Crypto is absent on
 # purpose: it has no close, so no dead horizon can exist.
-SESSION_BOUND_CLASSES = ("forex", "forex-commodities")
+# equities/indices/commodities (HL builder-dex perps, HF-universe v6): they print 24/7
+# but are 20-80% flat 5m bars at the weekend, so a weekend call is a dead horizon.
+SESSION_BOUND_CLASSES = ("forex", "forex-commodities", "equities", "indices", "commodities")
 
 
 def _nth_sunday(year: int, month: int, n: int) -> int:

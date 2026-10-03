@@ -114,6 +114,29 @@ HF_TYPICAL_SPREAD_BPS = {
     "ENAUSD": 2.158,
     "ZROUSD": 2.888,
     "KPEPEUSD": 3.009,
+    # Added 2026-10-03 for the v6 Hyperliquid-universe listing (HF_BOARD_V6). p75 of the quoted
+    # spread over 337 hourly-sampled sealed testnet-recorder windows, 2026-09-18..10-02 (14 d).
+    # Non-crypto pairs take the WORSE of the US-cash-session and weekday-overnight p75, because
+    # they are graded only while the FX-week calendar is open (see HF_BOARD_V6).
+    "XYZ100USD": 0.332,
+    "MUUSD": 0.973,
+    "SP500USD": 0.131,
+    "WTIUSD": 0.725,
+    "PUMPUSD": 2.56,
+    "SNDKUSD": 0.594,
+    "XAGUSD": 0.597,
+    "NVDAUSD": 0.867,
+    "WLDUSD": 1.925,
+    "TSLAUSD": 0.848,
+    "METAUSD": 1.199,
+    "CRCLUSD": 1.982,
+    "INTCUSD": 1.656,
+    "MSTRUSD": 1.857,
+    "MRVLUSD": 1.928,
+    "EWYUSD": 1.585,
+    "AMDUSD": 1.625,
+    "COINUSD": 2.148,
+    "ASTERUSD": 2.438,
 }
 MIN_BAND_SPREAD_RATIO = 8.0
 
@@ -255,12 +278,60 @@ HF_BOARD_V5.update({
 })
 HF_V5_FROM = int(os.getenv("SN89_HF_V5_FROM", "1789948800"))   # 2026-09-21T00:00:00Z
 
+# v6 -- the Hyperliquid-universe listing (Whit, 2026-10-03): every HL perp that is ALSO
+# tradeable on Vanta/SN8, where calls are monetized, with >= $2M 24h volume AND >= $2M open
+# interest, that clears the spread gate below: 3 crypto perps plus 16 HIP-3 markets on
+# trade.xyz (equities, indices, WTI, silver). All grade on the hyperliquid-ws line the bus
+# records. 38 more HL perps clear the same gate with no Vanta pair and are NOT listed
+# (BRENT among them: Vanta does not carry it).
+#
+# PROVISIONAL BANDS. HL serves only the last 5,000 candles, so 1m history is ~3.5 days and
+# no 45-day 1m window exists for these coins. Each band is recalibrate_bands.py's solver
+# (14% structural-wash target) run on ~17 days of HL 5m candles, then scaled by the median
+# listed/solved ratio of the 21 cryptoalts21 pairs solved on the SAME candles (1800s: 0.817,
+# 7200s: 0.615). The 21 controls individually sit at 0.58-1.81x that median, so read any
+# single band as +/-40%. Re-solve every pair on recalibrate_bands.py once the corpus holds
+# 45 days, and expect the deadband to move some of them.
+#
+# Non-crypto (equities, indices, commodities, metals) is solved on entries where the FX-week
+# calendar is open at t0 AND at t0+H. HL equity and metal perps print 24/7 but are 20-80%
+# flat 5m bars at the weekend (NVDA weekend median 5m range 1.3 bps vs 14.0 in US cash
+# hours), so an all-hours solve collapses the band to the weekend's non-movement.
+#
+# Gate: band >= 8.0x the measured spread on the p75 AND the p90 (fxpoll3 / v5 standard);
+# 1800s when it clears there, else 7200s, else HELD. Vanta pairs HELD on the gate: AAPL MSFT
+# AMZN GOOGL HOOD ORCL PLTR SPCX COPPER NATGAS PLATINUM.
+HF_BOARD_V6 = dict(HF_BOARD_V5)
+HF_BOARD_V6.update({
+    "XYZ100USD": (8.4, 8.4, 7200, "indices"),
+    "MUUSD": (21.3, 21.3, 7200, "equities"),
+    "SP500USD": (4.8, 4.8, 7200, "indices"),
+    "WTIUSD": (14.6, 14.6, 1800, "commodities"),
+    "PUMPUSD": (47.1, 47.1, 1800, "crypto"),
+    "SNDKUSD": (13.7, 13.7, 1800, "equities"),
+    "XAGUSD": (11.0, 11.0, 1800, "forex-commodities"),
+    "NVDAUSD": (11.1, 11.1, 7200, "equities"),
+    "WLDUSD": (42.6, 42.6, 1800, "crypto"),
+    "TSLAUSD": (10.9, 10.9, 7200, "equities"),
+    "METAUSD": (14.7, 14.7, 7200, "equities"),
+    "CRCLUSD": (32.1, 32.1, 7200, "equities"),
+    "INTCUSD": (15.4, 15.4, 1800, "equities"),
+    "MSTRUSD": (34.4, 34.4, 7200, "equities"),
+    "MRVLUSD": (26.5, 26.5, 7200, "equities"),
+    "EWYUSD": (18.5, 18.5, 7200, "indices"),
+    "AMDUSD": (21.8, 21.8, 7200, "equities"),
+    "COINUSD": (26.3, 26.3, 7200, "equities"),
+    "ASTERUSD": (38.5, 38.5, 7200, "crypto"),
+})
+HF_V6_FROM = int(os.getenv("SN89_HF_V6_FROM", "1791331200"))   # 2026-10-07T00:00:00Z
+
 HF_BANDS_HISTORY = (
     (HF_LAUNCH_FROM, HF_BOARD_V1),
     (HF_V2_FROM, HF_BOARD_V2),
     (HF_V3_FROM, HF_BOARD_V3),
     (HF_V4_FROM, HF_BOARD_V4),
     (HF_V5_FROM, HF_BOARD_V5),
+    (HF_V6_FROM, HF_BOARD_V6),
 )
 
 

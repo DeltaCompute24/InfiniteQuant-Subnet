@@ -1230,5 +1230,262 @@
     "tp_bps": 203
    }
   }
+ },
+ {
+  "version": "hluniverse-20261007",
+  "effective_from_unix": 1791331200,
+  "note": "Lists 18 Hyperliquid perps that are also tradeable on Vanta/SN8, effective 2026-10-07T00:00:00Z (Whit, 2026-10-03): 3 crypto perps (PUMP WLD ASTER) and 15 HIP-3 markets on trade.xyz (equities, indices, WTI), each with >= $2M 24h volume and OI and clearing the HF spread gate. PROVISIONAL: LF target 40% structural wash at 8h, solved on recalibrate_bands.py's rule over ~17 days of HL 5m candles (HL keeps 5,000 candles; no 45d 1m window exists) and scaled by the median listed/solved ratio of the 21 cryptoalts21 pairs on the same candles (0.768). Non-crypto solved on FX-week-open entries only. New classes equities/indices/commodities are 8h and session-bound (config.py, sessions.py). Existing pairs unchanged. HF lists the same 18 plus XAGUSD in HF_BOARD_V6.",
+  "bands": {
+   "BTCUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 105,
+    "tp_bps": 105
+   },
+   "ETHUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 138,
+    "tp_bps": 138
+   },
+   "SOLUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 134,
+    "tp_bps": 134
+   },
+   "XRPUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 123,
+    "tp_bps": 123
+   },
+   "XAUUSD": {
+    "asset_class": "forex-commodities",
+    "sl_bps": 96,
+    "tp_bps": 96
+   },
+   "XAGUSD": {
+    "asset_class": "forex-commodities",
+    "sl_bps": 195,
+    "tp_bps": 195
+   },
+   "USDCAD": {
+    "asset_class": "forex",
+    "sl_bps": 17,
+    "tp_bps": 17
+   },
+   "AUDUSD": {
+    "asset_class": "forex",
+    "sl_bps": 28,
+    "tp_bps": 28
+   },
+   "TAOUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 165,
+    "tp_bps": 165
+   },
+   "HYPEUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 184,
+    "tp_bps": 184
+   },
+   "EURUSD": {
+    "asset_class": "forex",
+    "sl_bps": 17,
+    "tp_bps": 17
+   },
+   "BNBUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 94,
+    "tp_bps": 94
+   },
+   "DOGEUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 133,
+    "tp_bps": 133
+   },
+   "ADAUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 195,
+    "tp_bps": 195
+   },
+   "AVAXUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 150,
+    "tp_bps": 150
+   },
+   "LINKUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 163,
+    "tp_bps": 163
+   },
+   "DOTUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 186,
+    "tp_bps": 186
+   },
+   "TRXUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 51,
+    "tp_bps": 51
+   },
+   "LTCUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 121,
+    "tp_bps": 121
+   },
+   "BCHUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 151,
+    "tp_bps": 151
+   },
+   "SUIUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 176,
+    "tp_bps": 176
+   },
+   "ARBUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 311,
+    "tp_bps": 311
+   },
+   "NEARUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 257,
+    "tp_bps": 257
+   },
+   "ALGOUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 199,
+    "tp_bps": 199
+   },
+   "UNIUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 280,
+    "tp_bps": 280
+   },
+   "AAVEUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 184,
+    "tp_bps": 184
+   },
+   "CRVUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 294,
+    "tp_bps": 294
+   },
+   "XMRUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 216,
+    "tp_bps": 216
+   },
+   "ZECUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 298,
+    "tp_bps": 298
+   },
+   "ENAUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 295,
+    "tp_bps": 295
+   },
+   "ZROUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 317,
+    "tp_bps": 317
+   },
+   "KPEPEUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 203,
+    "tp_bps": 203
+   },
+   "XYZ100USD": {
+    "asset_class": "indices",
+    "sl_bps": 43,
+    "tp_bps": 43
+   },
+   "MUUSD": {
+    "asset_class": "equities",
+    "sl_bps": 102,
+    "tp_bps": 102
+   },
+   "SP500USD": {
+    "asset_class": "indices",
+    "sl_bps": 26,
+    "tp_bps": 26
+   },
+   "WTIUSD": {
+    "asset_class": "commodities",
+    "sl_bps": 125,
+    "tp_bps": 125
+   },
+   "PUMPUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 328,
+    "tp_bps": 328
+   },
+   "SNDKUSD": {
+    "asset_class": "equities",
+    "sl_bps": 127,
+    "tp_bps": 127
+   },
+   "NVDAUSD": {
+    "asset_class": "equities",
+    "sl_bps": 62,
+    "tp_bps": 62
+   },
+   "WLDUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 280,
+    "tp_bps": 280
+   },
+   "TSLAUSD": {
+    "asset_class": "equities",
+    "sl_bps": 65,
+    "tp_bps": 65
+   },
+   "METAUSD": {
+    "asset_class": "equities",
+    "sl_bps": 90,
+    "tp_bps": 90
+   },
+   "CRCLUSD": {
+    "asset_class": "equities",
+    "sl_bps": 174,
+    "tp_bps": 174
+   },
+   "INTCUSD": {
+    "asset_class": "equities",
+    "sl_bps": 164,
+    "tp_bps": 164
+   },
+   "MSTRUSD": {
+    "asset_class": "equities",
+    "sl_bps": 177,
+    "tp_bps": 177
+   },
+   "MRVLUSD": {
+    "asset_class": "equities",
+    "sl_bps": 141,
+    "tp_bps": 141
+   },
+   "EWYUSD": {
+    "asset_class": "indices",
+    "sl_bps": 90,
+    "tp_bps": 90
+   },
+   "AMDUSD": {
+    "asset_class": "equities",
+    "sl_bps": 114,
+    "tp_bps": 114
+   },
+   "COINUSD": {
+    "asset_class": "equities",
+    "sl_bps": 143,
+    "tp_bps": 143
+   },
+   "ASTERUSD": {
+    "asset_class": "crypto",
+    "sl_bps": 146,
+    "tp_bps": 146
+   }
+  }
  }
 ]

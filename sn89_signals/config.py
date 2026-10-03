@@ -130,7 +130,12 @@ CLASS_HORIZON_H = {
     "crypto": 8,
     "forex": 12,
     "forex-commodities": 12,   # metals (XAU/XAG/XPT/XPD)
-    "equities": 48,
+    # 48 h was never used by a listed pair. The first equities listing (HF-universe v6,
+    # 2026-10-07) grades HL equity perps, 24/5 under the FX-week calendar, so it takes
+    # the crypto clock. indices + commodities are the same HL builder-dex markets.
+    "equities": 8,
+    "indices": 8,
+    "commodities": 8,
 }
 
 
