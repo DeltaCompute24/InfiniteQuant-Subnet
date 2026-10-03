@@ -292,6 +292,11 @@ CAUSAL_QWIN_FROM = int(os.getenv("SN89_CAUSAL_QWIN_FROM", "1787338800"))  # 2026
 # Armed per-network from the environment (.env.test only, for now), the same way
 # SN89_COMBINED_WEIGHTS_FROM is.
 HF_CUSTOM_BANDS_FROM = int(os.getenv("SN89_HF_CUSTOM_BANDS_FROM", "0"))
+# End of the custom-band window. 0 = no end. Calls at t0 >= UNTIL are graded on
+# board equality again, while calls inside [FROM, UNTIL) keep their custom-band
+# grades, so replay of the beta is unchanged. Unsetting FROM instead would
+# re-grade every past custom-band call as a band mismatch. Armed from .env.test.
+HF_CUSTOM_BANDS_UNTIL = int(os.getenv("SN89_HF_CUSTOM_BANDS_UNTIL", "0"))
 
 # Envelope for a miner-declared band, checked when the stamp is armed. The board
 # stops being an equality test and becomes a bound: a band still has to clear
@@ -414,7 +419,9 @@ def custom_bands_enforced_as_of(t0_unix: float) -> bool:
     unaffected on every chain: before the stamp, board equality is the rule
     exactly as it always was.
     """
-    return bool(HF_CUSTOM_BANDS_FROM and t0_unix >= HF_CUSTOM_BANDS_FROM)
+    if not (HF_CUSTOM_BANDS_FROM and t0_unix >= HF_CUSTOM_BANDS_FROM):
+        return False
+    return not (HF_CUSTOM_BANDS_UNTIL and t0_unix >= HF_CUSTOM_BANDS_UNTIL)
 
 
 def causal_qwin_enforced_as_of(t0_unix: float) -> bool:
