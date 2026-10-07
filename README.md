@@ -62,9 +62,14 @@ your weight ∝ (your qualified wins × tier, each decaying linearly to 0 over 7
 
 | Class | Pairs |
 |---|---|
-| Crypto | BTCUSD · ETHUSD · SOLUSD · XRPUSD · TAOUSD · HYPEUSD · BNBUSD · DOGEUSD · ADAUSD · AVAXUSD · LINKUSD · DOTUSD · TRXUSD · LTCUSD · BCHUSD · SUIUSD · ARBUSD · NEARUSD · ALGOUSD · UNIUSD · AAVEUSD · CRVUSD · XMRUSD · ZECUSD · ENAUSD · ZROUSD · KPEPEUSD |
+| Crypto | BTCUSD · ETHUSD · SOLUSD · XRPUSD · TAOUSD · HYPEUSD · BNBUSD · DOGEUSD · ADAUSD · AVAXUSD · LINKUSD · DOTUSD · TRXUSD · LTCUSD · BCHUSD · SUIUSD · ARBUSD · NEARUSD · ALGOUSD · UNIUSD · AAVEUSD · CRVUSD · XMRUSD · ZECUSD · ENAUSD · ZROUSD · KPEPEUSD · PUMPUSD · WLDUSD · ASTERUSD |
 | Metals | XAUUSD · XAGUSD |
 | Forex | AUDUSD · EURUSD · USDCAD |
+| Stocks | NVDAUSD · TSLAUSD · METAUSD · AMDUSD · COINUSD · MSTRUSD · INTCUSD · MUUSD · SNDKUSD · CRCLUSD · MRVLUSD |
+| Indices | SP500USD · XYZ100USD · EWYUSD |
+| Commodities | WTIUSD |
+
+Stocks, indices and WTI (listed 2026-10-07, `hluniverse-20261007`) are Hyperliquid perps on trade.xyz, graded off Hyperliquid prices with an 8h horizon. Like forex they follow the FX-week calendar: a call made while that week is closed is void.
 
 Bands are per-asset, volatility-scaled, symmetric 1:1. A signal is graded against the band in force **at its commit block** (`data/signals-bands.json` + `data/signals-bands-history.json`) — a band update never changes an in-flight signal.
 
@@ -238,6 +243,10 @@ series — the alias table is committed in
 | AUDUSD | ±8.4 bps | 120 min |
 | TAOUSD | ±53.1 bps | 120 min |
 | HYPEUSD | ±62.6 bps | 120 min |
+| PUMPUSD ±47.1 · WLDUSD ±42.6 · WTIUSD ±14.6 · INTCUSD ±15.4 · SNDKUSD ±13.7 · XAGUSD ±11.0 | bps | 30 min |
+| ASTERUSD ±38.5 · MSTRUSD ±34.4 · CRCLUSD ±32.1 · MRVLUSD ±26.5 · COINUSD ±26.3 · AMDUSD ±21.8 · MUUSD ±21.3 · EWYUSD ±18.5 · METAUSD ±14.7 · NVDAUSD ±11.1 · TSLAUSD ±10.9 · XYZ100USD ±8.4 · SP500USD ±4.8 | bps | 120 min |
+
+The last two rows are `HF_BOARD_V6` (from 2026-10-07). The crypto alts listed on LF in September are also on the HF board; the live board link below is the complete list.
 
 Fewer pairs than LF by design: a pair is listed only if its band clears ≈8× the
 typical spread at the HF horizon — below that the outcome is microstructure, not
