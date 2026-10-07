@@ -1,7 +1,7 @@
 {
- "version": "cryptoalts21-20260921",
+ "version": "hluniverse-20261007",
  "vol_window_days": 30,
- "note": "Lists 21 crypto alts, effective 2026-09-21T00:00:00Z, matching history entry cryptoalts21-20260921: BNB DOGE ADA AVAX LINK DOT TRX LTC BCH SUI ARB NEAR ALGO UNI AAVE CRV XMR ZEC ENA ZRO KPEPE. LF target 40% structural wash, 8h, 45d window 2026-08-04..2026-09-18. Existing pairs unchanged. Values are copied from the history entry in force, never recomputed here. HF lists the same 21 in HF_BOARD_V5 (17 at 1800s; DOT BCH ARB ALGO at 7200s).",
+ "note": "Lists 18 Vanta-tradeable Hyperliquid perps, effective 2026-10-07T00:00:00Z, matching history entry hluniverse-20261007. Values are copied from the history entry in force, never recomputed here.",
  "bands": {
   "BTCUSD": {
    "asset_class": "crypto",
@@ -162,6 +162,96 @@
    "asset_class": "crypto",
    "sl_bps": 203,
    "tp_bps": 203
+  },
+  "XYZ100USD": {
+   "asset_class": "indices",
+   "sl_bps": 43,
+   "tp_bps": 43
+  },
+  "MUUSD": {
+   "asset_class": "equities",
+   "sl_bps": 102,
+   "tp_bps": 102
+  },
+  "SP500USD": {
+   "asset_class": "indices",
+   "sl_bps": 26,
+   "tp_bps": 26
+  },
+  "WTIUSD": {
+   "asset_class": "commodities",
+   "sl_bps": 125,
+   "tp_bps": 125
+  },
+  "PUMPUSD": {
+   "asset_class": "crypto",
+   "sl_bps": 328,
+   "tp_bps": 328
+  },
+  "SNDKUSD": {
+   "asset_class": "equities",
+   "sl_bps": 127,
+   "tp_bps": 127
+  },
+  "NVDAUSD": {
+   "asset_class": "equities",
+   "sl_bps": 62,
+   "tp_bps": 62
+  },
+  "WLDUSD": {
+   "asset_class": "crypto",
+   "sl_bps": 280,
+   "tp_bps": 280
+  },
+  "TSLAUSD": {
+   "asset_class": "equities",
+   "sl_bps": 65,
+   "tp_bps": 65
+  },
+  "METAUSD": {
+   "asset_class": "equities",
+   "sl_bps": 90,
+   "tp_bps": 90
+  },
+  "CRCLUSD": {
+   "asset_class": "equities",
+   "sl_bps": 174,
+   "tp_bps": 174
+  },
+  "INTCUSD": {
+   "asset_class": "equities",
+   "sl_bps": 164,
+   "tp_bps": 164
+  },
+  "MSTRUSD": {
+   "asset_class": "equities",
+   "sl_bps": 177,
+   "tp_bps": 177
+  },
+  "MRVLUSD": {
+   "asset_class": "equities",
+   "sl_bps": 141,
+   "tp_bps": 141
+  },
+  "EWYUSD": {
+   "asset_class": "indices",
+   "sl_bps": 90,
+   "tp_bps": 90
+  },
+  "AMDUSD": {
+   "asset_class": "equities",
+   "sl_bps": 114,
+   "tp_bps": 114
+  },
+  "COINUSD": {
+   "asset_class": "equities",
+   "sl_bps": 143,
+   "tp_bps": 143
+  },
+  "ASTERUSD": {
+   "asset_class": "crypto",
+   "sl_bps": 146,
+   "tp_bps": 146
   }
  },
  "refreshed_at": "2026-07-21T18:45:00Z"
