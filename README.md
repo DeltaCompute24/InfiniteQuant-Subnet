@@ -325,7 +325,13 @@ Nothing here is live on mainnet.
 - **Betting.** Send a signed HF frame whose payload is
   `{"kind": "mk.bet", "market_id", "trade_pair", "side": "UP"|"DOWN", "dollars": "10.00",
   "account"}`. `account` is your hotkey, or `<your hotkey>_<n>` for a subaccount you hold.
-  Entries are open from the window's start until 60 seconds before it ends.
+- **When you can bet.** Bets are forecasts made before the window starts. A market opens one
+  window before its start (the next window is the one you bet on) and closes 60 seconds before
+  its start, before the target's averaging minute begins. Nothing is accepted once the window is
+  running, or during that last minute. The ingest checks this on the millisecond it received
+  your bet; validators re-check it on the microsecond time in your signed receipt. A bet within
+  a millisecond of a boundary can pass one check and fail the other, and the validators' replay
+  decides.
 - **Pricing.** Each market is an LMSR (liquidity $100). Bets are priced in the order the ingest
   received them, so the price you pay depends on the bets before yours. Anyone can recompute
   every price from the published windows: `sn89_signals/markets.py`.

@@ -111,8 +111,8 @@ def test_unarmed_network_refuses_every_bet():
 
 def test_bet_validity_rules(armed):
     s = _start()
-    markets.validate_bet(_payload(s), ENTITY, s + 10)
-    markets.validate_bet(_payload(s, account=ENTITY), ENTITY, s + 10)          # direct miner
+    markets.validate_bet(_payload(s), ENTITY, s - 300)
+    markets.validate_bet(_payload(s, account=ENTITY), ENTITY, s - 300)         # direct miner
     from bittensor_wallet import Keypair
     other = Keypair.create_from_uri("//SomeoneElse").ss58_address
     bad = [(_payload(s, account=f"{other}_1"), "account_not_signer"),
@@ -124,11 +124,43 @@ def test_bet_validity_rules(armed):
            ({**_payload(s), "trade_pair": "ETHUSD"}, "trade_pair_mismatch")]
     for p, why in bad:
         with pytest.raises(hf.HFRejected, match=why):
-            markets.validate_bet(p, ENTITY, s + 10)
-    with pytest.raises(hf.HFRejected, match="market_not_open"):
-        markets.validate_bet(_payload(s), ENTITY, s - 1)
-    with pytest.raises(hf.HFRejected, match="market_closed"):
-        markets.validate_bet(_payload(s), ENTITY, s + 900 - 60)
+            markets.validate_bet(p, ENTITY, s - 300)
+
+
+def test_entry_window_is_before_the_start_and_closes_before_the_averaging_minute(armed):
+    """Every bet is a pure forecast: open one window before the start, closed from start - 60 s."""
+    s = _start()
+    assert markets.entry_interval(markets.market_id("BTCUSD", "15m", s)) == (s - 900, s - 60)
+    assert markets.entry_interval(markets.market_id("BTCUSD", "1h", s // 3600 * 3600)) == \
+        (s // 3600 * 3600 - 3600, s // 3600 * 3600 - 60)
+    markets.validate_bet(_payload(s), ENTITY, s - 900)                         # opens inclusive
+    markets.validate_bet(_payload(s), ENTITY, s - 61)                          # last full second counts
+    for t, why in [(s - 901, "market_not_open"), (s - 59, "market_closed"), (s - 60, "market_closed"),
+                   (s, "market_closed"), (s + 10, "market_closed"), (s + 899, "market_closed")]:
+        with pytest.raises(hf.HFRejected, match=why):
+            markets.validate_bet(_payload(s), ENTITY, t)
+
+
+def test_replay_skips_bets_outside_the_entry_window(armed, tmp_path):
+    """Replay decides: a bet stored by a lenient ingest is still skipped if it is outside the window."""
+    s = _start(); e = s + 900
+    mid = markets.market_id("BTCUSD", "15m", s)
+    db = markets._db(str(tmp_path))
+    rows = [("ok", s - 61), ("late", s - 59), ("during", s + 10), ("early", s - 901)]
+    for i, (k, t) in enumerate(rows):
+        db.execute("INSERT INTO bets VALUES (?,?,?,?,?,?,?,?,?)",
+                   (k, mid, f"{ENTITY}_1", "UP", "10.00", (t * 1000) // 180_000 * 180_000, t * 1_000_000, ENTITY, i))
+    markets.grade_market(db, mid, _ticks(s, e, 100.0, 101.0))
+    st = dict(db.execute("SELECT key, status FROM results").fetchall())
+    assert st == {"ok": "ok", "late": "ignored:outside_entry_window",
+                  "during": "ignored:outside_entry_window", "early": "ignored:outside_entry_window"}
+    pnl = dict(db.execute("SELECT key, pnl FROM results").fetchall())
+    assert Decimal(pnl["ok"]) > 0 and all(Decimal(pnl[k]) == 0 for k in ("late", "during", "early"))
+    # and the ingest-side re-check never stores them in the first place
+    db2 = markets._db(str(tmp_path / "b"))
+    stored = markets.ingest_entries(db2, s * 1000, [
+        _entry(0, t * 1_000_000, i + 1, _payload(s)) for i, (_k, t) in enumerate(rows)])
+    assert stored == 1
 
 
 # ── scoring ──────────────────────────────────────────────────────────────────
@@ -164,7 +196,7 @@ def _entry(w, t_us, seq, payload):
 def test_rebuild_from_scratch_matches_incremental(armed, tmp_path):
     s = _start(); e = s + 900
     mid = markets.market_id("BTCUSD", "15m", s)
-    entries = [_entry(s * 1000, (s + 10 + i) * 1_000_000, i + 1,
+    entries = [_entry(s * 1000, (s - 300 + i) * 1_000_000, i + 1,
                       _payload(s, side="UP" if i % 3 else "DOWN", account=f"{ENTITY}_{i % 4}",
                                dollars=f"{5 + i}.00")) for i in range(9)]
     ticks = _ticks(s, e, 100.0, 101.0)
@@ -189,8 +221,8 @@ def test_ingest_entries_ignores_other_kinds_and_invalid_bets(armed, tmp_path):
     db = markets._db(str(tmp_path))
     hfcall = {"submit": {"hk": ENTITY, "seq": 1, "payload": {"trade_pair": "BTCUSD"}},
               "receipt": {"t_recv_us": (s + 5) * 1_000_000}}
-    late = _entry(s * 1000, (s + 899) * 1_000_000, 2, _payload(s))
-    ok = _entry(s * 1000, (s + 5) * 1_000_000, 3, _payload(s))
+    late = _entry(s * 1000, (s + 5) * 1_000_000, 2, _payload(s))
+    ok = _entry(s * 1000, (s - 120) * 1_000_000, 3, _payload(s))
     assert markets.ingest_entries(db, s * 1000, [hfcall, late, ok]) == 1
 
 
@@ -235,18 +267,19 @@ class TestIngestMarkets:
         return {"v": 1, "kind": "hf.submit", "hk": kp.ss58_address, "seq": seq, "nonce": "n" * 32,
                 "ts_miner": ts, "payload": payload, "sig": kp.sign(sb).hex()}
 
-    def _open_payload(self, kp, **kw):
-        secs = 900
-        start = int(time.time()) // secs * secs
-        if time.time() >= start + secs - 60:
-            pytest.skip("too close to entry close for a live-clock ingest test")
+    def _open_payload(self, kp, monkeypatch=None, **kw):
+        # Clock-independent: bet on the window after next with a 30-minute open lead, so the
+        # entry window [start - 1800, start - 60) always contains "now".
+        if monkeypatch is not None:
+            monkeypatch.setattr(config, "MARKETS_OPEN_LEAD_S", 1800)
+        start = (int(time.time()) // 900 + 2) * 900
         return {**_payload(start, account=f"{kp.ss58_address}_1", **kw)}
 
-    def test_accepts_a_valid_bet_when_armed(self, armed):
+    def test_accepts_a_valid_bet_when_armed(self, armed, monkeypatch):
         from bittensor_wallet import Keypair
         ent = Keypair.create_from_uri("//MarketsEntity")
         ing = self._ingest({ent.ss58_address})
-        out = ing.handle(self._frame(ent, self._open_payload(ent)))
+        out = ing.handle(self._frame(ent, self._open_payload(ent, monkeypatch)))
         assert out["kind"] == "hf.receipt", out.get("reason")
         assert ing.markets_sent_ms[f"{ent.ss58_address}_1"]
         assert not ing.lock_index and not ing.open_calls             # no HF pair lock, no open call
@@ -255,16 +288,24 @@ class TestIngestMarkets:
         from bittensor_wallet import Keypair
         ent = Keypair.create_from_uri("//MarketsEntity")
         ing = self._ingest({ent.ss58_address})
-        start = int(time.time()) // 900 * 900
+        start = (int(time.time()) // 900 + 1) * 900
         out = ing.handle(self._frame(ent, _payload(start, account=f"{ent.ss58_address}_1")))
         assert out["kind"] == "hf.reject" and out["reason"] == "markets_not_live"
 
-    def test_refuses_betting_for_someone_elses_account(self, armed):
+    def test_refuses_a_bet_on_the_running_window(self, armed):
+        from bittensor_wallet import Keypair
+        ent = Keypair.create_from_uri("//MarketsEntity")
+        ing = self._ingest({ent.ss58_address})
+        running = int(time.time()) // 900 * 900                 # started already: closed to bets
+        out = ing.handle(self._frame(ent, _payload(running, account=f"{ent.ss58_address}_1")))
+        assert out["kind"] == "hf.reject" and out["reason"] == "market_closed"
+
+    def test_refuses_betting_for_someone_elses_account(self, armed, monkeypatch):
         from bittensor_wallet import Keypair
         ent = Keypair.create_from_uri("//MarketsEntity")
         other = Keypair.create_from_uri("//OtherEntity")
         ing = self._ingest({ent.ss58_address})
-        p = self._open_payload(ent)
+        p = self._open_payload(ent, monkeypatch)
         p["account"] = f"{other.ss58_address}_1"
         out = ing.handle(self._frame(ent, p))
         assert out["reason"] == "account_not_signer"
@@ -274,7 +315,7 @@ def _publish(root, start, end, entries_by_w, ticks):
     """Lay out a public HF feed (index.json + <w>/receipts.jsonl + <w>/ticks.jsonl) on disk."""
     import json
     W = 180_000
-    ws = list(range(((start - 600) * 1000) // W * W, (end * 1000) // W * W + W, W))
+    ws = list(range(((start - 1200) * 1000) // W * W, (end * 1000) // W * W + W, W))
     for w in ws:
         d = root / str(w)
         d.mkdir(parents=True, exist_ok=True)
@@ -291,7 +332,7 @@ def test_validator_path_replays_identically_from_the_public_feed(armed, tmp_path
     W = 180_000
     entries = {}
     for i in range(6):
-        t = s + 20 + i * 60
+        t = s - 600 + i * 60
         p = _payload(s, side="UP", account=f"{ENTITY}_1", dollars="10.00")
         entries.setdefault((t * 1000) // W * W, []).append(_entry(0, t * 1_000_000, i + 1, p))
     base = _publish(tmp_path / "feed", s, e, entries, _ticks(s, e, 100.0, 101.0))

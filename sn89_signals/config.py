@@ -1383,7 +1383,14 @@ from decimal import Decimal as _Decimal  # noqa: E402
 
 MARKETS_WINDOWS = {"15m": 900, "1h": 3600}
 MARKETS_AVG_S = int(os.getenv("SN89_MARKETS_AVG_S", "60"))
-MARKETS_ENTRY_CLOSE_LEAD_S = int(os.getenv("SN89_MARKETS_ENTRY_CLOSE_LEAD_S", "60"))
+# ENTRY WINDOW — every bet is a pure forecast. A market accepts bets only in
+# [start - MARKETS_OPEN_LEAD_S, start - MARKETS_ENTRY_CLOSE_LEAD_S): it opens one window before
+# its start (the NEXT window is the one listed) and closes before the target's averaging minute
+# begins. Nothing is accepted during the window: the LMSR moves only on bets, so a bet placed
+# after the start could buy the side the tick feed already shows winning at a stale price, and
+# emissions would pay for it. 0 for the open lead = the market's window length.
+MARKETS_OPEN_LEAD_S = int(os.getenv("SN89_MARKETS_OPEN_LEAD_S", "0"))
+MARKETS_ENTRY_CLOSE_LEAD_S = int(os.getenv("SN89_MARKETS_ENTRY_CLOSE_LEAD_S", str(MARKETS_AVG_S)))
 MARKETS_LMSR_B = _Decimal(os.getenv("SN89_MARKETS_LMSR_B", "100"))          # play dollars
 MARKETS_MIN_BET = _Decimal(os.getenv("SN89_MARKETS_MIN_BET", "1"))
 MARKETS_MAX_BET = _Decimal(os.getenv("SN89_MARKETS_MAX_BET", "100"))

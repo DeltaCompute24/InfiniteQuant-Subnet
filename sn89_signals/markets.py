@@ -21,7 +21,15 @@ MARKETS (phase 1: Up/Down only)
            (sn89_markets/ladders/updown.py), including its float average rounded to 6 significant
            digits, so the testnet settlement and this one agree to the last digit. Ticks are taken
            window by window in ascending order, each window's ticks sorted by (t, mark).
-  entries  a bet counts if its receipt time is in [start, end - MARKETS_ENTRY_CLOSE_LEAD_S).
+  entries  a bet counts only if its receipt time is in
+           [start - MARKETS_OPEN_LEAD_S, start - MARKETS_ENTRY_CLOSE_LEAD_S): the market opens one
+           window before its start and closes before the target's averaging minute begins, so every
+           bet is a pure forecast. NOTHING is accepted during the window: the LMSR moves only on
+           bets, so a bet placed once the window is running could buy the side the tick feed
+           already shows winning at a stale price, and emissions would pay for it.
+           The ingest checks this on t_recv_ms and the replay re-checks it on the receipt's
+           t_recv_us; a bet within 1 ms of a boundary can be accepted by one and dropped by the
+           other, and the replay decides.
 
 PRICING — a deterministic LMSR per market
   Bets are replayed in canonical order: (window_ms, receipt t_recv_us, submitter hotkey, seq).
@@ -102,6 +110,13 @@ def market_exists(mid: str) -> bool:
         if sessions.open_seconds(start, secs / 3600.0) < secs:
             return False
     return True
+
+
+def entry_interval(mid: str) -> tuple[int, int]:
+    """[open, close) in unix seconds: when bets on this market count."""
+    _a, window, start, _end = parse_market_id(mid)
+    lead = config.MARKETS_OPEN_LEAD_S or config.MARKETS_WINDOWS[window]
+    return start - lead, start - config.MARKETS_ENTRY_CLOSE_LEAD_S
 
 
 def markets_for(start: int, window: str) -> list[str]:
@@ -193,9 +208,10 @@ def validate_bet(payload: dict, signer_hk: str, t_unix: float) -> None:
             raise MarketError("account_not_signer")
     except MarketError as e:
         raise hf.HFRejected(str(e))
-    if t_unix < start:
+    opens, closes = entry_interval(mid)
+    if t_unix < opens:
         raise hf.HFRejected("market_not_open")
-    if t_unix >= end - config.MARKETS_ENTRY_CLOSE_LEAD_S:
+    if t_unix >= closes:
         raise hf.HFRejected("market_closed")
 
 
@@ -355,12 +371,15 @@ def ingest_entries(db: sqlite3.Connection, w: int, entries: list[dict]) -> int:
 def grade_market(db: sqlite3.Connection, mid: str, rows: list[dict]) -> str:
     asset, _w, start, end = parse_market_id(mid)
     outcome, target, settle = resolve(rows, start, end)
-    bets = [{"key": k, "account": a, "side": s, "dollars": Decimal(d),
-             "order": (w, t, h, q)}
-            for k, a, s, d, w, t, h, q in db.execute(
-                "SELECT key, account, side, dollars, w, t_recv_us, hk, seq FROM bets WHERE market_id=?",
-                (mid,))]
-    for r in replay(bets):
+    opens, closes = entry_interval(mid)
+    bets, outside = [], []
+    for k, a, s, d, w, t, h, q in db.execute(
+            "SELECT key, account, side, dollars, w, t_recv_us, hk, seq FROM bets WHERE market_id=?", (mid,)):
+        bet = {"key": k, "account": a, "side": s, "dollars": Decimal(d), "order": (w, t, h, q)}
+        # The replay decides the entry window, whatever the ingest accepted.
+        (bets if opens * 1_000_000 <= int(t) < closes * 1_000_000 else outside).append(bet)
+    for r in replay(bets) + [{**b, "shares": Decimal(0), "status": "ignored:outside_entry_window"}
+                             for b in outside]:
         pnl = bet_pnl(r["side"], r["shares"], r["dollars"], outcome) if r["status"] == "ok" else Decimal(0)
         db.execute("INSERT OR REPLACE INTO results VALUES (?,?,?,?,?,?,?,?,?)",
                    (r["key"], mid, r["account"], str(r["dollars"]), str(r["shares"]), str(pnl),
@@ -401,7 +420,7 @@ def sync_and_grade(base: str, cache_dir: str, now: float) -> None:
         if mid in graded:
             continue
         asset, _w, start, end = parse_market_id(mid)
-        # every bet is in a window ending by end - lead; grade only once those are published
+        # every bet is received before start - close lead; grade once windows through `end` are published
         if now_s < end + config.MARKETS_GRADE_SETTLE_S or published_through < end:
             continue
         rows, missing = hf_grade._ticks_for(base, tick_dir, asset,
