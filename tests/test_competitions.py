@@ -80,7 +80,7 @@ class TestCombine:
         # must never gain an earner vector.
         assert sum(config.COMP_WEIGHTS.values()) == pytest.approx(1.0)
         competitions = set(config.COMP_WEIGHTS) - {"reserve"}
-        assert competitions <= {"lf", "hf", "closers"}
+        assert competitions <= {"lf", "hf", "closers", "markets"}   # markets from 2026-10-09 00:00Z
         assert {"lf", "hf"} <= competitions
 
 

@@ -6,9 +6,10 @@ private state: the inputs are the Merkle-anchored HF window logs (where bets tra
 `kind == "mk.bet"` submissions) and the sealed tick windows. Design: ~/IQ/SN89-PREDICTION-
 MARKETS-SPEC.md, "On-chain Markets (Whit, 2026-10-08)".
 
-Dark everywhere until `config.MARKETS_FROM_UNIX` is armed (env, testnet only). Mainnet is
-byte-identical: no market is valid, ingest refuses every `mk.bet`, and the competition has no
-share in the committed COMP_WEIGHTS history.
+Armed by `config.MARKETS_FROM_UNIX`: mainnet 2026-10-09 00:00:00 UTC in source (the same instant
+the committed COMP_WEIGHTS history moves Closers' 0.125 to Markets); testnet earlier via env.
+Before the arm no market exists, and ingest refuses every `mk.bet` received earlier than one
+open lead before it (config.markets_accepting_as_of).
 
 MARKETS (phase 1: Up/Down only)
   id       "UD:<ASSET>:<window>:<start_unix>", window in MARKETS_WINDOWS ("15m", "1h"), start
@@ -191,7 +192,7 @@ def parse_dollars(v) -> Decimal:
 
 def validate_bet(payload: dict, signer_hk: str, t_unix: float) -> None:
     """Ingest-time validity. Raises hf.HFRejected so the miner gets a SIGNED refusal."""
-    if not config.markets_active_as_of(t_unix):
+    if not config.markets_accepting_as_of(t_unix):
         raise hf.HFRejected("markets_not_live")
     try:
         mid = str(payload.get("market_id", ""))

@@ -102,9 +102,9 @@ def _payload(start, side="UP", dollars="10.00", account=None, pair="BTCUSD", win
             "dollars": dollars, "account": account or f"{ENTITY}_3", "trade_pair": pair}
 
 
-def test_unarmed_network_refuses_every_bet():
+def test_unarmed_network_refuses_every_bet(monkeypatch):
+    monkeypatch.setattr(config, "MARKETS_FROM_UNIX", 0)
     s = _start()
-    assert config.MARKETS_FROM_UNIX == 0
     with pytest.raises(hf.HFRejected, match="markets_not_live"):
         markets.validate_bet(_payload(s), ENTITY, s + 10)
 
@@ -232,9 +232,10 @@ def test_hf_readers_skip_markets_and_closers():
     assert not hf.is_hf_call({"kind": "mk.bet"}) and not hf.is_hf_call({"kind": "closers"})
 
 
-def test_mainnet_history_has_no_markets_share():
-    for _eff, spec in config.COMP_WEIGHTS_HISTORY:
-        assert "markets" not in spec
+def test_markets_share_appears_only_at_the_mainnet_cutover():
+    """Every row before 2026-10-09 00:00Z is untouched; Markets enters only at that instant."""
+    for eff, spec in config.COMP_WEIGHTS_HISTORY:
+        assert ("markets" in spec) == (eff >= 1791504000)
 
 
 def test_blend_with_a_markets_share():
@@ -284,7 +285,8 @@ class TestIngestMarkets:
         assert ing.markets_sent_ms[f"{ent.ss58_address}_1"]
         assert not ing.lock_index and not ing.open_calls             # no HF pair lock, no open call
 
-    def test_refuses_when_unarmed(self):
+    def test_refuses_when_unarmed(self, monkeypatch):
+        monkeypatch.setattr(config, "MARKETS_FROM_UNIX", 0)
         from bittensor_wallet import Keypair
         ent = Keypair.create_from_uri("//MarketsEntity")
         ing = self._ingest({ent.ss58_address})

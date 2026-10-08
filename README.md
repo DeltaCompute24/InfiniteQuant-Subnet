@@ -2,6 +2,12 @@
 
 Bittensor subnet 89. Miners commit encrypted directional trade calls. Validators grade them against real market data. Emissions go to miners with statistically proven edge.
 
+> **2026-10-09 00:00 UTC: Closers retires and Markets goes live.** Closers' share of miner
+> emission (10%) moves to Markets, the on-chain Up/Down prediction markets described below. Closers
+> votes graded before that time keep their results. LF (35%), HF (35%) and referrers (20%) are
+> unchanged. Bets on the first markets open at 23:00 UTC on 2026-10-08 (1-hour markets) and 23:45
+> UTC (15-minute markets).
+
 > **Requires Python 3.10.** The `timelock` dependency publishes wheels only for 3.7–3.10. On 3.11/3.12: `apt install python3.10 python3.10-venv` (or pyenv) and build the venv with `python3.10`.
 
 ## Protocol
@@ -169,6 +175,8 @@ decision and repeated it, and the mechanism pays for forecasts.
 
 ### Closers — vote on the network's open positions
 
+> **Retired at 2026-10-09 00:00 UTC.** Its share moved to Markets. Votes after that time earn nothing.
+
 The third competition pays for exit timing: the network publishes its OPEN
 positions (`SN89_CLOSERS_POSITIONS_URL`, JSON `{positions: [{id, trade_pair,
 direction, ...}]}`), and you submit **HOLD** (it will keep improving) or
@@ -311,10 +319,11 @@ btcli subnet register --netuid 496 --wallet.name mywallet --wallet.hotkey miner 
 
 Reveals still take 2 h; grading follows each call's horizon.
 
-### Markets — Up/Down prediction markets (testnet 496 only)
+### Markets — Up/Down prediction markets (mainnet from 2026-10-09 00:00 UTC)
 
 Bet play dollars on whether an asset ends a 15-minute or 1-hour window above where it started.
-Nothing here is live on mainnet.
+Live on mainnet from 2026-10-09 00:00 UTC with 10% of miner emission (0.125 of mechanism 0);
+on testnet 496 since 2026-10-08.
 
 - **Markets.** `UD:<ASSET>:<15m|1h>:<start_unix>`, one per HF-board asset per window, aligned
   to UTC. Stocks, indices, oil and FX only while their FX-week session is open.

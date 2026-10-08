@@ -1323,6 +1323,12 @@ COMP_WEIGHTS_HISTORY: tuple = (
     # If the split is ever moved back to 100/0, revert to the reserve form in
     # the same instant or LF/HF/Closers are overpaid by 25%.
     (1786327200, "lf:0.4375,hf:0.4375,closers:0.125"),
+    # ⚑ 2026-10-09 00:00:00 UTC (Whit, 2026-10-08): on-chain Markets goes live on mainnet and
+    # takes ALL of Closers' share; Closers retires (share 0 from here, its grades before this
+    # instant unchanged). mecid-0-RELATIVE, chain split still [52428, 13107]. Of the TOTAL:
+    #   LF 35 / HF 35 / Markets 10 / Referrers 20 (mecid-1, unchanged).
+    # MARKETS_FROM_UNIX below is the same instant, so the Markets vector is computed from here.
+    (1791504000, "lf:0.4375,hf:0.4375,markets:0.125"),
 )
 _COMP_ENV = os.getenv("SN89_COMP_WEIGHTS", "")
 if _COMP_ENV:
@@ -1369,13 +1375,15 @@ DB_PATH = os.getenv("SN89_DB_PATH", os.path.expanduser("~/.sn89/validator.db"))
 # ── Markets: on-chain Up/Down prediction markets (§ markets, CONSENSUS) ──────
 # Bets travel as signed `kind == "mk.bet"` submissions in the HF receipt pipeline and are
 # priced, graded and scored by sn89_signals/markets.py from the public windows alone.
-# 0 = OFF on every network, for the same reason HF_CUSTOM_BANDS_FROM is: a timestamp does not
-# know which chain it is on. Armed from .env.test only; mainnet has no markets share in the
-# committed COMP_WEIGHTS history, so its vector is ignored even if computed.
-MARKETS_FROM_UNIX = int(os.getenv("SN89_MARKETS_FROM", "0"))
+# ⚑ MAINNET: 2026-10-09 00:00:00 UTC (Whit, 2026-10-08), in source so every validator replaying
+# master agrees; the same instant the committed COMP_WEIGHTS history gives Markets its share.
+# The first markets START at this instant; their bets are taken from one window earlier
+# (markets_accepting_as_of). Testnet keeps its own earlier arm via SN89_MARKETS_FROM in .env.test.
+MARKETS_FROM_UNIX = int(os.getenv("SN89_MARKETS_FROM", "1791504000"))
 
 
 def markets_active_as_of(t_unix: float) -> bool:
+    """A market STARTING at t exists under the rules (market_exists keys on the start)."""
     return bool(MARKETS_FROM_UNIX and t_unix >= MARKETS_FROM_UNIX)
 
 
@@ -1391,6 +1399,16 @@ MARKETS_AVG_S = int(os.getenv("SN89_MARKETS_AVG_S", "60"))
 # emissions would pay for it. 0 for the open lead = the market's window length.
 MARKETS_OPEN_LEAD_S = int(os.getenv("SN89_MARKETS_OPEN_LEAD_S", "0"))
 MARKETS_ENTRY_CLOSE_LEAD_S = int(os.getenv("SN89_MARKETS_ENTRY_CLOSE_LEAD_S", str(MARKETS_AVG_S)))
+
+
+def markets_accepting_as_of(t_unix: float) -> bool:
+    """A BET received at t can be valid: markets are armed and t is no earlier than the longest
+    open lead before the first market's start. Gating the receipt time on MARKETS_FROM_UNIX itself
+    refused every bet on the first markets, which are taken BEFORE they start (entry window)."""
+    if not MARKETS_FROM_UNIX:
+        return False
+    lead = max((MARKETS_OPEN_LEAD_S or s) for s in MARKETS_WINDOWS.values())
+    return t_unix >= MARKETS_FROM_UNIX - lead
 MARKETS_LMSR_B = _Decimal(os.getenv("SN89_MARKETS_LMSR_B", "100"))          # play dollars
 MARKETS_MIN_BET = _Decimal(os.getenv("SN89_MARKETS_MIN_BET", "1"))
 MARKETS_MAX_BET = _Decimal(os.getenv("SN89_MARKETS_MAX_BET", "100"))
