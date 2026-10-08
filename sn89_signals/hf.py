@@ -827,8 +827,8 @@ def load_hf_locks(log_dir: str, since_ms: int) -> list:
                 e = json.loads(line)
                 sub, rcpt = e.get("submit") or {}, e.get("receipt") or {}
                 payload = sub.get("payload") or {}
-                if str(payload.get("kind", "")) == "closers":
-                    continue          # a closers vote never locks the pair
+                if not is_hf_call(payload):
+                    continue          # a closers vote or markets bet never locks the pair
                 pair = payload.get("trade_pair")
                 ts = rcpt.get("grid_t0_ms")
                 if pair and ts and int(ts) >= since_ms:
@@ -1118,6 +1118,16 @@ def price_at(ticks_sorted: list[dict], t_ms: int):
 class HFLockFeedError(Exception):
     """The mechanism-0 lock feed could not be read. Distinct from "no locks" —
     treating the two the same is what silently disables the rule."""
+
+
+# Kinds that share the HF window logs but are NOT HF calls: a Closers vote (graded by
+# closers.py) and a Markets bet (graded by markets.py). Every reader of the windows that
+# means "HF calls" filters through is_hf_call(), so a new kind cannot be missed in one place.
+NON_HF_KINDS = ("closers", "mk.bet")
+
+
+def is_hf_call(payload: dict | None) -> bool:
+    return str((payload or {}).get("kind", "")) not in NON_HF_KINDS
 
 
 class HFRejected(Exception):

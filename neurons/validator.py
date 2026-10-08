@@ -30,6 +30,7 @@ import bittensor as bt
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from sn89_signals import (bucket, chain, closers, competitions, config, crypto,
+                          markets,
                           hf, hf_grade, replay, scoring)
 from sn89_signals.grader import PENDING, grade
 from sn89_signals.schema import Signal, ValidationError, validate
@@ -841,6 +842,15 @@ class Validator:
                 print(f"  ! Closers vector failed (share burns): {e}")
                 vectors["closers"] = None
             shares = config.comp_weights_as_of(now)
+            # Markets (sn89_signals/markets.py): computed only where it has a share and is armed —
+            # testnet via SN89_COMP_WEIGHTS + SN89_MARKETS_FROM. Mainnet has neither, so this
+            # block never runs there and the committed vector is byte-identical.
+            if shares.get("markets", 0) > 0 and config.markets_active_as_of(now):
+                try:
+                    vectors["markets"] = markets.markets_weights(uid_by_hotkey, now)
+                except Exception as e:  # noqa: BLE001 — dead competition burns its share
+                    print(f"  ! Markets vector failed (share burns): {e}")
+                    vectors["markets"] = None
             w = competitions.combine(vectors, shares)
             parts = " ".join(
                 f"{k}={'∅' if vectors.get(k) is None else len([u for u, x in (vectors[k] or {}).items() if x > 0 and u != config.BURN_UID])}"

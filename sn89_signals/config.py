@@ -1364,3 +1364,33 @@ SCAN_MAX_BLOCKS_PER_POLL = int(os.getenv("SN89_SCAN_MAX_BLOCKS_PER_POLL", "120")
 # child-key delegation makes multi-validator catch-up unnecessary.)
 
 DB_PATH = os.getenv("SN89_DB_PATH", os.path.expanduser("~/.sn89/validator.db"))
+
+
+# ── Markets: on-chain Up/Down prediction markets (§ markets, CONSENSUS) ──────
+# Bets travel as signed `kind == "mk.bet"` submissions in the HF receipt pipeline and are
+# priced, graded and scored by sn89_signals/markets.py from the public windows alone.
+# 0 = OFF on every network, for the same reason HF_CUSTOM_BANDS_FROM is: a timestamp does not
+# know which chain it is on. Armed from .env.test only; mainnet has no markets share in the
+# committed COMP_WEIGHTS history, so its vector is ignored even if computed.
+MARKETS_FROM_UNIX = int(os.getenv("SN89_MARKETS_FROM", "0"))
+
+
+def markets_active_as_of(t_unix: float) -> bool:
+    return bool(MARKETS_FROM_UNIX and t_unix >= MARKETS_FROM_UNIX)
+
+
+from decimal import Decimal as _Decimal  # noqa: E402
+
+MARKETS_WINDOWS = {"15m": 900, "1h": 3600}
+MARKETS_AVG_S = int(os.getenv("SN89_MARKETS_AVG_S", "60"))
+MARKETS_ENTRY_CLOSE_LEAD_S = int(os.getenv("SN89_MARKETS_ENTRY_CLOSE_LEAD_S", "60"))
+MARKETS_LMSR_B = _Decimal(os.getenv("SN89_MARKETS_LMSR_B", "100"))          # play dollars
+MARKETS_MIN_BET = _Decimal(os.getenv("SN89_MARKETS_MIN_BET", "1"))
+MARKETS_MAX_BET = _Decimal(os.getenv("SN89_MARKETS_MAX_BET", "100"))
+MARKETS_MAX_PER_MARKET = _Decimal(os.getenv("SN89_MARKETS_MAX_PER_MARKET", "250"))  # per account
+MARKETS_DAILY_BETS = int(os.getenv("SN89_MARKETS_DAILY_BETS", "200"))              # per account
+MARKETS_SCORE_WINDOW_S = int(os.getenv("SN89_MARKETS_SCORE_WINDOW_S", str(7 * 86400)))
+MARKETS_MIN_RESOLVED = int(os.getenv("SN89_MARKETS_MIN_RESOLVED", "20"))
+MARKETS_GATE_Z = float(os.getenv("SN89_MARKETS_GATE_Z", "1.645"))
+MARKETS_GRADE_SETTLE_S = int(os.getenv("SN89_MARKETS_GRADE_SETTLE_S", "240"))
+MARKETS_GRADE_ABANDON_S = int(os.getenv("SN89_MARKETS_GRADE_ABANDON_S", "1800"))

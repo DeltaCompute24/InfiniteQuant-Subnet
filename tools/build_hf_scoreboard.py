@@ -304,8 +304,8 @@ def _accepted_calls() -> dict:
                 if not hk or seq is None:
                     continue
                 p = sub.get("payload") or {}
-                if str(p.get("kind", "")) == "closers":
-                    continue        # graded by closers.py — not an HF call
+                if str(p.get("kind", "")) in ("closers", "mk.bet"):
+                    continue        # graded by closers.py / markets.py — not an HF call
                 calls[(hk, seq)] = {
                     "hk": hk, "pair": p.get("trade_pair"),
                     "direction": p.get("direction"),

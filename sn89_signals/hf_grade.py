@@ -229,7 +229,7 @@ def load_hf_lock_rows(base: str, since_ms: int) -> list:
             # open position — so it must NOT lock the pair for the miner's own
             # LF call. Without this filter a closers vote voided the miner's
             # next LF call on that pair (Brian, 2026-08-04).
-            if str(payload.get("kind", "")) == "closers":
+            if not hf.is_hf_call(payload):
                 continue
             pair = payload.get("trade_pair")
             hk, ts = sub.get("hk"), rcpt.get("grid_t0_ms")
@@ -428,8 +428,8 @@ def sync_and_grade(base: str, cache_dir: str, now: float) -> None:
             if not hk or key in graded:
                 continue
             p = sub.get("payload") or {}
-            if str(p.get("kind", "")) == "closers":
-                continue        # closers competition — graded by closers.py, not HF
+            if not hf.is_hf_call(p):
+                continue        # closers / markets — graded by closers.py / markets.py, not HF
             pair = p.get("trade_pair")
             t0_ms = rcpt.get("grid_t0_ms")
             # Record WHAT THE MINER CALLED before deciding whether we can grade it.

@@ -35,7 +35,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import websockets
 from bittensor_wallet import Keypair
 
-from sn89_signals import closers, hf
+from sn89_signals import closers, hf, markets
 
 BIND = os.getenv("SN89_HF_BIND", "127.0.0.1")
 PORT = int(os.getenv("SN89_HF_PORT", "8790"))
@@ -170,6 +170,7 @@ class Ingest:
         self.last_seq: dict[str, int] = {}          # hotkey -> last accepted seq
         self.sent_ms: dict[str, list] = {}          # hotkey -> accepted submit times
         self.closers_sent_ms: dict[str, list] = {}  # hotkey -> accepted CLOSERS submits (own rate ledger)
+        self.markets_sent_ms: dict[str, list] = {}  # ACCOUNT -> accepted MARKETS bets (per-account rate ledger)
         self.windows: dict[int, list] = {}          # window start ms -> receipts
         self.lock_index: dict = {}                  # (hk, pair, mecid) -> ts ms
         # (hk, PAIR) -> [hf.OpenCall]. STILL not rebuilt on restart, unlike
@@ -272,13 +273,14 @@ class Ingest:
         now_ms = int(time.time() * 1000)
         keep_ms = now_ms - 48 * 3600 * 1000
         dropped = 0
-        for hk, lst in list(self.sent_ms.items()):
-            kept = [t for t in lst if int(t) >= keep_ms]
-            dropped += len(lst) - len(kept)
-            if kept:
-                self.sent_ms[hk] = kept
-            else:
-                del self.sent_ms[hk]
+        for ledger in (self.sent_ms, self.markets_sent_ms):
+            for hk, lst in list(ledger.items()):
+                kept = [t for t in lst if int(t) >= keep_ms]
+                dropped += len(lst) - len(kept)
+                if kept:
+                    ledger[hk] = kept
+                else:
+                    del ledger[hk]
         lock_cut = now_ms - hf.PAIR_LOCK_MS
         stale = [k for k, ts in self.lock_index.items() if int(ts) < lock_cut]
         for k in stale:
@@ -605,8 +607,15 @@ class Ingest:
         # position, it doesn't open one of the miner's).
         t0 = t_recv_ms / 1000.0
         is_closers = str((payload or {}).get("kind", "")) == "closers"
+        # A `payload.kind == "mk.bet"` frame is a Markets bet (sn89_signals/markets.py): the same
+        # signed frame, receipt and anchored window. It holds no HF pair lock or open-call slot;
+        # its own rate ledger is per ACCOUNT, because an entity bets for many subaccounts.
+        is_market = str((payload or {}).get("kind", "")) == markets.KIND
         try:
-            if is_closers:
+            if is_market:
+                markets.validate_bet(payload, hk, t0)
+                markets.check_rate(self.markets_sent_ms.get(str(payload.get("account")), []), t_recv_ms)
+            elif is_closers:
                 # BASE-or-better at submission time. Enforced here so an
                 # unqualified miner is told in milliseconds rather than
                 # discovering at payout that a graded record was never payable.
@@ -621,7 +630,7 @@ class Ingest:
 
         # 5. the cross-mechanism pair lock (HF only — a closers call holds no pair)
         pair = str(payload["trade_pair"]).upper()  # noqa: E501
-        if not is_closers and hf.is_pair_locked(self.lock_index, hk, pair, hf.MECID, t_recv_ms):
+        if not is_closers and not is_market and hf.is_pair_locked(self.lock_index, hk, pair, hf.MECID, t_recv_ms):
             return reject("pair_locked_other_mechanism")
 
         # 5b. the SAME-mechanism open-position gate. Refused here so the trader is
@@ -630,7 +639,7 @@ class Ingest:
         # tail and a replayer reads the sealed windows, so at the margin of a touch
         # the two can disagree by a tick. FAIL OPEN when the tick feed is stale —
         # the grader still voids a bad accept, but a bad refusal is a lost trade.
-        if (time.time() - self._tick_ok_at) * 1000 <= TICK_STALE_MS:
+        if not is_market and (time.time() - self._tick_ok_at) * 1000 <= TICK_STALE_MS:
             try:
                 hf.check_pair_open(
                     [c.open_until() for c in self.open_calls.get((hk, pair), [])],
@@ -644,6 +653,14 @@ class Ingest:
         rcpt = self.sign_receipt(hk, seq, ph, t_recv_us, grid)
 
         self.last_seq[hk] = seq
+        if is_market:
+            # Markets bookkeeping only: the per-account rate ledger. markets.py prices and grades
+            # the bet off the same anchored window log the entry below lands in.
+            self.markets_sent_ms.setdefault(str(payload.get("account")), []).append(t_recv_ms)
+            w = hf.window_start_ms(t_recv_ms)
+            self.windows.setdefault(w, []).append({"submit": frame, "receipt": rcpt})
+            self.record_live(frame, rcpt)
+            return rcpt
         if is_closers:
             # Closers bookkeeping only: its own rate ledger, no pair lock, no
             # open-call slot. The window log entry below is identical — the

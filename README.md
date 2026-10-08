@@ -311,6 +311,30 @@ btcli subnet register --netuid 496 --wallet.name mywallet --wallet.hotkey miner 
 
 Reveals still take 2 h; grading follows each call's horizon.
 
+### Markets — Up/Down prediction markets (testnet 496 only)
+
+Bet play dollars on whether an asset ends a 15-minute or 1-hour window above where it started.
+Nothing here is live on mainnet.
+
+- **Markets.** `UD:<ASSET>:<15m|1h>:<start_unix>`, one per HF-board asset per window, aligned
+  to UTC. Stocks, indices, oil and FX only while their FX-week session is open.
+- **Target.** The average price over the 60 seconds before the window opens. The market
+  resolves **Up** if the average over the last 60 seconds is at least the target, **Down**
+  otherwise, and is void (stakes refunded) if no price was recorded in either minute. Prices are
+  the bid/ask mid from the public sealed tick windows, else the last trade.
+- **Betting.** Send a signed HF frame whose payload is
+  `{"kind": "mk.bet", "market_id", "trade_pair", "side": "UP"|"DOWN", "dollars": "10.00",
+  "account"}`. `account` is your hotkey, or `<your hotkey>_<n>` for a subaccount you hold.
+  Entries are open from the window's start until 60 seconds before it ends.
+- **Pricing.** Each market is an LMSR (liquidity $100). Bets are priced in the order the ingest
+  received them, so the price you pay depends on the bets before yours. Anyone can recompute
+  every price from the published windows: `sn89_signals/markets.py`.
+- **Limits.** $1–$100 per bet, $250 per account per market (bets past it are ignored), 200 bets
+  per account per day.
+- **Scoring.** Play-dollar profit over the last 7 days. An account scores only after 20 resolved
+  bets with profit per dollar confidently above zero. Subaccounts score to the hotkey that holds
+  them. Emission follows score, capped and burned like every competition.
+
 ---
 
 ## Validate
