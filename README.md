@@ -321,6 +321,30 @@ Reveals still take 2 h; grading follows each call's horizon.
 
 ### Markets — Up/Down prediction markets (mainnet from 2026-10-09 00:00 UTC)
 
+**For players (no miner needed).** IQ Markets is played in the web app at
+<https://infinitequant.app/markets> with an IQ account (email sign-in). In the IQ Telegram bot,
+`/markets` sends the link and these steps. You do not need an SN89 miner, hotkey or wallet to start.
+
+1. Open infinitequant.app/markets and sign in or create an IQ account.
+2. Pick an asset and a 15-minute or 1-hour window.
+3. Choose Up or Down and enter an amount.
+
+**Now:** bets use play dollars, and emission goes to accounts that pass the skill gate described
+below.
+
+**Coming soon: real-money bets.** Not live yet; this section will say when it is.
+- Deposit TAO or SN89 alpha to your Markets account. TAO is converted to SN89 alpha
+  automatically.
+- Bets from $1 to $10,000. Each bet locks its amount from your balance.
+- A fee on each bet: 0.07 × shares × price × (1 − price). A $10 bet at even odds pays about
+  $0.35.
+- A winning bet's stake and winnings are added to your balance when it settles, and you can bet
+  with them straight away. A losing bet's stake is lost.
+- Every day, a balance over $100 is paid to your Bittensor wallet in SN89 alpha. Each payment is
+  listed with its on-chain transaction at infinitequant.app/markets/payouts.
+
+**For miners and developers:** the mechanism below.
+
 Bet play dollars on whether an asset ends a 15-minute or 1-hour window above where it started.
 Live on mainnet from 2026-10-09 00:00 UTC with 10% of miner emission (0.125 of mechanism 0);
 on testnet 496 since 2026-10-08.
