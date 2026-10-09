@@ -35,7 +35,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import websockets
 from bittensor_wallet import Keypair
 
-from sn89_signals import closers, hf, markets
+from sn89_signals import closers, config, hf, markets
 
 BIND = os.getenv("SN89_HF_BIND", "127.0.0.1")
 PORT = int(os.getenv("SN89_HF_PORT", "8790"))
@@ -621,6 +621,11 @@ class Ingest:
                 if not is_burn:
                     markets.check_rate(self.markets_sent_ms.get(str(payload.get("account")), []), t_recv_ms)
             elif is_closers:
+                # Closers retired on finney at 2026-10-09 00:00 UTC (its share went to Markets).
+                # Refuse in milliseconds rather than accept a vote that can never be paid. Read from
+                # the as-of competition weights, so testnet (whose weights still carry closers) is unchanged.
+                if config.comp_weights_as_of(t0).get("closers", 0.0) <= 0.0:
+                    raise hf.HFRejected("closers_retired")
                 # BASE-or-better at submission time. Enforced here so an
                 # unqualified miner is told in milliseconds rather than
                 # discovering at payout that a graded record was never payable.

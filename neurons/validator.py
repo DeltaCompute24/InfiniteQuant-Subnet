@@ -540,6 +540,9 @@ class Validator:
             # The network NAME, not a hardcoded word. This read "testnet" on netuid 89
             # for as long as it existed, so every real mainnet closers vote reached the
             # operator channel looking like test traffic and was discounted as such.
+            # No notice once Closers is retired on this network: its votes are refused at intake.
+            if config.comp_weights_as_of(time.time()).get("closers", 0.0) <= 0.0:
+                return
             msg = (f"🧭 *CLOSERS submission* ({config.NETWORK} {config.NETUID})\n"
                    f"miner `{sub['hk'][:10]}…{sub['hk'][-6:]}`\n"
                    f"*{p.get('action')}* {p.get('trade_pair')} "
