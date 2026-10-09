@@ -332,6 +332,16 @@ Reveals still take 2 h; grading follows each call's horizon.
 **Now:** bets use play dollars, and emission goes to accounts that pass the skill gate described
 below.
 
+**From 2026-10-10 00:00 UTC: bet while the window runs.** Until now a bet had to be placed before
+a window started. From the 10th you can also bet during the window, up to the last 3 minutes of a
+15-minute market and the last 5 minutes of a 1-hour market. While the window runs, the chance of
+Up follows the live price against the starting price (closer to the end and further from the
+start price means a surer, dearer side), every bet still moves it, and a bet placed during the
+window pays a spread over that chance: 2 cents a share plus a part that grows as the end nears
+(about 5 cents in total at the start of a 15-minute market, 9 cents at its last betting moment).
+It is filled at the first price recorded 3 seconds after it is received, so the price you see is
+an estimate. Bets placed before the start work as before.
+
 **Coming soon: real-money bets.** Not live yet; this section will say when it is.
 - Deposit TAO or SN89 alpha to your Markets account. TAO is converted to SN89 alpha
   automatically.
@@ -358,16 +368,28 @@ on testnet 496 since 2026-10-08.
 - **Betting.** Send a signed HF frame whose payload is
   `{"kind": "mk.bet", "market_id", "trade_pair", "side": "UP"|"DOWN", "dollars": "10.00",
   "account"}`. `account` is your hotkey, or `<your hotkey>_<n>` for a subaccount you hold.
-- **When you can bet.** Bets are forecasts made before the window starts. A market opens one
-  window before its start (the next window is the one you bet on) and closes 60 seconds before
-  its start, before the target's averaging minute begins. Nothing is accepted once the window is
-  running, or during that last minute. The ingest checks this on the millisecond it received
-  your bet; validators re-check it on the microsecond time in your signed receipt. A bet within
-  a millisecond of a boundary can pass one check and fail the other, and the validators' replay
-  decides.
+- **When you can bet.** Before the start: a market opens one window before its start (the next
+  window is the one you bet on) and closes 60 seconds before its start, before the target's
+  averaging minute begins. **From 2026-10-10 00:00 UTC (markets starting then or later), also
+  during the window:** from 5 seconds after the start until 180 seconds (15m) / 300 seconds (1h)
+  before the end. Nothing is accepted in the target's minute or after the cutoff. The ingest
+  checks this on the millisecond it received your bet; validators re-check it on the microsecond
+  time in your signed receipt. A bet within a millisecond of a boundary can pass one check and
+  fail the other, and the validators' replay decides.
 - **Pricing.** Each market is an LMSR (liquidity $100). Bets are priced in the order the ingest
   received them, so the price you pay depends on the bets before yours. Anyone can recompute
   every price from the published windows: `sn89_signals/markets.py`.
+- **Pricing during the window (V3).** A bet received at time t is FILLED at the first sealed
+  tick for the asset stamped at or after t + 3 s (the latency guard: you commit before the price
+  you are filled at exists; no tick within 60 s of that instant refuses the bet).
+  `p = Φ(ln(fill / target) / s − s / 2)`, `s = σ √(end − t_fill − 30)`, with σ the asset's
+  per-second volatility measured from the previous UTC day's minute-average marks (class
+  fallback if there are fewer than 120 returns), clamped to [0.01, 0.99]. The LMSR's UP quantity
+  is shifted by `b · ln(p / (1 − p))` so an untouched market quotes p and every bet still moves
+  it. The buyer pays `min(average LMSR price + spread, 0.99)` per share, with
+  `spread = 0.02 + 0.5 · √(3 / τ)` and τ the seconds to the end minus 30. Validators compute all
+  of it from the sealed windows: `sn89_signals/markets.py` (`make_pricer`, `replay`), as-of
+  `config.MARKETS_V3_FROM_UNIX`.
 - **Limits.** $1–$100 per bet, $250 per account per market (bets past it are ignored), 200 bets
   per account per day.
 - **Scoring.** Play-dollar profit over the last 7 days. An account scores only after 20 resolved

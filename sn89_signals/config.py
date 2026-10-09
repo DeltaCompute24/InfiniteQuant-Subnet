@@ -1479,3 +1479,71 @@ MARKETS_DUST_MIN_COLLATERAL_ALPHA = _Decimal(os.getenv("SN89_MARKETS_DUST_MIN_CO
 
 def markets_entity_dust_as_of(t_unix: float) -> bool:
     return bool(MARKETS_ENTITY_DUST_FROM_UNIX and t_unix >= MARKETS_ENTITY_DUST_FROM_UNIX)
+
+
+# ── Markets V3: live in-window pricing (Whit, 2026-10-09: "Build this on mainnet") ──
+# Markets STARTING at/after this instant take bets WHILE THE WINDOW RUNS (markets.py "V3"), the way
+# Kalshi's 15-minute markets do: the chance is driven by the live price, bets still nudge it, and
+# betting closes only in the last minutes. The pre-start part of the entry window is unchanged
+# (crowd-only LMSR from 50/50, closed for the target's averaging minute). Markets starting before the
+# stamp price and grade exactly as before. Mainnet 2026-10-10 00:00:00 UTC in source (the first V3
+# day runs on practice dollars; collateral arms 10-11); testnet overrides via .env.test only.
+MARKETS_V3_FROM_UNIX = int(os.getenv("SN89_MARKETS_V3_FROM", "1791590400"))
+
+
+def markets_v3_as_of(t_unix: float) -> bool:
+    """A market STARTING at t prices in-window bets off the live tick (V3)."""
+    return bool(MARKETS_V3_FROM_UNIX and t_unix >= MARKETS_V3_FROM_UNIX)
+
+
+# In-window bets are taken from start + OPEN_DELAY (the target's last tick, stamped exactly at the
+# start, has sealed by then on every machine) until end - LATE_CUTOFF for the market's window.
+# The cutoff is where a sniper's edge is largest: with little time left a small distance to the
+# target is many standard deviations, so a D-second price lead is nearly a sure thing. Sized by
+# the 2026-10-09 replay (SN89-PREDICTION-MARKETS-SPEC.md "V3 live pricing"). The settle average
+# occupies the last 60 s, so no cutoff below ~90 s is meaningful.
+MARKETS_V3_OPEN_DELAY_S = int(os.getenv("SN89_MARKETS_V3_OPEN_DELAY_S", "5"))
+
+
+def _parse_cutoffs(spec: str) -> dict:
+    out = {}
+    for part in spec.split(","):
+        k, _, v = part.strip().partition(":")
+        if k and v:
+            out[k.strip()] = int(v)
+    return out
+
+
+MARKETS_V3_LATE_CUTOFF_S = _parse_cutoffs(os.getenv("SN89_MARKETS_V3_LATE_CUTOFF_S", "15m:180,1h:300"))
+# LATENCY GUARD. An in-window bet is FILLED at the first sealed tick stamped at or after its receipt
+# time + FILL_DELAY_S: the bettor commits before the price he is filled at exists, so a price feed
+# that leads ours by less than the delay carries no edge (the 2026-10-09 replay: a 1-second lead on
+# the tick AT receipt took ~10% per bet off the house at any flat spread; filled at the next print
+# after 3 s it takes nothing). If no tick lands within MAX_TICK_AGE_S of that instant the feed is
+# stale and the bet is IGNORED (refunded), never priced blind. The quote a player sees is the model
+# at the latest tick, and his shares are fixed by the fill tick in the replay.
+MARKETS_V3_FILL_DELAY_S = int(os.getenv("SN89_MARKETS_V3_FILL_DELAY_S", "3"))
+MARKETS_V3_MAX_TICK_AGE_S = int(os.getenv("SN89_MARKETS_V3_MAX_TICK_AGE_S", "60"))
+# What the buyer pays over the model+crowd price, per share, on an in-window bet (cap 0.99):
+#   spread(tau) = SPREAD + SPREAD_K x sqrt(LEAD_S / tau)
+# The flat part is a fee; the second part is the latency defence. A bettor whose price feed runs
+# LEAD_S ahead of our sealed tick knows ~sigma x sqrt(LEAD_S) of the move we have not seen yet,
+# which is worth phi(z) x sqrt(LEAD_S / tau) of probability at tau seconds left: the defence is
+# shaped like the exposure (small with an hour left, large at the cutoff). Sized by the 2026-10-09
+# replay (SN89-PREDICTION-MARKETS-SPEC.md "V3 live pricing").
+MARKETS_V3_SPREAD = _Decimal(os.getenv("SN89_MARKETS_V3_SPREAD", "0.02"))
+MARKETS_V3_SPREAD_K = _Decimal(os.getenv("SN89_MARKETS_V3_SPREAD_K", "0.5"))
+MARKETS_V3_LEAD_S = _Decimal(os.getenv("SN89_MARKETS_V3_LEAD_S", "3"))
+MARKETS_V3_PRICE_CAP = _Decimal(os.getenv("SN89_MARKETS_V3_PRICE_CAP", "0.99"))
+# The model probability is clamped to [floor, 1 - floor] so a side is never free or certain.
+MARKETS_V3_P_FLOOR = _Decimal(os.getenv("SN89_MARKETS_V3_P_FLOOR", "0.01"))
+# Volatility per asset: the root-mean-square one-minute log return of the PREVIOUS UTC day's
+# minute-average marks (consecutive minutes only, so session gaps never count), as a per-second
+# sigma. Fewer than MIN_RETURNS returns -> the class fallback below (per second; e.g. crypto 1e-4
+# per sqrt-second ~ 3% a day).
+MARKETS_V3_SIGMA_MIN_RETURNS = int(os.getenv("SN89_MARKETS_V3_SIGMA_MIN_RETURNS", "120"))
+MARKETS_V3_SIGMA_FALLBACK = {
+    "crypto": _Decimal("0.00010"), "forex": _Decimal("0.000020"), "forex-commodities": _Decimal("0.000040"),
+    "commodities": _Decimal("0.000060"), "equities": _Decimal("0.00010"), "indices": _Decimal("0.000050"),
+}
+MARKETS_V3_SIGMA_DEFAULT = _Decimal("0.00010")

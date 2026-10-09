@@ -78,6 +78,42 @@ config.MARKETS_COLLATERAL_FROM_UNIX; Whit 2026-10-08, modelled on Vanta's P&L pa
            mecid-0 split x the Markets share), pro rata when they sum past 1; the rest burns. Every
            weight commit during the next cycle carries it. Skill scoring of pre-V2 markets stops
            when V2 arms.
+
+V3 — LIVE IN-WINDOW PRICING (markets STARTING at/after config.MARKETS_V3_FROM_UNIX; Whit
+2026-10-09: "IQ Markets must work like Kalshi's 15-min markets")
+  entry    two intervals: the pre-start one above, unchanged, and IN-WINDOW
+           [start + V3_OPEN_DELAY_S, end - V3_LATE_CUTOFF_S[window]). The gap [start - 60 s,
+           start + delay) stays closed: the target is forming.
+  fill     the FIRST sealed tick for the asset stamped at or after the bet's RECEIPT time
+           (t_recv_us, signed into the receipt by the ingest — never the miner's own timestamp)
+           plus V3_FILL_DELAY_S. The bettor commits before the price he is filled at exists, so a
+           feed that leads ours by less than the delay carries no edge (the replay in the spec:
+           filled at the tick AT receipt, a 1 s lead took ~10% per bet; at the next print after
+           3 s, nothing). No tick within V3_MAX_TICK_AGE_S of that instant (stale feed) IGNORES
+           the bet ("ignored:no_fill", refunded); a bet is never priced blind.
+  model    p_model = P(settle avg >= target | fill) under a driftless lognormal:
+           p = Phi( ln(fill/target)/(s) - s/2 ), s = sigma x sqrt(tau), tau = end - t_fill - 30 s (the
+           settle average sits in the last minute), Phi = Abramowitz-Stegun 26.2.17 evaluated in
+           Decimal (the approximation IS the definition, so every machine gets the same digits),
+           quantized to 1e-6 and clamped to [P_FLOOR, 1 - P_FLOOR].
+  sigma    per asset per UTC day: the RMS one-minute log return of the PREVIOUS day's minute-average
+           marks (consecutive minutes only), as a per-second value; under
+           V3_SIGMA_MIN_RETURNS returns -> the class fallback. Computed once per (asset, day) from
+           the sealed windows and cached (v3_sigma).
+  crowd    the LMSR keeps running; its UP quantity is shifted by an anchor
+           a = b x ln(p_model / (1 - p_model)) at each bet, so with no net bets the quoted price IS
+           p_model and every bet still moves it (price_up(qy + a, qn, b)). Pre-start bets keep
+           anchor 0 (50/50 start), exactly as before.
+  spread   an in-window buyer pays min(p_avg + spread(tau), V3_PRICE_CAP) per share, p_avg being
+           the LMSR average price of the bet and spread(tau) = V3_SPREAD + V3_SPREAD_K x
+           sqrt(V3_LEAD_S / tau) (config): shares issued = dollars / that; the LMSR state moves by
+           the UNSPREAD shares (the full nudge). Pre-start bets pay no spread.
+  exposure what a sniper can take: with a price lead of D seconds he sees p_true while we quote
+           p_model(spot at t - D) + spread; his edge per share is p_true - p_model - spread when
+           positive, zero otherwise. The late cutoff bounds the time-left where a small lead is worth
+           a lot; the spread bounds it everywhere else. Sized in the 2026-10-09 replay
+           (SN89-PREDICTION-MARKETS-SPEC.md "V3 live pricing").
+  payout   unchanged: a share pays $1 if its side wins. Fees and collateral unchanged.
 """
 from __future__ import annotations
 
@@ -146,10 +182,37 @@ def market_exists(mid: str) -> bool:
 
 
 def entry_interval(mid: str) -> tuple[int, int]:
-    """[open, close) in unix seconds: when bets on this market count."""
+    """[open, close) in unix seconds of the PRE-START interval: when bets on this market count
+    before it starts. A V3 market has a second, in-window interval: see entry_intervals."""
     _a, window, start, _end = parse_market_id(mid)
     lead = config.MARKETS_OPEN_LEAD_S or config.MARKETS_WINDOWS[window]
     return start - lead, start - config.MARKETS_ENTRY_CLOSE_LEAD_S
+
+
+def is_v3(start: int) -> bool:
+    return config.markets_v3_as_of(start)
+
+
+def late_cutoff_s(window: str) -> int:
+    return int(config.MARKETS_V3_LATE_CUTOFF_S.get(window, config.MARKETS_WINDOWS[window] // 5))
+
+
+def entry_intervals(mid: str) -> list[tuple[int, int]]:
+    """Every [open, close) in unix seconds in which a bet on this market counts: the pre-start
+    interval, plus the in-window one for a V3 market."""
+    _a, window, start, end = parse_market_id(mid)
+    out = [entry_interval(mid)]
+    if is_v3(start):
+        out.append((start + config.MARKETS_V3_OPEN_DELAY_S, end - late_cutoff_s(window)))
+    return out
+
+
+def in_entry(mid: str, t_unix: float) -> bool:
+    return any(o <= t_unix < c for o, c in entry_intervals(mid))
+
+
+def in_entry_us(mid: str, t_us: int) -> bool:
+    return any(o * 1_000_000 <= int(t_us) < c * 1_000_000 for o, c in entry_intervals(mid))
 
 
 def markets_for(start: int, window: str) -> list[str]:
@@ -295,11 +358,14 @@ def validate_bet(payload: dict, signer_hk: str, t_unix: float) -> None:
             raise MarketError("account_not_signer")
     except MarketError as e:
         raise hf.HFRejected(str(e))
-    opens, closes = entry_interval(mid)
-    if t_unix < opens:
+    if in_entry(mid, t_unix):
+        return
+    ivs = entry_intervals(mid)
+    if t_unix < ivs[0][0]:
         raise hf.HFRejected("market_not_open")
-    if t_unix >= closes:
-        raise hf.HFRejected("market_closed")
+    if len(ivs) > 1 and t_unix < ivs[1][0]:
+        raise hf.HFRejected("target_forming")       # V3: reopens once the window is running
+    raise hf.HFRejected("market_closed")
 
 
 def check_rate(prior_ts_ms: list, t_ms: int) -> None:
@@ -337,50 +403,271 @@ def shares_for(dollars: Decimal, side: str, qy: Decimal, qn: Decimal, b: Decimal
     return CTX.subtract(new_qs, q_s).quantize(SHARE_Q, rounding=ROUND_DOWN)
 
 
-def replay(bets: list[dict], b: Decimal | None = None, start: int | None = None) -> list[dict]:
+# ── V3: the live-price model (Decimal end to end, so every validator gets the same digits) ──
+_SQRT_2PI = Decimal("2.5066282746310005024157652848110452530069867406099")
+_AS_P = Decimal("0.2316419")
+_AS_B = (Decimal("0.319381530"), Decimal("-0.356563782"), Decimal("1.781477937"),
+         Decimal("-1.821255978"), Decimal("1.330274429"))
+P_Q = Decimal("0.000001")
+SIGMA_Q = Decimal("0.000000000001")
+
+
+def norm_cdf(z: Decimal) -> Decimal:
+    """Standard normal CDF, Abramowitz & Stegun 26.2.17 (|error| < 7.5e-8), in the fixed Decimal
+    context. The approximation IS the consensus definition."""
+    z = Decimal(z)
+    neg = z < 0
+    x = -z if neg else z
+    if x > 40:
+        return Decimal(0) if neg else Decimal(1)
+    t = CTX.divide(Decimal(1), CTX.add(Decimal(1), CTX.multiply(_AS_P, x)))
+    poly = Decimal(0)
+    for coef in reversed(_AS_B):
+        poly = CTX.multiply(t, CTX.add(coef, poly))
+    pdf = CTX.divide(CTX.exp(CTX.divide(CTX.multiply(x, x), Decimal(-2))), _SQRT_2PI)
+    c = CTX.subtract(Decimal(1), CTX.multiply(pdf, poly))
+    return CTX.subtract(Decimal(1), c) if neg else c
+
+
+def p_model(spot: Decimal, target: Decimal, sigma_s: Decimal, tau_s: Decimal) -> Decimal:
+    """P(settle >= target | spot) for a driftless lognormal with per-second sigma over tau seconds,
+    quantized to 1e-6 and clamped to [P_FLOOR, 1 - P_FLOOR]."""
+    spot, target = Decimal(spot), Decimal(target)
+    floor = config.MARKETS_V3_P_FLOOR
+    if spot <= 0 or target <= 0:
+        return Decimal("0.5")
+    s = CTX.multiply(Decimal(sigma_s), CTX.sqrt(max(Decimal(tau_s), Decimal(0))))
+    if s <= 0:
+        p = Decimal(1) if spot >= target else Decimal(0)
+    else:
+        z = CTX.subtract(CTX.divide(CTX.ln(CTX.divide(spot, target)), s), CTX.divide(s, Decimal(2)))
+        p = norm_cdf(z)
+    p = p.quantize(P_Q, rounding=ROUND_HALF_EVEN)
+    return min(max(p, floor), Decimal(1) - floor)
+
+
+def spread_for(tau_s: Decimal) -> Decimal:
+    """Per-share spread on an in-window bet with tau_s seconds to the end:
+    SPREAD + SPREAD_K x sqrt(LEAD_S / tau)."""
+    tau = max(Decimal(tau_s), Decimal(1))
+    lat = CTX.multiply(config.MARKETS_V3_SPREAD_K, CTX.sqrt(CTX.divide(config.MARKETS_V3_LEAD_S, tau)))
+    return CTX.add(config.MARKETS_V3_SPREAD, lat)
+
+
+def anchor(p: Decimal, b: Decimal) -> Decimal:
+    """The UP-quantity shift that makes an empty LMSR quote p: b x ln(p / (1 - p))."""
+    p = Decimal(p)
+    return CTX.multiply(Decimal(b), CTX.ln(CTX.divide(p, CTX.subtract(Decimal(1), p))))
+
+
+def latest_mark(rows: list[dict], t_ms: int, max_age_ms: int | None = None) -> tuple[int, float] | None:
+    """(t, mark) of the last tick AT OR BEFORE t_ms (ties broken by the larger mark, the same
+    (t, mark) order the averages use); None if there is none, or it is older than max_age_ms."""
+    best = None
+    for r in rows:
+        t = int(r["t"])
+        if t > t_ms:
+            continue
+        m = tick_mark(r)
+        if m is None:
+            continue
+        if best is None or (t, m) > best:
+            best = (t, float(m))
+    if best is None or (max_age_ms is not None and best[0] < t_ms - max_age_ms):
+        return None
+    return best
+
+
+def first_mark_after(rows: list[dict], t_ms: int, max_wait_ms: int | None = None) -> tuple[int, float] | None:
+    """(t, mark) of the first tick AT OR AFTER t_ms (ties broken by the smaller mark: the first in
+    the (t, mark) order the averages use); None if there is none, or it is later than max_wait_ms."""
+    best = None
+    for r in rows:
+        t = int(r["t"])
+        if t < t_ms:
+            continue
+        m = tick_mark(r)
+        if m is None:
+            continue
+        if best is None or (t, m) < best:
+            best = (t, float(m))
+    if best is None or (max_wait_ms is not None and best[0] > t_ms + max_wait_ms):
+        return None
+    return best
+
+
+def minute_marks(rows: list[dict], lo_ms: int, hi_ms: int) -> list[tuple[int, float]]:
+    """[(minute index, average mark)] for every minute in [lo_ms, hi_ms) that has a tick, each
+    average over its ticks sorted by (t, mark) and rounded like every other consensus average."""
+    by_m: dict[int, list[tuple[int, float]]] = {}
+    for r in rows:
+        t = int(r["t"])
+        if t < lo_ms or t >= hi_ms:
+            continue
+        m = tick_mark(r)
+        if m is None:
+            continue
+        by_m.setdefault(t // 60_000, []).append((t, float(m)))
+    out = []
+    for k in sorted(by_m):
+        marks = [m for _, m in sorted(by_m[k])]
+        out.append((k, round_px(sum(marks) / len(marks))))
+    return out
+
+
+def sigma_per_s(rows: list[dict], day_unix: int) -> Decimal | None:
+    """Per-second sigma from one asset's ticks of the UTC day starting at day_unix: the RMS of the
+    one-minute log returns between CONSECUTIVE minute averages (a session gap contributes nothing).
+    None when fewer than MARKETS_V3_SIGMA_MIN_RETURNS returns exist."""
+    mins = minute_marks(rows, day_unix * 1000, (day_unix + 86400) * 1000)
+    acc, n = Decimal(0), 0
+    for (k0, m0), (k1, m1) in zip(mins, mins[1:]):
+        if k1 != k0 + 1 or m0 <= 0 or m1 <= 0:
+            continue
+        r = CTX.ln(CTX.divide(Decimal(str(m1)), Decimal(str(m0))))
+        acc = CTX.add(acc, CTX.multiply(r, r))
+        n += 1
+    if n < config.MARKETS_V3_SIGMA_MIN_RETURNS:
+        return None
+    s_min = CTX.sqrt(CTX.divide(acc, Decimal(n)))
+    return CTX.divide(s_min, CTX.sqrt(Decimal(60))).quantize(SIGMA_Q, rounding=ROUND_HALF_EVEN)
+
+
+def sigma_fallback(asset: str, start: int) -> Decimal:
+    board = hf.hf_bands_as_of(start) or {}
+    cls = (board.get(asset) or (None, None, None, ""))[3]
+    return config.MARKETS_V3_SIGMA_FALLBACK.get(cls, config.MARKETS_V3_SIGMA_DEFAULT)
+
+
+def sigma_day(start: int) -> int:
+    """The UTC day whose ticks size a market starting at `start`: the previous one."""
+    return (int(start) // 86400 - 1) * 86400
+
+
+def make_pricer(mid: str, rows: list[dict], target: float | None, sigma: Decimal):
+    """The per-bet pricing context for a V3 market: bet -> None (pre-start: crowd only),
+    {"ignore": why} (no usable fill tick) or {"p", "tick_t", "tick_mark", "tau", "spread"}. `rows`
+    are the asset's sealed ticks covering the window; the fill is the first tick at or after the
+    bet's receipt time + MARKETS_V3_FILL_DELAY_S (the latency guard)."""
+    _a, _w, start, end = parse_market_id(mid)
+    max_wait_ms = config.MARKETS_V3_MAX_TICK_AGE_S * 1000
+    delay_ms = config.MARKETS_V3_FILL_DELAY_S * 1000
+    half_avg = Decimal(config.MARKETS_AVG_S) / Decimal(2)
+
+    def pricer(bet: dict):
+        t_us = int(bet["order"][1])
+        if t_us < start * 1_000_000:
+            return None
+        if target is None:
+            return {"ignore": "no_target"}
+        tk = first_mark_after(rows, t_us // 1000 + delay_ms, max_wait_ms)
+        if tk is None:
+            return {"ignore": "no_fill"}
+        tau = CTX.subtract(CTX.subtract(Decimal(end), CTX.divide(Decimal(tk[0]), Decimal(1000))), half_avg)
+        tau = max(tau, Decimal(1))
+        p = p_model(Decimal(str(tk[1])), Decimal(str(target)), sigma, tau)
+        return {"p": p, "tick_t": tk[0], "tick_mark": tk[1], "tau": tau, "spread": spread_for(tau)}
+    return pricer
+
+
+def quote_context(mid: str, rows: list[dict], target: float | None, sigma: Decimal, now: float) -> dict | None:
+    """What a front end shows RIGHT NOW for an in-window market: the model at the latest tick at or
+    before `now` (the fill of a bet placed now lands FILL_DELAY_S later, at a tick that does not
+    exist yet). {"p", "tick_t", "tick_mark", "tau", "spread"} or None."""
+    _a, _w, start, end = parse_market_id(mid)
+    if target is None or now < start:
+        return None
+    tk = latest_mark(rows, int(now * 1000), config.MARKETS_V3_MAX_TICK_AGE_S * 1000)
+    if tk is None:
+        return None
+    half_avg = Decimal(config.MARKETS_AVG_S) / Decimal(2)
+    tau = max(CTX.subtract(CTX.subtract(Decimal(end), Decimal(str(now))), half_avg), Decimal(1))
+    p = p_model(Decimal(str(tk[1])), Decimal(str(target)), sigma, tau)
+    return {"p": p, "tick_t": tk[0], "tick_mark": tk[1], "tau": tau, "spread": spread_for(tau)}
+
+
+def replay(bets: list[dict], b: Decimal | None = None, start: int | None = None, pricer=None) -> list[dict]:
     """Price one market's bets in canonical order. Each bet: {key, account, side, dollars(Decimal),
-    order(tuple)}. Returns the bets in order with `shares` and `status` ("ok" or "ignored:<why>").
+    order(tuple)}. Returns the bets in order with `shares` (what the bet pays per $1 share) and
+    `status` ("ok" or "ignored:<why>"), plus `lmsr_shares` (what moved the market), `price_paid`
+    and, for a live-priced bet, `p_model`/`tick_t`/`tick_mark`.
     `start` selects the rule set (V1 fixed b, V2 liquidity-sensitive b); an explicit `b` pins it.
+    `pricer` (V3, make_pricer) anchors the LMSR to the live-price model for in-window bets and
+    charges the spread; without it every bet is crowd-only, exactly as before V3.
     A bet already marked ignored (e.g. by the collateral pass) is passed through unpriced."""
     _lo, _hi, cap = limits_for(start)
     qy = qn = Decimal(0)
     volume = Decimal(0)
     spent: dict[str, Decimal] = {}
     out = []
+    pcap = config.MARKETS_V3_PRICE_CAP
     for bet in sorted(bets, key=lambda x: x["order"]):
         if str(bet.get("status", "ok")).startswith("ignored"):
-            out.append({**bet, "shares": Decimal(0)})
+            out.append({**bet, "shares": Decimal(0), "lmsr_shares": Decimal(0)})
             continue
         d = bet["dollars"]
         acct = bet["account"]
         if spent.get(acct, Decimal(0)) + d > cap:
-            out.append({**bet, "shares": Decimal(0), "status": "ignored:per_market_cap"})
+            out.append({**bet, "shares": Decimal(0), "lmsr_shares": Decimal(0), "status": "ignored:per_market_cap"})
+            continue
+        ctx = pricer(bet) if pricer is not None else None
+        if ctx and ctx.get("ignore"):
+            out.append({**bet, "shares": Decimal(0), "lmsr_shares": Decimal(0), "status": "ignored:" + ctx["ignore"]})
             continue
         bb = Decimal(b) if b is not None else lmsr_b(start, volume)
-        sh = shares_for(d, bet["side"], qy, qn, bb)
+        a = anchor(ctx["p"], bb) if ctx else Decimal(0)
+        sh = shares_for(d, bet["side"], CTX.add(qy, a), qn, bb)
+        rec = {**bet, "lmsr_shares": sh, "status": "ok"}
+        if ctx:
+            p_avg = CTX.divide(d, sh)
+            p_paid = min(CTX.add(p_avg, ctx["spread"]), pcap)
+            rec["shares"] = CTX.divide(d, p_paid).quantize(SHARE_Q, rounding=ROUND_DOWN)
+            rec.update(price_paid=p_paid, p_model=ctx["p"], tick_t=ctx["tick_t"], tick_mark=ctx["tick_mark"],
+                       spread=ctx["spread"], tau=ctx["tau"])
+        else:
+            rec["shares"] = sh
+            rec["price_paid"] = CTX.divide(d, sh) if sh > 0 else None
         if bet["side"] == "UP":
             qy += sh
         else:
             qn += sh
         volume += d
         spent[acct] = spent.get(acct, Decimal(0)) + d
-        out.append({**bet, "shares": sh, "status": "ok"})
+        out.append(rec)
     return out
 
 
-def market_price_up(bets: list[dict], start: int | None = None) -> Decimal:
-    """The UP price after a market's (already replayed, status ok) bets, at the b the NEXT bet
-    would be priced with — what a front end quotes."""
+def market_state_after(bets: list[dict], start: int | None = None) -> tuple[Decimal, Decimal, Decimal]:
+    """(qy, qn, b) after a market's replayed (status ok) bets; b is what the NEXT bet is priced with."""
     qy = qn = volume = Decimal(0)
     for r in bets:
         if r.get("status") != "ok":
             continue
+        sh = r.get("lmsr_shares", r["shares"])
         if r["side"] == "UP":
-            qy += r["shares"]
+            qy += sh
         else:
-            qn += r["shares"]
+            qn += sh
         volume += r["dollars"]
-    return price_up(qy, qn, lmsr_b(start, volume))
+    return qy, qn, lmsr_b(start, volume)
+
+
+def market_price_up(bets: list[dict], start: int | None = None, p_now: Decimal | None = None) -> Decimal:
+    """The UP price after a market's (already replayed, status ok) bets, at the b the NEXT bet
+    would be priced with — what a front end quotes. `p_now` (V3, in-window) anchors it to the
+    live-price model the way the next bet will be."""
+    qy, qn, bb = market_state_after(bets, start)
+    a = anchor(p_now, bb) if p_now is not None else Decimal(0)
+    return price_up(CTX.add(qy, a), qn, bb)
+
+
+def buy_price(side: str, p_up: Decimal, live: bool, tau_s: Decimal | None = None) -> Decimal:
+    """What one share of `side` costs the next buyer at the quoted UP price (the spread applies to
+    an in-window V3 bet only, and depends on the time left)."""
+    p = Decimal(p_up) if side == "UP" else CTX.subtract(Decimal(1), Decimal(p_up))
+    if not live:
+        return p
+    return min(CTX.add(p, spread_for(tau_s if tau_s is not None else Decimal(1))), config.MARKETS_V3_PRICE_CAP)
 
 
 def bet_pnl(side: str, shares: Decimal, dollars: Decimal, outcome: str) -> Decimal:
@@ -454,6 +741,11 @@ def _db(cache_dir: str) -> sqlite3.Connection:
     c.execute("CREATE TABLE IF NOT EXISTS settle (cycle INTEGER, entity TEXT, won TEXT, lost TEXT, burned TEXT, "
               "deducted TEXT, debt TEXT, payable TEXT, lcum TEXT, bcum TEXT, dcum TEXT, PRIMARY KEY (cycle, entity))")
     c.execute("CREATE TABLE IF NOT EXISTS settle_meta (cycle INTEGER PRIMARY KEY, emission TEXT)")
+    # V3 (additive: a cache built before V3 keeps its grader version; these fill in from the replay)
+    c.execute("CREATE TABLE IF NOT EXISTS v3_prices (key TEXT PRIMARY KEY, market_id TEXT, p_model TEXT, "
+              "price_paid TEXT, tick_t INTEGER, tick_mark REAL)")
+    c.execute("CREATE TABLE IF NOT EXISTS v3_sigma (asset TEXT, day INTEGER, sigma TEXT, measured INTEGER, "
+              "PRIMARY KEY (asset, day))")
     row = c.execute("SELECT v FROM meta WHERE k='grader_version'").fetchone()
     if (int(row[0]) if row else 0) != GRADER_VERSION:
         for t in ("windows_seen", "bets", "outcomes", "results", "burns", "coll", "settle", "settle_meta"):
@@ -494,11 +786,16 @@ def ingest_entries(db: sqlite3.Connection, w: int, entries: list[dict]) -> int:
     return n
 
 
-def grade_market(db: sqlite3.Connection, mid: str, rows: list[dict]) -> str:
+def grade_market(db: sqlite3.Connection, mid: str, rows: list[dict], sigma: Decimal | None = None) -> str:
+    """Grade one market from the asset's sealed ticks (covering target minute .. end). `sigma` is the
+    V3 per-second volatility (sigma_for_market); a V3 market without one prices with the class
+    fallback."""
     asset, _w, start, end = parse_market_id(mid)
     outcome, target, settle = resolve(rows, start, end)
-    opens, closes = entry_interval(mid)
     v2 = is_v2(start)
+    pricer = None
+    if is_v3(start):
+        pricer = make_pricer(mid, rows, target, sigma if sigma is not None else sigma_fallback(asset, start))
     coll = {}
     if v2:
         coll = {k: s for k, s in db.execute(
@@ -510,13 +807,16 @@ def grade_market(db: sqlite3.Connection, mid: str, rows: list[dict]) -> str:
         if v2 and coll.get(k, "ok") != "ok":
             bet["status"] = coll[k]                  # ignored:collateral — never priced
         # The replay decides the entry window, whatever the ingest accepted.
-        (bets if opens * 1_000_000 <= int(t) < closes * 1_000_000 else outside).append(bet)
-    for r in replay(bets, start=start) + [{**b, "shares": Decimal(0), "status": "ignored:outside_entry_window"}
-                                          for b in outside]:
+        (bets if in_entry_us(mid, int(t)) else outside).append(bet)
+    for r in replay(bets, start=start, pricer=pricer) + [
+            {**b, "shares": Decimal(0), "status": "ignored:outside_entry_window"} for b in outside]:
         pnl = bet_pnl(r["side"], r["shares"], r["dollars"], outcome) if r["status"] == "ok" else Decimal(0)
         db.execute("INSERT OR REPLACE INTO results VALUES (?,?,?,?,?,?,?,?,?)",
                    (r["key"], mid, r["account"], str(r["dollars"]), str(r["shares"]), str(pnl),
                     r["status"], outcome, end))
+        if r.get("p_model") is not None:
+            db.execute("INSERT OR REPLACE INTO v3_prices VALUES (?,?,?,?,?,?)",
+                       (r["key"], mid, str(r["p_model"]), str(r["price_paid"]), int(r["tick_t"]), float(r["tick_mark"])))
     db.execute("INSERT OR REPLACE INTO outcomes VALUES (?,?,?,?,?)", (mid, outcome, target, settle, end))
     return outcome
 
@@ -893,6 +1193,75 @@ def pnl_vector(db: sqlite3.Connection, uid_by_hk: dict, now: int) -> dict[int, f
     return {u: w / total for u, w in weights.items()}
 
 
+def day_ticks(base: str, tick_dir: str, pairs: set, day_unix: int) -> tuple[dict, list]:
+    """({pair: rows} for the UTC day, missing windows) reading every window of the day ONCE (a window
+    file carries every pair; fetching per pair would read it |pairs| times). Same cache and same
+    in-place local source as hf_grade._ticks_for."""
+    from . import hf_grade
+    os.makedirs(tick_dir, exist_ok=True)
+    out: dict = {p: [] for p in pairs}
+    missing = []
+    lo_ms, hi_ms = day_unix * 1000, (day_unix + 86400) * 1000
+    w = lo_ms
+    while w < hi_ms:
+        local = os.path.join(tick_dir, f"{w}.ticks.jsonl")
+        src = local
+        if not os.path.exists(local):
+            cand = (os.path.join(hf_grade.LOCAL_TICK_SRC, f"{w}.ticks.jsonl") if hf_grade.LOCAL_TICK_SRC else None)
+            if cand and os.path.exists(cand) and os.path.exists(cand[:-6] + ".json"):
+                src = cand
+            else:
+                txt = hf_grade._fetch_text(f"{base.rstrip('/')}/{w}/ticks.jsonl")
+                if txt is not None:
+                    tmp = local + ".tmp"
+                    with open(tmp, "w", encoding="utf-8") as fh:
+                        fh.write(txt)
+                    os.replace(tmp, local)
+        rows = []
+        try:
+            with open(src, encoding="utf-8") as fh:
+                for line in fh:
+                    if not line.strip():
+                        continue
+                    d = json.loads(line)
+                    if d.get("a") in out:
+                        rows.append(d)
+        except (OSError, ValueError, KeyError):
+            missing.append(w)
+        else:
+            for d in rows:
+                out[d["a"]].append(d)
+        w += hf_grade.WINDOW_MS
+    for p in out:
+        out[p].sort(key=lambda d: int(d["t"]))
+    return out, missing
+
+
+def sigma_for_market(db: sqlite3.Connection, base: str, tick_dir: str, asset: str, start: int,
+                     final: bool = False) -> Decimal | None:
+    """The V3 sigma for a market starting at `start`: measured from the previous UTC day's sealed
+    ticks (every board asset of that day computed and cached in one pass), else the class
+    fallback. None while a window of that day is still unfetchable and `final` is False (wait);
+    with `final` the fallback is used, and remembered."""
+    day = sigma_day(start)
+    row = db.execute("SELECT sigma FROM v3_sigma WHERE asset=? AND day=?", (asset, day)).fetchone()
+    if row:
+        return Decimal(row[0])
+    board = hf.hf_bands_as_of(start) or {}
+    pairs = set(board) | {asset}
+    rows_by, missing = day_ticks(base, tick_dir, pairs, day)
+    if missing and not final:
+        return None
+    for p in sorted(pairs):
+        s = sigma_per_s(rows_by.get(p, []), day) if not missing else None
+        measured = s is not None
+        if s is None:
+            s = sigma_fallback(p, start)
+        db.execute("INSERT OR REPLACE INTO v3_sigma VALUES (?,?,?,?)", (p, day, str(s), int(measured)))
+    db.commit()
+    return Decimal(db.execute("SELECT sigma FROM v3_sigma WHERE asset=? AND day=?", (asset, day)).fetchone()[0])
+
+
 def sync_and_grade(base: str, cache_dir: str, now: float, chain_view: ChainView | None = None) -> None:
     """Pull Markets receipts from the published windows, decide V2 collateral, grade every market
     whose receipts and ticks are complete, and close finished settlement cycles. Incremental; a from-scratch
@@ -953,7 +1322,13 @@ def sync_and_grade(base: str, cache_dir: str, now: float, chain_view: ChainView 
                                                 (start - config.MARKETS_AVG_S) * 1000, end * 1000)
             if missing and now_s < end + config.MARKETS_GRADE_ABANDON_S:
                 continue                       # never grade a hole: wait, then void
-            grade_market(db, mid, rows)
+            sigma = None
+            if is_v3(start):
+                sigma = sigma_for_market(db, base, tick_dir, asset, start,
+                                         final=now_s >= end + config.MARKETS_GRADE_ABANDON_S)
+                if sigma is None:
+                    continue                   # previous day's ticks not all in hand yet: wait
+            grade_market(db, mid, rows, sigma)
             moved += 1
         if ch is not None and v2_live:
             moved += settle_cycles(db, ch, base, cache_dir, now_s, published_through)
