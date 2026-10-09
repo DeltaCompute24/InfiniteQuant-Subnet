@@ -1486,9 +1486,9 @@ def markets_entity_dust_as_of(t_unix: float) -> bool:
 # Kalshi's 15-minute markets do: the chance is driven by the live price, bets still nudge it, and
 # betting closes only in the last minutes. The pre-start part of the entry window is unchanged
 # (crowd-only LMSR from 50/50, closed for the target's averaging minute). Markets starting before the
-# stamp price and grade exactly as before. Mainnet 2026-10-10 00:00:00 UTC in source (the first V3
+# stamp price and grade exactly as before. Mainnet 2026-10-09 15:00:00 UTC in source (Whit: switch now; the first V3
 # day runs on practice dollars; collateral arms 10-11); testnet overrides via .env.test only.
-MARKETS_V3_FROM_UNIX = int(os.getenv("SN89_MARKETS_V3_FROM", "1791590400"))
+MARKETS_V3_FROM_UNIX = int(os.getenv("SN89_MARKETS_V3_FROM", "1791558000"))
 
 
 def markets_v3_as_of(t_unix: float) -> bool:
