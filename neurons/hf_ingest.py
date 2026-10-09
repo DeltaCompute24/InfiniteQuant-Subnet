@@ -610,11 +610,16 @@ class Ingest:
         # A `payload.kind == "mk.bet"` frame is a Markets bet (sn89_signals/markets.py): the same
         # signed frame, receipt and anchored window. It holds no HF pair lock or open-call slot;
         # its own rate ledger is per ACCOUNT, because an entity bets for many subaccounts.
-        is_market = str((payload or {}).get("kind", "")) == markets.KIND
+        # `mk.burn` (V2): an entity's claim that it burned alpha on chain; validators credit it only
+        # after reading the extrinsic's event. It rides the same anchored window, no rate ledger.
+        kind = str((payload or {}).get("kind", ""))
+        is_market = kind in markets.MARKETS_KINDS
+        is_burn = kind == markets.KIND_BURN
         try:
             if is_market:
-                markets.validate_bet(payload, hk, t0)
-                markets.check_rate(self.markets_sent_ms.get(str(payload.get("account")), []), t_recv_ms)
+                markets.validate_entry(payload, hk, t0)
+                if not is_burn:
+                    markets.check_rate(self.markets_sent_ms.get(str(payload.get("account")), []), t_recv_ms)
             elif is_closers:
                 # BASE-or-better at submission time. Enforced here so an
                 # unqualified miner is told in milliseconds rather than
@@ -656,7 +661,8 @@ class Ingest:
         if is_market:
             # Markets bookkeeping only: the per-account rate ledger. markets.py prices and grades
             # the bet off the same anchored window log the entry below lands in.
-            self.markets_sent_ms.setdefault(str(payload.get("account")), []).append(t_recv_ms)
+            if not is_burn:
+                self.markets_sent_ms.setdefault(str(payload.get("account")), []).append(t_recv_ms)
             w = hf.window_start_ms(t_recv_ms)
             self.windows.setdefault(w, []).append({"submit": frame, "receipt": rcpt})
             self.record_live(frame, rcpt)

@@ -1123,7 +1123,7 @@ class HFLockFeedError(Exception):
 # Kinds that share the HF window logs but are NOT HF calls: a Closers vote (graded by
 # closers.py) and a Markets bet (graded by markets.py). Every reader of the windows that
 # means "HF calls" filters through is_hf_call(), so a new kind cannot be missed in one place.
-NON_HF_KINDS = ("closers", "mk.bet")
+NON_HF_KINDS = ("closers", "mk.bet", "mk.burn")
 
 
 def is_hf_call(payload: dict | None) -> bool:

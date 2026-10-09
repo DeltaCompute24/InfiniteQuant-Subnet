@@ -1419,3 +1419,47 @@ MARKETS_MIN_RESOLVED = int(os.getenv("SN89_MARKETS_MIN_RESOLVED", "20"))
 MARKETS_GATE_Z = float(os.getenv("SN89_MARKETS_GATE_Z", "1.645"))
 MARKETS_GRADE_SETTLE_S = int(os.getenv("SN89_MARKETS_GRADE_SETTLE_S", "240"))
 MARKETS_GRADE_ABANDON_S = int(os.getenv("SN89_MARKETS_GRADE_ABANDON_S", "1800"))
+
+# ── Markets v2: entity collateral + P&L-basis daily emission (Whit, 2026-10-08) ──
+# Markets STARTING at/after this instant settle Vanta-style (markets.py "V2"): every bet must be
+# covered by the entity's on-chain alpha collateral, losing stakes are owed as a burn, and each
+# UTC day the entity is emitted only its subaccounts' verified winnings (the rest of the Markets
+# share burns). Before it, the play-money skill vector of 2026-10-09 stays exactly as it was.
+# ⚑ PROPOSED MAINNET ARM 2026-10-11 00:00:00 UTC — set by Whit before landing. 0 = off.
+# Testnet overrides via SN89_MARKETS_COLLATERAL_FROM in .env.test.
+MARKETS_COLLATERAL_FROM_UNIX = int(os.getenv("SN89_MARKETS_COLLATERAL_FROM", "1791676800"))
+
+
+def markets_collateral_as_of(t_unix: float) -> bool:
+    """A market STARTING at t settles under V2 (collateral + P&L emission)."""
+    return bool(MARKETS_COLLATERAL_FROM_UNIX and t_unix >= MARKETS_COLLATERAL_FROM_UNIX)
+
+
+# V2 limits, play dollars (the user's stake is real alpha at the market's day rate).
+MARKETS_V2_MIN_BET = _Decimal(os.getenv("SN89_MARKETS_V2_MIN_BET", "1"))
+MARKETS_V2_MAX_BET = _Decimal(os.getenv("SN89_MARKETS_V2_MAX_BET", "10000"))
+MARKETS_V2_MAX_PER_MARKET = _Decimal(os.getenv("SN89_MARKETS_V2_MAX_PER_MARKET", "25000"))
+# V2 liquidity-sensitive LMSR: a bet is priced with b = B0 + K x (dollars already bet in the
+# market). B0 = 9,500 makes a $1,000 bet on a fresh 50/50 market move it to ~55% (5 points).
+MARKETS_V2_LMSR_B0 = _Decimal(os.getenv("SN89_MARKETS_V2_LMSR_B0", "9500"))
+MARKETS_V2_LMSR_K = _Decimal(os.getenv("SN89_MARKETS_V2_LMSR_K", "0.25"))
+# Collateral is read at the first block of each UTC hour (the bet's receipt hour).
+MARKETS_COLLATERAL_SNAPSHOT_S = int(os.getenv("SN89_MARKETS_COLLATERAL_SNAPSHOT_S", "3600"))
+# Settlement CYCLES (Whit 2026-10-08): winnings are settled per weight cycle, on a fixed grid of
+# MARKETS_SETTLE_PERIOD_S anchored at the V2 arm. The default is one SN89 tempo (360 blocks x 12 s),
+# so every weight commit carries the winnings settled in the cycle before it. A cycle CLOSES (its
+# winnings, losses and burn claims fixed) MARKETS_SETTLE_GRACE_S after it ends, once its markets
+# are graded.
+MARKETS_SETTLE_PERIOD_S = int(os.getenv("SN89_MARKETS_SETTLE_PERIOD_S", "4320"))
+MARKETS_SETTLE_GRACE_S = int(os.getenv("SN89_MARKETS_SETTLE_GRACE_S", "900"))
+# Losses must be burned within this long; unburned losses older than that are taken out of the
+# entity's winnings (withheld emission burns like burned alpha), so not burning never pays.
+MARKETS_BURN_DEADLINE_S = int(os.getenv("SN89_MARKETS_BURN_DEADLINE_S", "86400"))
+# Dollars -> alpha: the subnet pool price (TAO per alpha) at the day's first block times the
+# average TAOUSD mark of the minute before 00:00 UTC from the sealed tick windows.
+MARKETS_RATE_PAIR = os.getenv("SN89_MARKETS_RATE_PAIR", "TAOUSD")
+MARKETS_RATE_FALLBACK_DAYS = int(os.getenv("SN89_MARKETS_RATE_FALLBACK_DAYS", "7"))
+# Share of a subnet's alpha_out that goes to miners (the dTAO 18 / 41 / 41 owner / miner /
+# validator split). Times the block count, alpha_out per block and the mecid-0 split read on
+# chain, it gives a cycle's Markets emission that winnings are measured against.
+MARKETS_MINER_FRACTION = _Decimal(os.getenv("SN89_MARKETS_MINER_FRACTION", "0.41"))

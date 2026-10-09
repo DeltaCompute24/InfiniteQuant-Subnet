@@ -406,6 +406,27 @@ vendored `bittensor_cli`, which only uses it as a block-explorer URL.
 State: `~/.sn89/validator.db`. Grading is deterministic — same chain + same anchored
 ticks ⇒ same weights. **Run the current release**: grading code is consensus; a stale validator diverges and loses VTRUST.
 
+#### Collateral and P&L emission (markets starting from the V2 arm, proposed 2026-10-11 00:00 UTC)
+
+From the V2 arm (`config.MARKETS_COLLATERAL_FROM_UNIX`) Markets settles the way Vanta pays entities:
+
+- **Collateral.** Every bet must be covered by its entity's alpha: the stake the entity hotkey's
+  owner coldkey holds on that hotkey on this subnet, read at the first block of each UTC hour,
+  less any unburned losses. Bets are taken in order; one that would push the entity's open stake
+  past its collateral is ignored.
+- **Bet sizes.** $1 to $10,000 per bet, up to $25,000 per account per market. Prices deepen as
+  more is bet: a $1,000 bet on a new market moves it about 5 points.
+- **Losses.** A losing bet's stake is burned. The entity burns it on chain (`burn_alpha` or
+  `recycle_alpha` on its hotkey) and files a signed `mk.burn` claim naming the block and extrinsic;
+  validators read that event before crediting it. Losses still unburned 24 hours after their cycle
+  are taken out of the entity's winnings.
+- **Winnings.** Settlement runs in cycles of one tempo (4,320 s). For each closed cycle the
+  entity's weight in the Markets share is its subaccounts' winnings (payout minus stake, in alpha)
+  divided by that cycle's Markets emission; if winnings exceed it they are cut pro rata, and
+  anything unused burns. Dollars convert to alpha at the subnet pool price at the day's first block
+  times the TAOUSD average of the minute before 00:00 UTC.
+- The play-money skill reward ends at the V2 arm.
+
 ### Timelock version compatibility — READ THIS IF VTRUST IS FALLING
 
 Two mutually-unreadable drand-tlock ciphertext formats exist:
