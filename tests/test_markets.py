@@ -294,8 +294,11 @@ class TestIngestMarkets:
         out = ing.handle(self._frame(ent, _payload(start, account=f"{ent.ss58_address}_1")))
         assert out["kind"] == "hf.reject" and out["reason"] == "markets_not_live"
 
-    def test_refuses_a_bet_on_the_running_window(self, armed):
+    def test_refuses_a_bet_on_the_running_window(self, armed, monkeypatch):
         from bittensor_wallet import Keypair
+        # Pre-V3 rule. Pinned so the test does not flip the moment the V3 stamp passes (it did,
+        # at 2026-10-09 15:00 UTC): under V3 a running window takes bets until its cutoff.
+        monkeypatch.setattr(config, "MARKETS_V3_FROM_UNIX", 2**62)
         ent = Keypair.create_from_uri("//MarketsEntity")
         ing = self._ingest({ent.ss58_address})
         running = int(time.time()) // 900 * 900                 # started already: closed to bets
