@@ -434,7 +434,7 @@ vendored `bittensor_cli`, which only uses it as a block-explorer URL.
 State: `~/.sn89/validator.db`. Grading is deterministic — same chain + same anchored
 ticks ⇒ same weights. **Run the current release**: grading code is consensus; a stale validator diverges and loses VTRUST.
 
-#### Collateral and P&L emission (markets starting from the V2 arm, proposed 2026-10-11 00:00 UTC)
+#### Collateral and P&L emission (markets starting from the V2 arm, 2026-10-10 01:00 UTC)
 
 From the V2 arm (`config.MARKETS_COLLATERAL_FROM_UNIX`) Markets settles the way Vanta pays entities:
 

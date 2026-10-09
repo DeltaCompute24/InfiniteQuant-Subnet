@@ -1425,9 +1425,9 @@ MARKETS_GRADE_ABANDON_S = int(os.getenv("SN89_MARKETS_GRADE_ABANDON_S", "1800"))
 # covered by the entity's on-chain alpha collateral, losing stakes are owed as a burn, and each
 # UTC day the entity is emitted only its subaccounts' verified winnings (the rest of the Markets
 # share burns). Before it, the play-money skill vector of 2026-10-09 stays exactly as it was.
-# ⚑ PROPOSED MAINNET ARM 2026-10-11 00:00:00 UTC — set by Whit before landing. 0 = off.
+# ⚑ MAINNET ARM 2026-10-10 01:00:00 UTC (Whit, 2026-10-09 23:31 UTC: start real-money bets now). 0 = off.
 # Testnet overrides via SN89_MARKETS_COLLATERAL_FROM in .env.test.
-MARKETS_COLLATERAL_FROM_UNIX = int(os.getenv("SN89_MARKETS_COLLATERAL_FROM", "1791676800"))
+MARKETS_COLLATERAL_FROM_UNIX = int(os.getenv("SN89_MARKETS_COLLATERAL_FROM", "1791594000"))
 
 
 def markets_collateral_as_of(t_unix: float) -> bool:
