@@ -631,9 +631,14 @@ class RpcChainView(ChainView):
 
     def entity_stake(self, hotkey: str, block: int) -> Decimal:
         owner = self._q("SubtensorModule", "Owner", [hotkey], block)
-        st = self.c.st
-        bal = st.get_stake(coldkey_ss58=str(owner), hotkey_ss58=hotkey, netuid=self.netuid, block=block)
-        return Decimal(str(getattr(bal, "tao", bal)))
+        err = None
+        for st in (self.c.st, self.c._archive()):    # the public node prunes state older than ~256 blocks
+            try:
+                bal = st.get_stake(coldkey_ss58=str(owner), hotkey_ss58=hotkey, netuid=self.netuid, block=block)
+                return Decimal(str(getattr(bal, "tao", bal)))
+            except Exception as e:  # noqa: BLE001
+                err = e
+        raise RuntimeError(f"unreadable stake {hotkey[:8]} at {block}: {err}")
 
     def alpha_price_tao(self, block: int) -> Decimal:
         tao = Decimal(int(self._q("SubtensorModule", "SubnetTAO", [self.netuid], block)))
@@ -898,8 +903,12 @@ def sync_and_grade(base: str, cache_dir: str, now: float, chain_view: ChainView 
     tick_dir = os.path.join(cache_dir, "ticks")
     seen = {r[0] for r in db.execute("SELECT w FROM windows_seen")}
     index = hf_grade._index(base)
+    # No Markets frame is valid before the arm (ingest_entries re-checks every receipt), so windows
+    # that ended well before it cannot change any result. Skipping them keeps a fresh cache from
+    # fetching the network's whole HF history (21k+ windows on finney).
+    lo_ms = (config.MARKETS_FROM_UNIX - 2 * 3600) * 1000 if config.MARKETS_FROM_UNIX else 0
     for w in index:
-        if w in seen:
+        if w in seen or w < lo_ms:
             continue
         txt = hf_grade._fetch_text(f"{base.rstrip('/')}/{w}/receipts.jsonl")
         if txt is None:
@@ -986,7 +995,82 @@ def markets_weights(uid_by_hk: dict, now: float | None = None, base: str | None 
         sync_and_grade(base, cache_dir, now, view)
         db = _db(cache_dir)
         try:
-            return pnl_vector(db, uid_by_hk, int(now))
+            vec = pnl_vector(db, uid_by_hk, int(now))
         finally:
             db.close()
-    return weights_from_scores(markets_tallies(now, base, cache_dir), uid_by_hk, now)
+    else:
+        vec = weights_from_scores(markets_tallies(now, base, cache_dir), uid_by_hk, now)
+    if config.markets_entity_dust_as_of(now):
+        db = _db(cache_dir)
+        try:
+            vec = apply_entity_dust(vec, entity_dust_uids(db, uid_by_hk, now, chain_view))
+        finally:
+            db.close()
+    return vec
+
+
+def active_entities(db: sqlite3.Connection, now: float) -> list[str]:
+    """Hotkeys that filed a Markets frame (mk.bet or mk.burn) in the last MARKETS_ENTITY_ACTIVE_S."""
+    since_us = int((now - config.MARKETS_ENTITY_ACTIVE_S) * 1_000_000)
+    now_us = int(now * 1_000_000)
+    rows = db.execute("SELECT hk FROM bets WHERE t_recv_us >= ? AND t_recv_us <= ? UNION "
+                      "SELECT hk FROM burns WHERE t_recv_us >= ? AND t_recv_us <= ?",
+                      (since_us, now_us, since_us, now_us)).fetchall()
+    return sorted({r[0] for r in rows if r[0]})
+
+
+def entity_dust_uids(db: sqlite3.Connection, uid_by_hk: dict, now: float,
+                     chain_view: ChainView | None = None) -> set[int]:
+    """UIDs of active entities whose owner coldkey holds >= MARKETS_DUST_MIN_COLLATERAL_ALPHA on
+    their hotkey at the first block of the cycle's UTC hour. A chain read failure gives no dust
+    this cycle (logged), never a crash."""
+    ents = [h for h in active_entities(db, now) if h in uid_by_hk and uid_by_hk[h] != config.BURN_UID]
+    if not ents:
+        return set()
+    hour = int(now) // 3600 * 3600
+    try:
+        ch = CachedChain(db, chain_view or RpcChainView())
+        blk = ch.block_at(hour)
+        if blk is None:
+            raise RuntimeError(f"no block at {hour}")
+        out = set()
+        for h in ents:
+            if ch.entity_stake(h, blk) >= config.MARKETS_DUST_MIN_COLLATERAL_ALPHA:
+                out.add(uid_by_hk[h])
+        db.commit()
+        return out
+    except Exception as e:  # noqa: BLE001 — a weight cycle must never die on a chain read
+        print(f"  !! MARKETS ENTITY DUST SKIPPED this cycle: chain read failed: {e}")
+        return set()
+
+
+def apply_entity_dust(vec: dict[int, float], uids: set[int]) -> dict[int, float]:
+    """Raise each uid to at least DUST_WEIGHT inside the (already normalized) markets vector.
+    max(earned, dust), never the sum. The difference comes from the burn UID first; only if the
+    burn cannot cover it (every unit already paid out) are the other weights scaled down pro rata.
+    A dust-only vector is never renormalized up to the whole share."""
+    if not uids:
+        return vec
+    out = dict(vec)
+    raised = set()
+    for u in sorted(uids):
+        if out.get(u, 0.0) < config.DUST_WEIGHT:
+            out[u] = config.DUST_WEIGHT
+            raised.add(u)
+    excess = sum(out.values()) - 1.0
+    if excess <= 0:
+        return out
+    take = min(excess, out.get(config.BURN_UID, 0.0))
+    if take > 0:
+        out[config.BURN_UID] -= take
+        excess -= take
+    if excess > 1e-15:
+        rest = {u: w for u, w in out.items() if u not in raised and u != config.BURN_UID and w > 0}
+        tot = sum(rest.values())
+        if tot > 0:
+            k = (tot - excess) / tot
+            for u in rest:
+                out[u] *= k
+    if config.BURN_UID in out and out[config.BURN_UID] <= 0:
+        out.pop(config.BURN_UID)
+    return out

@@ -1463,3 +1463,19 @@ MARKETS_RATE_FALLBACK_DAYS = int(os.getenv("SN89_MARKETS_RATE_FALLBACK_DAYS", "7
 # validator split). Times the block count, alpha_out per block and the mecid-0 split read on
 # chain, it gives a cycle's Markets emission that winnings are measured against.
 MARKETS_MINER_FRACTION = _Decimal(os.getenv("SN89_MARKETS_MINER_FRACTION", "0.41"))
+
+# Entity dust (Whit, 2026-10-09): "Any entity UID that posts collateral should have dust emissions."
+# A hotkey that filed a Markets frame (mk.bet / mk.burn) within MARKETS_ENTITY_ACTIVE_S and whose
+# owner coldkey holds >= MARKETS_DUST_MIN_COLLATERAL_ALPHA staked on it at netuid NETUID, read at
+# the first block of the weight cycle's UTC hour, keeps DUST_WEIGHT inside the markets vector (the
+# burn UID gives it up, the same way an immune LF miner's dust sits inside the LF vector), so it is
+# never pruned for earning nothing while it holds collateral. max(earned, dust), never the sum.
+# Mainnet from 2026-10-09 16:00:00 UTC in source; testnet may override in .env.test.
+MARKETS_ENTITY_DUST_FROM_UNIX = int(os.getenv("SN89_MARKETS_ENTITY_DUST_FROM", "1791561600"))
+MARKETS_ENTITY_ACTIVE_S = int(os.getenv("SN89_MARKETS_ENTITY_ACTIVE_S", str(7 * 86400)))
+# ~$98 at 2026-10-09 (0.0029778 TAO/alpha x $274.93/TAO = $0.819/alpha).
+MARKETS_DUST_MIN_COLLATERAL_ALPHA = _Decimal(os.getenv("SN89_MARKETS_DUST_MIN_COLLATERAL_ALPHA", "120"))
+
+
+def markets_entity_dust_as_of(t_unix: float) -> bool:
+    return bool(MARKETS_ENTITY_DUST_FROM_UNIX and t_unix >= MARKETS_ENTITY_DUST_FROM_UNIX)
