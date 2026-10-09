@@ -5,6 +5,7 @@ weights from identical inputs.
 """
 from __future__ import annotations
 
+import functools
 import math
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -79,6 +80,12 @@ def sigma_from_board(tp_bps: float, horizon_s: int,
     return tp_bps / (z_ref * math.sqrt(horizon_s))
 
 
+# Cached: a pure function of p, and every HF call asks for the SAME p
+# (config.HF_POINTS_TARGET_RESOLVE) via sigma_from_board. Uncached, each call ran
+# 80 bisection steps x a 40-term series (2.4 ms), times ~83k grades times every
+# pass in hf_compute_weights: a 38-46 min stall in each weight cycle from
+# 2026-10-09 02:41Z, during which no commit was sealed. Output is bit-identical.
+@functools.lru_cache(maxsize=256)
 def z_for_resolve(p: float) -> float:
     """The z whose resolve probability is p. Bisection, fixed iteration count
     so it is deterministic rather than tolerance-dependent."""
