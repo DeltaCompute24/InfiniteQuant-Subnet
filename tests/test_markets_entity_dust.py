@@ -45,7 +45,34 @@ def _uids(tmp_path, stake, bets=((ENT, T - 3600),), burns=(), fail=False):
         db.close()
 
 
-MIN = config.MARKETS_DUST_MIN_COLLATERAL_ALPHA
+MIN = config.markets_dust_min_collateral_as_of(T)
+RAISE_AT = 1791590400                                    # 2026-10-10 00:00:00 UTC: 120 -> 6,100 alpha
+
+
+def _uids_at(tmp_path, stake, when):
+    sub = tmp_path / f"d{len(list(tmp_path.iterdir()))}"   # a fresh cache per call
+    sub.mkdir()
+    db = _db(sub, ((ENT, when - 3600),))
+    try:
+        return markets.entity_dust_uids(db, UIDS, when, Chain(stake))
+    finally:
+        db.close()
+
+
+def test_minimum_is_120_before_the_raise_and_6100_after():
+    assert config.markets_dust_min_collateral_as_of(RAISE_AT - 1) == Decimal("120")
+    assert config.markets_dust_min_collateral_as_of(RAISE_AT) == Decimal("6100")
+    assert config.MARKETS_DUST_MIN_COLLATERAL_ALPHA == Decimal("6100")
+
+
+def test_before_the_raise_120_alpha_is_enough(tmp_path):
+    assert _uids_at(tmp_path, {ENT: Decimal("213.1425")}, RAISE_AT - 1800) == {199}
+
+
+def test_from_the_raise_213_alpha_gets_nothing_and_6100_gets_dust(tmp_path):
+    assert _uids_at(tmp_path, {ENT: Decimal("213.1425")}, RAISE_AT + 1800) == set()
+    assert _uids_at(tmp_path, {ENT: Decimal("6100")}, RAISE_AT + 1800) == {199}
+    assert _uids_at(tmp_path, {ENT: Decimal("6099.999")}, RAISE_AT + 1800) == set()
 
 
 def test_below_minimum_collateral_gets_nothing(tmp_path):

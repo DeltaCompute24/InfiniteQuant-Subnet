@@ -1396,13 +1396,14 @@ def active_entities(db: sqlite3.Connection, now: float) -> list[str]:
 
 def entity_dust_uids(db: sqlite3.Connection, uid_by_hk: dict, now: float,
                      chain_view: ChainView | None = None) -> set[int]:
-    """UIDs of active entities whose owner coldkey holds >= MARKETS_DUST_MIN_COLLATERAL_ALPHA on
-    their hotkey at the first block of the cycle's UTC hour. A chain read failure gives no dust
+    """UIDs of active entities whose owner coldkey holds >= markets_dust_min_collateral_as_of(now)
+    on their hotkey at the first block of the cycle's UTC hour. A chain read failure gives no dust
     this cycle (logged), never a crash."""
     ents = [h for h in active_entities(db, now) if h in uid_by_hk and uid_by_hk[h] != config.BURN_UID]
     if not ents:
         return set()
     hour = int(now) // 3600 * 3600
+    minimum = config.markets_dust_min_collateral_as_of(now)
     try:
         ch = CachedChain(db, chain_view or RpcChainView())
         blk = ch.block_at(hour)
@@ -1410,7 +1411,7 @@ def entity_dust_uids(db: sqlite3.Connection, uid_by_hk: dict, now: float,
             raise RuntimeError(f"no block at {hour}")
         out = set()
         for h in ents:
-            if ch.entity_stake(h, blk) >= config.MARKETS_DUST_MIN_COLLATERAL_ALPHA:
+            if ch.entity_stake(h, blk) >= minimum:
                 out.add(uid_by_hk[h])
         db.commit()
         return out

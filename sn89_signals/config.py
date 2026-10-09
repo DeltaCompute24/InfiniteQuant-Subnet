@@ -1473,8 +1473,30 @@ MARKETS_MINER_FRACTION = _Decimal(os.getenv("SN89_MARKETS_MINER_FRACTION", "0.41
 # Mainnet from 2026-10-09 16:00:00 UTC in source; testnet may override in .env.test.
 MARKETS_ENTITY_DUST_FROM_UNIX = int(os.getenv("SN89_MARKETS_ENTITY_DUST_FROM", "1791561600"))
 MARKETS_ENTITY_ACTIVE_S = int(os.getenv("SN89_MARKETS_ENTITY_ACTIVE_S", str(7 * 86400)))
-# ~$98 at 2026-10-09 (0.0029778 TAO/alpha x $274.93/TAO = $0.819/alpha).
-MARKETS_DUST_MIN_COLLATERAL_ALPHA = _Decimal(os.getenv("SN89_MARKETS_DUST_MIN_COLLATERAL_ALPHA", "120"))
+# Minimum collateral, as-of the weight cycle's clock. The practice-period minimum was 120 alpha
+# (~$98 at 2026-10-09: 0.0029778 TAO/alpha x $274.93/TAO = $0.819/alpha). Whit set the bar at
+# $5,000 the same day so pruning protection costs real collateral: 6,100 alpha (~$5,000 at
+# 0.0029766 TAO/alpha x $274.9/TAO) from 2026-10-10 00:00:00 UTC. Earlier cycles keep 120, so a
+# replay reproduces them. Testnet may override the whole schedule via .env.test.
+MARKETS_DUST_MIN_COLLATERAL_HISTORY: tuple = (
+    (MARKETS_ENTITY_DUST_FROM_UNIX, _Decimal("120")),
+    (1791590400, _Decimal("6100")),
+)
+if os.getenv("SN89_MARKETS_DUST_MIN_COLLATERAL_ALPHA"):
+    MARKETS_DUST_MIN_COLLATERAL_HISTORY = (
+        (MARKETS_ENTITY_DUST_FROM_UNIX, _Decimal(os.environ["SN89_MARKETS_DUST_MIN_COLLATERAL_ALPHA"])),)
+
+
+def markets_dust_min_collateral_as_of(t_unix: float):
+    """Alpha an entity's owner coldkey must hold on its hotkey for dust, as of the cycle's clock."""
+    amount = MARKETS_DUST_MIN_COLLATERAL_HISTORY[0][1]
+    for eff, a in MARKETS_DUST_MIN_COLLATERAL_HISTORY:
+        if t_unix >= eff:
+            amount = a
+    return amount
+
+
+MARKETS_DUST_MIN_COLLATERAL_ALPHA = markets_dust_min_collateral_as_of(2**62)   # current-era value
 
 
 def markets_entity_dust_as_of(t_unix: float) -> bool:

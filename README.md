@@ -396,8 +396,9 @@ on testnet 496 since 2026-10-08.
   bets with profit per dollar confidently above zero. Subaccounts score to the hotkey that holds
   them. Emission follows score, capped and burned like every competition.
 - **Entity dust.** From 2026-10-09 16:00 UTC, a hotkey that has placed a Markets bet (or filed a
-  burn claim) in the last 7 days keeps a small dust weight while its own coldkey holds at least
-  120 SN89 alpha staked on it, read at the start of each UTC hour. Dust keeps a collateralised
+  burn claim) in the last 7 days keeps a small dust weight while its own coldkey holds enough
+  SN89 alpha staked on it, read at the start of each UTC hour: 120 alpha until 2026-10-10 00:00
+  UTC, and 6,100 alpha (about $5,000 on 2026-10-09) from then on. Dust keeps a collateralised
   entity from being pruned while it earns nothing; it is not a share of the Markets pool, and an
   entity that earns more than dust keeps what it earns.
 
