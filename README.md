@@ -332,7 +332,7 @@ Reveals still take 2 h; grading follows each call's horizon.
 **Now:** bets use play dollars, and emission goes to accounts that pass the skill gate described
 below.
 
-**From 2026-10-10 00:00 UTC: bet while the window runs.** Until now a bet had to be placed before
+**From 2026-10-09 15:00 UTC: bet while the window runs.** Until now a bet had to be placed before
 a window started. From the 10th you can also bet during the window, up to the last 3 minutes of a
 15-minute market and the last 5 minutes of a 1-hour market. While the window runs, the chance of
 Up follows the live price against the starting price (closer to the end and further from the
@@ -370,7 +370,7 @@ on testnet 496 since 2026-10-08.
   "account"}`. `account` is your hotkey, or `<your hotkey>_<n>` for a subaccount you hold.
 - **When you can bet.** Before the start: a market opens one window before its start (the next
   window is the one you bet on) and closes 60 seconds before its start, before the target's
-  averaging minute begins. **From 2026-10-10 00:00 UTC (markets starting then or later), also
+  averaging minute begins. **From 2026-10-09 15:00 UTC (markets starting then or later), also
   during the window:** from 5 seconds after the start until 180 seconds (15m) / 300 seconds (1h)
   before the end. Nothing is accepted in the target's minute or after the cutoff. The ingest
   checks this on the millisecond it received your bet; validators re-check it on the microsecond
