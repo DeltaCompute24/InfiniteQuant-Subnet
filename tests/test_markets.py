@@ -18,7 +18,12 @@ def _start(window="15m"):
 
 @pytest.fixture
 def armed(monkeypatch):
+    # V1 rules: Markets armed, but V3 live pricing and V2 collateral held in the future. These
+    # tests derive starts from the clock, and from 2026-10-09 16:00 UTC a "recent" start was
+    # past the V3 stamp, so a forecast-only assertion met an in-window market and failed.
     monkeypatch.setattr(config, "MARKETS_FROM_UNIX", 1)
+    monkeypatch.setattr(config, "MARKETS_V3_FROM_UNIX", 2**62)
+    monkeypatch.setattr(config, "MARKETS_COLLATERAL_FROM_UNIX", 2**62)
     return config
 
 
