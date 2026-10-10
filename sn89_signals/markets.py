@@ -846,7 +846,7 @@ def _db(cache_dir: str) -> sqlite3.Connection:
     c.execute("CREATE TABLE IF NOT EXISTS settle_meta (cycle INTEGER PRIMARY KEY, emission TEXT)")
     # V2b (additive): per-cycle winnings and lost stakes of RETAINED markets, scored net per entity
     cols = {r[1] for r in c.execute("PRAGMA table_info(settle)")}
-    for col in ("won_ret", "lost_ret"):
+    for col in ("won_ret", "lost_ret", "rcum", "hwm"):        # rcum/hwm: V2c loss carry-forward
         if col not in cols:
             c.execute(f"ALTER TABLE settle ADD COLUMN {col} TEXT DEFAULT '0'")
     # V3 (additive: a cache built before V3 keeps its grader version; these fill in from the replay)
@@ -1280,12 +1280,19 @@ def settle_cycles(db: sqlite3.Connection, ch: CachedChain, base: str, cache_dir:
             debt = lcum - bcum - dcum                   # negative = burn credit carried forward
             if abs(debt) < RAO:
                 debt = Z
-            # V2b: retained markets pay on the entity's NET; a net loss is simply kept, never owed
-            net_r = max(Z, won_r - lost_r)
+            # V2b: retained markets pay on the entity's NET; a net loss is simply kept, never owed.
+            # V2c: and from the carry arm that net is cumulative, paid only above its high-water mark.
+            if config.markets_carry_as_of(c):
+                pc = db.execute("SELECT rcum, hwm FROM settle WHERE entity=? AND cycle < ? AND cycle >= ? "
+                                "ORDER BY cycle DESC LIMIT 1", (ent, c, config.MARKETS_CARRY_FROM_UNIX)).fetchone()
+                rcum, hwm, net_r = carry_step(*((Decimal(x) for x in pc) if pc else (Z, Z)), won_r - lost_r)
+            else:
+                rcum, hwm, net_r = Z, Z, max(Z, won_r - lost_r)
             db.execute("INSERT OR REPLACE INTO settle (cycle, entity, won, lost, burned, deducted, debt, payable, "
-                       "lcum, bcum, dcum, won_ret, lost_ret) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                       "lcum, bcum, dcum, won_ret, lost_ret, rcum, hwm) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                        (c, ent, str(won), str(lost), str(burned.get(ent, Z)), str(deducted), str(debt),
-                        str(won - deducted + net_r), str(lcum), str(bcum), str(dcum), str(won_r), str(lost_r)))
+                        str(won - deducted + net_r), str(lcum), str(bcum), str(dcum), str(won_r), str(lost_r),
+                        str(rcum), str(hwm)))
         share = Decimal(str(config.comp_weights_as_of(c).get("markets", 0)))
         emission = CTX.multiply(CTX.multiply(CTX.multiply(CTX.multiply(
             Decimal(b1 - b0), ch.alpha_out_per_block(b0)), config.MARKETS_MINER_FRACTION),
@@ -1294,6 +1301,12 @@ def settle_cycles(db: sqlite3.Connection, ch: CachedChain, base: str, cache_dir:
         c += P
         closed += 1
     return closed
+
+
+def carry_step(rcum0: Decimal, hwm0: Decimal, net: Decimal) -> tuple[Decimal, Decimal, Decimal]:
+    """V2c: (rcum, hwm, payable) after a cycle whose retained net is `net`."""
+    rcum = rcum0 + net
+    return rcum, max(hwm0, rcum), max(Decimal(0), rcum - hwm0)
 
 
 def verified_burn(ch: CachedChain, entity: str, claimed: Decimal, block: int, ext_index: int) -> Decimal:

@@ -21,6 +21,8 @@ def v3(monkeypatch):
     monkeypatch.setattr(config, "MARKETS_FROM_UNIX", 1)
     monkeypatch.setattr(config, "MARKETS_V3_FROM_UNIX", 1)
     monkeypatch.setattr(config, "MARKETS_COLLATERAL_FROM_UNIX", 0)
+    # starts come from the clock; these price off HF tick rows, so keep them off the V4 oracle arm
+    monkeypatch.setattr(config, "MARKETS_ORACLE_FROM_UNIX", 2**62)
     return config
 
 

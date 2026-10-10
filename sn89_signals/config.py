@@ -1464,6 +1464,25 @@ def markets_retain_as_of(t_unix: float) -> bool:
     return bool(MARKETS_RETAIN_FROM_UNIX and t_unix >= MARKETS_RETAIN_FROM_UNIX)
 
 
+# V2c — LOSS CARRY-FORWARD (Whit, 2026-10-10). V2b paid max(0, net) of each cycle on its own, so an entity
+# betting against its own accounts (its winnings and losses are transfers to itself) collected emission
+# on every cycle that happened to net positive and lost nothing on the others: a free option every
+# cycle. Measured the day it was found: one coldkey's two entities took 60% of 24 h of Markets emission.
+# From this cycle on, retained net is CUMULATIVE per entity and pays only above its high-water mark:
+#   rcum_c = rcum_{c-1} + (won_ret - lost_ret);  payable_ret = max(0, rcum_c - hwm_{c-1});
+#   hwm_c = max(hwm_{c-1}, rcum_c).  Both start at 0 at the arm.
+# A self-dealer's book is then a random walk with the house edge as negative drift, and what it can
+# ever be paid is bounded; an entity with real users is paid exactly its users' cumulative net
+# winnings above their best previous level. Must be a settlement-cycle boundary
+# (MARKETS_COLLATERAL_FROM_UNIX + k x MARKETS_SETTLE_PERIOD_S). 0 = off.
+# ⚑ MAINNET ARM: the cycle starting 2026-10-10 19:52:00 UTC.
+MARKETS_CARRY_FROM_UNIX = int(os.getenv("SN89_MARKETS_CARRY_FROM", "1791663120"))
+
+
+def markets_carry_as_of(cycle: int) -> bool:
+    return bool(MARKETS_CARRY_FROM_UNIX and cycle >= MARKETS_CARRY_FROM_UNIX)
+
+
 MARKETS_V2_MIN_BET = _Decimal(os.getenv("SN89_MARKETS_V2_MIN_BET", "1"))
 MARKETS_V2_MAX_BET = _Decimal(os.getenv("SN89_MARKETS_V2_MAX_BET", "10000"))
 MARKETS_V2_MAX_PER_MARKET = _Decimal(os.getenv("SN89_MARKETS_V2_MAX_PER_MARKET", "25000"))
