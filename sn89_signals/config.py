@@ -1436,6 +1436,23 @@ def markets_collateral_as_of(t_unix: float) -> bool:
 
 
 # V2 limits, play dollars (the user's stake is real alpha at the market's day rate).
+# V2b — RETENTION (Whit, 2026-10-10 01:35 UTC: "let's do it your way"). With the burn, every loss
+# left the entity (burned to the network) and every win was paid from emission or IQ's float, so a
+# balanced book was a net cost at any volume. From this stamp a LOST STAKE STAYS WITH THE ENTITY
+# (no burn owed, no debt against collateral) and the cycle's Markets emission goes to each entity in
+# proportion to its NET profit over ALL its accounts (winnings paid minus stakes lost); net <= 0
+# earns nothing. A wash pair inside one entity nets to zero, which is what the burn was for.
+# Applies to markets STARTING at/after the stamp; earlier markets settle under V2 exactly as before
+# (their burns are still owed and credited). Testnet overrides via SN89_MARKETS_RETAIN_FROM only.
+# ⚑ MAINNET ARM 2026-10-10 03:00:00 UTC. 0 = off.
+MARKETS_RETAIN_FROM_UNIX = int(os.getenv("SN89_MARKETS_RETAIN_FROM", "1791601200"))
+
+
+def markets_retain_as_of(t_unix: float) -> bool:
+    """A market STARTING at t keeps lost stakes with the entity and is scored on net entity P&L."""
+    return bool(MARKETS_RETAIN_FROM_UNIX and t_unix >= MARKETS_RETAIN_FROM_UNIX)
+
+
 MARKETS_V2_MIN_BET = _Decimal(os.getenv("SN89_MARKETS_V2_MIN_BET", "1"))
 MARKETS_V2_MAX_BET = _Decimal(os.getenv("SN89_MARKETS_V2_MAX_BET", "10000"))
 MARKETS_V2_MAX_PER_MARKET = _Decimal(os.getenv("SN89_MARKETS_V2_MAX_PER_MARKET", "25000"))

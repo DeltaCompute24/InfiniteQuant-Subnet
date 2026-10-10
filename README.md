@@ -436,24 +436,28 @@ ticks ⇒ same weights. **Run the current release**: grading code is consensus; 
 
 #### Collateral and P&L emission (markets starting from the V2 arm, 2026-10-10 01:00 UTC)
 
-From the V2 arm (`config.MARKETS_COLLATERAL_FROM_UNIX`) Markets settles the way Vanta pays entities:
+From the V2 arm (`config.MARKETS_COLLATERAL_FROM_UNIX`) Markets settles on real stakes:
 
 - **Collateral.** Every bet must be covered by its entity's alpha: the stake the entity hotkey's
-  owner coldkey holds on that hotkey on this subnet, read at the first block of each UTC hour,
-  less any unburned losses. Bets are taken in order; one that would push the entity's open stake
-  past its collateral is ignored.
+  owner coldkey holds on that hotkey on this subnet, read at the first block of each UTC hour.
+  Bets are taken in order; one that would push the entity's open stake past its collateral is
+  ignored.
 - **Bet sizes.** $1 to $10,000 per bet, up to $25,000 per account per market. Prices deepen as
   more is bet: a $1,000 bet on a new market moves it about 5 points.
-- **Losses.** A losing bet's stake is burned. The entity burns it on chain (`burn_alpha` or
-  `recycle_alpha` on its hotkey) and files a signed `mk.burn` claim naming the block and extrinsic;
-  validators read that event before crediting it. Losses still unburned 24 hours after their cycle
-  are taken out of the entity's winnings.
-- **Winnings.** Settlement runs in cycles of one tempo (4,320 s). For each closed cycle the
-  entity's weight in the Markets share is its subaccounts' winnings (payout minus stake, in alpha)
-  divided by that cycle's Markets emission; if winnings exceed it they are cut pro rata, and
-  anything unused burns. Dollars convert to alpha at the subnet pool price at the day's first block
-  times the TAOUSD average of the minute before 00:00 UTC.
-- The play-money skill reward ends at the V2 arm.
+- **Losses stay with the entity** (markets starting from 2026-10-10 03:00 UTC,
+  `config.MARKETS_RETAIN_FROM_UNIX`). A losing bet's stake is kept by the entity that holds the
+  account; nothing is burned and nothing is owed. Markets that started between 01:00 and 03:00 UTC
+  on 2026-10-10 settle under the earlier rule: those lost stakes are burned on chain and claimed
+  with a signed `mk.burn`, and validators credit the claim after reading the event.
+- **Emission goes to net profit.** Settlement runs in cycles of one tempo (4,320 s). For each
+  closed cycle an entity's net is the winnings its accounts were paid (payout minus stake) minus
+  the stakes its accounts lost, over every one of its accounts, in alpha. An entity with a positive
+  net gets that net divided by the cycle's Markets emission as its weight in the Markets share; one
+  with zero or negative net gets nothing. Winnings past the emission are cut pro rata, and anything
+  unused burns. Two accounts of one entity on opposite sides of a market net to zero. Dollars
+  convert to alpha at the subnet pool price at the day's first block times the TAOUSD average of
+  the minute before 00:00 UTC.
+- The play-money skill reward ended at the V2 arm.
 
 ### Timelock version compatibility — READ THIS IF VTRUST IS FALLING
 

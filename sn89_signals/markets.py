@@ -114,6 +114,19 @@ V3 — LIVE IN-WINDOW PRICING (markets STARTING at/after config.MARKETS_V3_FROM_
            a lot; the spread bounds it everywhere else. Sized in the 2026-10-09 replay
            (SN89-PREDICTION-MARKETS-SPEC.md "V3 live pricing").
   payout   unchanged: a share pays $1 if its side wins. Fees and collateral unchanged.
+
+V2b — RETENTION + NET-P&L EMISSION (markets STARTING at/after config.MARKETS_RETAIN_FROM_UNIX;
+Whit 2026-10-10)
+  losses   a lost stake STAYS with the entity: it is not owed as a burn and is not debt against its
+           collateral. Burn claims (mk.burn) stay valid and are credited only against losses of
+           pre-stamp markets; once those are settled a claim changes nothing.
+  emission per cycle and entity: net = winnings paid (payout - stake) - stakes lost, over every
+           account of the entity, in alpha at the market's day rate, for markets starting at/after
+           the stamp that ended in the cycle. payable = max(0, net), plus whatever the pre-stamp
+           rule still owes for pre-stamp markets. A wash pair inside one entity nets to zero. The
+           weight is payable / the cycle's Markets emission, pro rata past 1, as in V2.
+  collateral unchanged: open bets must fit inside the entity's alpha stake at the hour (the debt
+           term can only come from pre-stamp losses).
 """
 from __future__ import annotations
 
@@ -275,6 +288,11 @@ def parse_account(account: str) -> tuple[str, int | None]:
 
 def is_v2(start: int) -> bool:
     return config.markets_collateral_as_of(start)
+
+
+def is_retained(start: int) -> bool:
+    """V2b: a market whose lost stakes stay with the entity and score on net entity P&L."""
+    return config.markets_retain_as_of(start)
 
 
 def limits_for(start: int | None) -> tuple[Decimal, Decimal, Decimal]:
@@ -741,6 +759,11 @@ def _db(cache_dir: str) -> sqlite3.Connection:
     c.execute("CREATE TABLE IF NOT EXISTS settle (cycle INTEGER, entity TEXT, won TEXT, lost TEXT, burned TEXT, "
               "deducted TEXT, debt TEXT, payable TEXT, lcum TEXT, bcum TEXT, dcum TEXT, PRIMARY KEY (cycle, entity))")
     c.execute("CREATE TABLE IF NOT EXISTS settle_meta (cycle INTEGER PRIMARY KEY, emission TEXT)")
+    # V2b (additive): per-cycle winnings and lost stakes of RETAINED markets, scored net per entity
+    cols = {r[1] for r in c.execute("PRAGMA table_info(settle)")}
+    for col in ("won_ret", "lost_ret"):
+        if col not in cols:
+            c.execute(f"ALTER TABLE settle ADD COLUMN {col} TEXT DEFAULT '0'")
     # V3 (additive: a cache built before V3 keeps its grader version; these fill in from the replay)
     c.execute("CREATE TABLE IF NOT EXISTS v3_prices (key TEXT PRIMARY KEY, market_id TEXT, p_model TEXT, "
               "price_paid TEXT, tick_t INTEGER, tick_mark REAL)")
@@ -1085,7 +1108,9 @@ def settle_cycles(db: sqlite3.Connection, ch: CachedChain, base: str, cache_dir:
                   published_through: int | None = None) -> int:
     """Close every settlement cycle that is past end + grace and whose V2 markets are all graded.
     Per entity: W (winnings, alpha), L (lost stakes), verified burns, the overdue-loss deduction,
-    debt and payable; plus the cycle's Markets emission (alpha)."""
+    debt and payable; plus the cycle's Markets emission (alpha). From the V2b stamp, markets
+    starting at/after it are kept apart (won_ret / lost_ret): their lost stakes are neither burned
+    nor debt, and they add max(0, won_ret - lost_ret) to payable."""
     P, G, DL = config.MARKETS_SETTLE_PERIOD_S, config.MARKETS_SETTLE_GRACE_S, config.MARKETS_BURN_DEADLINE_S
     row = db.execute("SELECT MAX(cycle) FROM settle_meta").fetchone()
     c = (row[0] + P) if row and row[0] is not None else config.MARKETS_COLLATERAL_FROM_UNIX
@@ -1102,20 +1127,23 @@ def settle_cycles(db: sqlite3.Connection, ch: CachedChain, base: str, cache_dir:
         b0, b1 = ch.block_at(c), ch.block_at(c + P)
         if b0 is None or b1 is None:
             break
-        per: dict[str, list[Decimal]] = {}              # entity -> [won, lost]
+        # entity -> [won, lost] for pre-stamp (burn) markets, [won_ret, lost_ret] for retained ones
+        per: dict[str, list[Decimal]] = {}
         for key, acct, dollars, shares, pnl, status, outcome, mid in db.execute(
                 "SELECT key, account, dollars, shares, pnl, status, outcome, market_id FROM results "
                 "WHERE end_ts >= ? AND end_ts < ?", (c, c + P)).fetchall():
             if mid not in ends or status != "ok" or outcome == "VOID":
                 continue
-            rate = market_rate(db, ch, base, cache_dir, parse_market_id(mid)[2])
+            start = parse_market_id(mid)[2]
+            rate = market_rate(db, ch, base, cache_dir, start)
             ent = account_owner(acct)
-            w_l = per.setdefault(ent, [Decimal(0), Decimal(0)])
+            w_l = per.setdefault(ent, [Decimal(0), Decimal(0), Decimal(0), Decimal(0)])
+            off = 2 if is_retained(start) else 0
             p = Decimal(pnl)
             if p > 0:
-                w_l[0] += CTX.divide(p, rate)
+                w_l[off] += CTX.divide(p, rate)
             elif p < 0:
-                w_l[1] += CTX.divide(-p, rate)
+                w_l[off + 1] += CTX.divide(-p, rate)
         # A burn counts for cycle c when its CLAIM was received in [c + grace, c + P + grace). Each
         # on-chain extrinsic is credited once, to the first claim naming it in canonical order.
         burned: dict[str, Decimal] = {}
@@ -1134,7 +1162,7 @@ def settle_cycles(db: sqlite3.Connection, ch: CachedChain, base: str, cache_dir:
         ents = set(per) | set(burned) | {e for (e,) in db.execute("SELECT DISTINCT entity FROM settle")}
         Z = Decimal(0)
         for ent in sorted(ents):
-            won, lost = per.get(ent, [Z, Z])
+            won, lost, won_r, lost_r = per.get(ent, [Z, Z, Z, Z])
             prev = db.execute("SELECT lcum, bcum, dcum FROM settle WHERE entity=? AND cycle < ? ORDER BY cycle DESC "
                               "LIMIT 1", (ent, c)).fetchone()
             lcum0, bcum0, dcum0 = (Decimal(x) for x in prev) if prev else (Z, Z, Z)
@@ -1150,9 +1178,12 @@ def settle_cycles(db: sqlite3.Connection, ch: CachedChain, base: str, cache_dir:
             debt = lcum - bcum - dcum                   # negative = burn credit carried forward
             if abs(debt) < RAO:
                 debt = Z
-            db.execute("INSERT OR REPLACE INTO settle VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            # V2b: retained markets pay on the entity's NET; a net loss is simply kept, never owed
+            net_r = max(Z, won_r - lost_r)
+            db.execute("INSERT OR REPLACE INTO settle (cycle, entity, won, lost, burned, deducted, debt, payable, "
+                       "lcum, bcum, dcum, won_ret, lost_ret) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                        (c, ent, str(won), str(lost), str(burned.get(ent, Z)), str(deducted), str(debt),
-                        str(won - deducted), str(lcum), str(bcum), str(dcum)))
+                        str(won - deducted + net_r), str(lcum), str(bcum), str(dcum), str(won_r), str(lost_r)))
         share = Decimal(str(config.comp_weights_as_of(c).get("markets", 0)))
         emission = CTX.multiply(CTX.multiply(CTX.multiply(CTX.multiply(
             Decimal(b1 - b0), ch.alpha_out_per_block(b0)), config.MARKETS_MINER_FRACTION),
