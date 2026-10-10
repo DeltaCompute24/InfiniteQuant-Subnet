@@ -1586,3 +1586,60 @@ MARKETS_V3_SIGMA_FALLBACK = {
     "commodities": _Decimal("0.000060"), "equities": _Decimal("0.00010"), "indices": _Decimal("0.000050"),
 }
 MARKETS_V3_SIGMA_DEFAULT = _Decimal("0.00010")
+
+
+# ── Markets V4: settle on the Hyperliquid oracle price (Whit, 2026-10-10) ───────────────────────
+# The HF book mid moved twice in three minutes on BTC (a $1 tick on a $1-pinned spread), so a live
+# chart drawn from it was flat with cliffs. Hyperliquid's oraclePx is a median of exchange prices,
+# printed every ~3 s to $0.10 on BTC. A market STARTING at or after MARKETS_ORACLE_FROM_UNIX whose
+# asset has an entry in the map as of its start is priced, filled and settled from the oracle
+# record (sn89_signals/oracle.py), a record SEPARATE from the HF/LF tick windows, which are not
+# read or changed by any of this. Every other market keeps the tick mid. 0 = not armed.
+MARKETS_ORACLE_FROM_UNIX = int(os.getenv("SN89_MARKETS_ORACLE_FROM", "0"))
+# Published oracle windows (served by the Markets service; same shape as the HF public windows).
+MARKETS_ORACLE_PUBLIC_BASE = os.getenv(
+    "SN89_MARKETS_ORACLE_PUBLIC_BASE", "https://partner.infinitequant.app/sn89-markets/v1/oracle")
+# A bet fills at the oracle value IN EFFECT this long after its receipt. The oracle prints every
+# ~3 s, so the value in effect 6 s on was printed at least ~3 s after the bet landed: the same
+# protection the 3 s next-tick fill gives on the mid.
+MARKETS_ORACLE_FILL_DELAY_S = int(os.getenv("SN89_MARKETS_ORACLE_FILL_DELAY_S", "6"))
+# A value is "in effect" only while its row is at most this old. The recorder writes a heartbeat
+# row per asset every 30 s even when the price did not move, so an older row means the recorder
+# saw nothing (down or disconnected), and a market depending on that gap voids.
+MARKETS_ORACLE_MAX_AGE_S = int(os.getenv("SN89_MARKETS_ORACLE_MAX_AGE_S", "90"))
+# Market asset -> Hyperliquid coin, as of a start time (append a new entry; never edit an old one).
+# Main dex for crypto; the `xyz` HIP-3 dex for stocks, indices and commodities (its oracle is set
+# by that dex's deployer, not by Hyperliquid's validators). AUDUSD has no oracle: it stays on mid.
+MARKETS_ORACLE_MAP_HISTORY = [
+    (0, {
+        **{a + "USD": a for a in (
+            "AAVE", "ADA", "ALGO", "ARB", "ASTER", "AVAX", "BCH", "BNB", "BTC", "CRV", "DOGE", "DOT",
+            "ENA", "ETH", "HYPE", "LINK", "LTC", "NEAR", "PUMP", "SOL", "SUI", "TAO", "TRX", "UNI",
+            "WLD", "XMR", "XRP", "ZEC", "ZRO")},
+        "KPEPEUSD": "kPEPE",
+        "XAUUSD": "xyz:GOLD", "XAGUSD": "xyz:SILVER", "WTIUSD": "xyz:CL",
+        "SP500USD": "xyz:SP500", "XYZ100USD": "xyz:XYZ100", "EWYUSD": "xyz:EWY",
+        **{a + "USD": "xyz:" + a for a in (
+            "AMD", "COIN", "CRCL", "INTC", "META", "MRVL", "MSTR", "MU", "NVDA", "SNDK", "TSLA")},
+    }),
+]
+
+
+def markets_oracle_coin(asset: str, start: float) -> str | None:
+    """The Hyperliquid coin a market on `asset` starting at `start` settles on, or None (mid)."""
+    if not MARKETS_ORACLE_FROM_UNIX or start < MARKETS_ORACLE_FROM_UNIX:
+        return None
+    coin = None
+    for frm, mp in MARKETS_ORACLE_MAP_HISTORY:
+        if start >= frm:
+            coin = mp.get(asset)
+    return coin
+
+
+def markets_oracle_assets(t: float) -> dict[str, str]:
+    """The whole map in effect at t (what the recorder subscribes to), regardless of the arm."""
+    out: dict[str, str] = {}
+    for frm, mp in MARKETS_ORACLE_MAP_HISTORY:
+        if t >= frm:
+            out = dict(mp)
+    return out

@@ -138,7 +138,7 @@ import sqlite3
 import time
 from decimal import ROUND_DOWN, ROUND_HALF_EVEN, Context, Decimal, InvalidOperation
 
-from . import config, hf, sessions
+from . import config, hf, oracle, sessions
 
 KIND = "mk.bet"
 KIND_BURN = "mk.burn"
@@ -266,6 +266,31 @@ def average_marks(rows: list[dict], t_from_ms: int, t_to_ms: int,
     for w in sorted(by_w):
         marks.extend(m for _, m in sorted(by_w[w]))
     return round_px(sum(marks) / len(marks)) if marks else None
+
+
+def uses_oracle(mid: str) -> bool:
+    """V4: this market is priced, filled and settled on the Hyperliquid oracle record (oracle.py),
+    not the HF tick mid. Decided by its asset and start alone (config.markets_oracle_coin)."""
+    asset, _w, start, _end = parse_market_id(mid)
+    return config.markets_oracle_coin(asset, start) is not None
+
+
+def market_target(mid: str, rows: list[dict]) -> float | None:
+    """The market's starting price from `rows` of its own series (oracle or ticks)."""
+    _a, _w, start, _e = parse_market_id(mid)
+    avg = config.MARKETS_AVG_S
+    if uses_oracle(mid):
+        v = oracle.twap(rows, (start - avg) * 1000, start * 1000)
+        return float(v) if v is not None else None
+    return average_marks(rows, (start - avg) * 1000, start * 1000)
+
+
+def market_spot(mid: str, rows: list[dict], t_ms: int) -> tuple[int, float] | None:
+    """(t, price) a front end shows as the price at t_ms, from the market's own series."""
+    if uses_oracle(mid):
+        v = oracle.value_at(rows, t_ms)
+        return (v[0], float(v[1])) if v is not None else None
+    return latest_mark(rows, t_ms, config.MARKETS_V3_MAX_TICK_AGE_S * 1000)
 
 
 def resolve(rows: list[dict], start: int, end: int) -> tuple[str, float | None, float | None]:
@@ -571,6 +596,7 @@ def make_pricer(mid: str, rows: list[dict], target: float | None, sigma: Decimal
     max_wait_ms = config.MARKETS_V3_MAX_TICK_AGE_S * 1000
     delay_ms = config.MARKETS_V3_FILL_DELAY_S * 1000
     half_avg = Decimal(config.MARKETS_AVG_S) / Decimal(2)
+    oracle_mkt = uses_oracle(mid)       # V4: the fill is the oracle value in effect FILL_DELAY on
 
     def pricer(bet: dict):
         t_us = int(bet["order"][1])
@@ -578,7 +604,8 @@ def make_pricer(mid: str, rows: list[dict], target: float | None, sigma: Decimal
             return None
         if target is None:
             return {"ignore": "no_target"}
-        tk = first_mark_after(rows, t_us // 1000 + delay_ms, max_wait_ms)
+        tk = (oracle.fill_at(rows, t_us // 1000) if oracle_mkt
+              else first_mark_after(rows, t_us // 1000 + delay_ms, max_wait_ms))
         if tk is None:
             return {"ignore": "no_fill"}
         tau = CTX.subtract(CTX.subtract(Decimal(end), CTX.divide(Decimal(tk[0]), Decimal(1000))), half_avg)
@@ -595,7 +622,7 @@ def quote_context(mid: str, rows: list[dict], target: float | None, sigma: Decim
     _a, _w, start, end = parse_market_id(mid)
     if target is None or now < start:
         return None
-    tk = latest_mark(rows, int(now * 1000), config.MARKETS_V3_MAX_TICK_AGE_S * 1000)
+    tk = market_spot(mid, rows, int(now * 1000))
     if tk is None:
         return None
     half_avg = Decimal(config.MARKETS_AVG_S) / Decimal(2)
@@ -814,7 +841,8 @@ def grade_market(db: sqlite3.Connection, mid: str, rows: list[dict], sigma: Deci
     V3 per-second volatility (sigma_for_market); a V3 market without one prices with the class
     fallback."""
     asset, _w, start, end = parse_market_id(mid)
-    outcome, target, settle = resolve(rows, start, end)
+    outcome, target, settle = (oracle.resolve(rows, start, end) if uses_oracle(mid)
+                               else resolve(rows, start, end))
     v2 = is_v2(start)
     pricer = None
     if is_v3(start):
@@ -1365,8 +1393,14 @@ def sync_and_grade(base: str, cache_dir: str, now: float, chain_view: ChainView 
                     (mid,)).fetchone()[0]
                 if undecided:
                     continue                     # collateral first, then price
-            rows, missing = hf_grade._ticks_for(base, tick_dir, asset,
+            if uses_oracle(mid):
+                # V4: the separate, published oracle record (oracle.py); the HF windows are not read
+                rows, missing = oracle.rows_for(config.MARKETS_ORACLE_PUBLIC_BASE,
+                                                os.path.join(cache_dir, "oracle"), asset,
                                                 (start - config.MARKETS_AVG_S) * 1000, end * 1000)
+            else:
+                rows, missing = hf_grade._ticks_for(base, tick_dir, asset,
+                                                    (start - config.MARKETS_AVG_S) * 1000, end * 1000)
             if missing and now_s < end + config.MARKETS_GRADE_ABANDON_S:
                 continue                       # never grade a hole: wait, then void
             sigma = None
