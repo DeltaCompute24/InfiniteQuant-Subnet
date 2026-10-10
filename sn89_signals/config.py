@@ -1389,7 +1389,15 @@ def markets_active_as_of(t_unix: float) -> bool:
 
 from decimal import Decimal as _Decimal  # noqa: E402
 
-MARKETS_WINDOWS = {"15m": 900, "1h": 3600}
+MARKETS_WINDOWS = {"15m": 900, "1h": 3600, "1d": 86400, "1w": 604800}
+# CALENDAR WINDOWS (Whit, 2026-10-10): "Will Bitcoin be higher at 5 pm ET today / this Friday?". A
+# day runs 5 pm New York to 5 pm New York, a week Friday 5 pm to Friday 5 pm (Kalshi's daily and
+# weekly reference times), so a 1d window is 23 or 25 hours across a daylight-saving change and the
+# value above is nominal: markets.window_end is the rule. Bitcoin only, oracle-settled, and taken only
+# while the window runs (no pre-start bets: MARKETS_OPEN_LEAD_BY_WINDOW makes that interval empty).
+MARKETS_CAL_WINDOWS = ("1d", "1w")
+MARKETS_CAL_FROM_UNIX = int(os.getenv("SN89_MARKETS_CAL_FROM", "1791666000"))   # 2026-10-10 17:00 EDT
+MARKETS_CAL_ASSETS = {"1d": ("BTCUSD",), "1w": ("BTCUSD",)}
 MARKETS_AVG_S = int(os.getenv("SN89_MARKETS_AVG_S", "60"))
 # ENTRY WINDOW — every bet is a pure forecast. A market accepts bets only in
 # [start - MARKETS_OPEN_LEAD_S, start - MARKETS_ENTRY_CLOSE_LEAD_S): it opens one window before
@@ -1399,6 +1407,8 @@ MARKETS_AVG_S = int(os.getenv("SN89_MARKETS_AVG_S", "60"))
 # emissions would pay for it. 0 for the open lead = the market's window length.
 MARKETS_OPEN_LEAD_S = int(os.getenv("SN89_MARKETS_OPEN_LEAD_S", "0"))
 MARKETS_ENTRY_CLOSE_LEAD_S = int(os.getenv("SN89_MARKETS_ENTRY_CLOSE_LEAD_S", str(MARKETS_AVG_S)))
+# Per-window open lead; equal to the close lead = an empty pre-start interval.
+MARKETS_OPEN_LEAD_BY_WINDOW = {"1d": MARKETS_ENTRY_CLOSE_LEAD_S, "1w": MARKETS_ENTRY_CLOSE_LEAD_S}
 
 
 def markets_accepting_as_of(t_unix: float) -> bool:
@@ -1407,7 +1417,8 @@ def markets_accepting_as_of(t_unix: float) -> bool:
     refused every bet on the first markets, which are taken BEFORE they start (entry window)."""
     if not MARKETS_FROM_UNIX:
         return False
-    lead = max((MARKETS_OPEN_LEAD_S or s) for s in MARKETS_WINDOWS.values())
+    lead = max((MARKETS_OPEN_LEAD_BY_WINDOW.get(w) or MARKETS_OPEN_LEAD_S or s)
+               for w, s in MARKETS_WINDOWS.items())
     return t_unix >= MARKETS_FROM_UNIX - lead
 MARKETS_LMSR_B = _Decimal(os.getenv("SN89_MARKETS_LMSR_B", "100"))          # play dollars
 MARKETS_MIN_BET = _Decimal(os.getenv("SN89_MARKETS_MIN_BET", "1"))
@@ -1554,6 +1565,8 @@ def _parse_cutoffs(spec: str) -> dict:
 
 
 MARKETS_V3_LATE_CUTOFF_S = _parse_cutoffs(os.getenv("SN89_MARKETS_V3_LATE_CUTOFF_S", "15m:180,1h:300"))
+MARKETS_V3_LATE_CUTOFF_S.setdefault("1d", 1800)
+MARKETS_V3_LATE_CUTOFF_S.setdefault("1w", 3600)
 # LATENCY GUARD. An in-window bet is FILLED at the first sealed tick stamped at or after its receipt
 # time + FILL_DELAY_S: the bettor commits before the price he is filled at exists, so a price feed
 # that leads ours by less than the delay carries no edge (the 2026-10-09 replay: a 1-second lead on

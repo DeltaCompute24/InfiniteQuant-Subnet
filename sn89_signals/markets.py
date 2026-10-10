@@ -130,6 +130,7 @@ Whit 2026-10-10)
 """
 from __future__ import annotations
 
+import calendar
 import json
 import math
 import os
@@ -145,7 +146,7 @@ KIND_BURN = "mk.burn"
 MARKETS_KINDS = (KIND, KIND_BURN)
 GRADER_VERSION = 2
 SIDES = ("UP", "DOWN")
-_ID_RE = re.compile(r"^UD:([A-Z0-9]+):(15m|1h):(\d+)$")
+_ID_RE = re.compile(r"^UD:([A-Z0-9]+):(15m|1h|1d|1w):(\d+)$")
 _ACCOUNT_RE = re.compile(r"^(5[1-9A-HJ-NP-Za-km-z]{46,47})(?:_(\d{1,9}))?$")
 CTX = Context(prec=40, rounding=ROUND_HALF_EVEN)
 SHARE_Q = Decimal("0.000001")
@@ -162,16 +163,65 @@ def market_id(asset: str, window: str, start: int) -> str:
     return f"UD:{asset.upper()}:{window}:{int(start)}"
 
 
+# Calendar windows: 5 pm in New York. US Eastern time by its statutory rule (EDT from the second
+# Sunday of March 02:00 EST to the first Sunday of November 02:00 EDT), written out so the boundary
+# never depends on a host's tz database.
+CAL_HOUR = 17
+CAL_WEEKDAY = 4                       # Friday (time.gmtime tm_wday, Monday = 0)
+
+
+def _ny_offset_s(t: int) -> int:
+    y = time.gmtime(int(t)).tm_year
+
+    def sunday(month: int, n: int) -> int:
+        first = calendar.timegm((y, month, 1, 0, 0, 0))
+        return first + (((6 - time.gmtime(first).tm_wday) % 7) + 7 * (n - 1)) * 86400
+
+    on, off = sunday(3, 2) + 7 * 3600, sunday(11, 1) + 6 * 3600
+    return -4 * 3600 if on <= int(t) < off else -5 * 3600
+
+
+def _ny_anchor(day_utc: int) -> int:
+    """Unix time of 17:00 New York on the local calendar date whose UTC midnight is day_utc."""
+    base = day_utc + CAL_HOUR * 3600
+    for off in (-4 * 3600, -5 * 3600):
+        if _ny_offset_s(base - off) == off:
+            return base - off
+    return base + 5 * 3600                                   # unreachable: 17:00 is never skipped
+
+
+def window_start(window: str, t: float) -> int:
+    """Start of the `window` market running at t."""
+    t = int(t)
+    if window not in config.MARKETS_CAL_WINDOWS:
+        secs = config.MARKETS_WINDOWS[window]
+        return t // secs * secs
+    day = (t + _ny_offset_s(t)) // 86400 * 86400               # local date, as a UTC midnight
+    for _ in range(9):
+        a = _ny_anchor(day)
+        if a <= t and (window == "1d" or time.gmtime(day).tm_wday == CAL_WEEKDAY):
+            return a
+        day -= 86400
+    raise MarketError(f"no_window_start:{window}:{t}")
+
+
+def window_end(window: str, start: int) -> int:
+    if window not in config.MARKETS_CAL_WINDOWS:
+        return int(start) + config.MARKETS_WINDOWS[window]
+    days = 7 if window == "1w" else 1
+    day = (int(start) + _ny_offset_s(int(start))) // 86400 * 86400
+    return _ny_anchor(day + days * 86400)
+
+
 def parse_market_id(mid: str) -> tuple[str, str, int, int]:
     """-> (asset, window, start_unix, end_unix). Raises MarketError on a malformed id."""
     m = _ID_RE.match(str(mid or ""))
     if not m:
         raise MarketError(f"bad_market_id:{mid}")
     asset, window, start = m.group(1), m.group(2), int(m.group(3))
-    secs = config.MARKETS_WINDOWS[window]
-    if start % secs:
+    if window_start(window, start) != start:
         raise MarketError(f"market_not_aligned:{mid}")
-    return asset, window, start, start + secs
+    return asset, window, start, window_end(window, start)
 
 
 def market_exists(mid: str) -> bool:
@@ -182,6 +232,13 @@ def market_exists(mid: str) -> bool:
         return False
     if not config.markets_active_as_of(start):
         return False
+    if window in config.MARKETS_CAL_WINDOWS:
+        if not config.MARKETS_CAL_FROM_UNIX or start < config.MARKETS_CAL_FROM_UNIX:
+            return False
+        if asset not in config.MARKETS_CAL_ASSETS.get(window, ()):
+            return False
+        if config.markets_oracle_coin(asset, start) is None:
+            return False                                       # oracle-settled only
     board = hf.hf_bands_as_of(start) or {}
     row = board.get(asset)
     if row is None:
@@ -198,7 +255,8 @@ def entry_interval(mid: str) -> tuple[int, int]:
     """[open, close) in unix seconds of the PRE-START interval: when bets on this market count
     before it starts. A V3 market has a second, in-window interval: see entry_intervals."""
     _a, window, start, _end = parse_market_id(mid)
-    lead = config.MARKETS_OPEN_LEAD_S or config.MARKETS_WINDOWS[window]
+    lead = (config.MARKETS_OPEN_LEAD_BY_WINDOW.get(window) or config.MARKETS_OPEN_LEAD_S
+            or config.MARKETS_WINDOWS[window])
     return start - lead, start - config.MARKETS_ENTRY_CLOSE_LEAD_S
 
 
@@ -1337,6 +1395,19 @@ def sigma_for_market(db: sqlite3.Connection, base: str, tick_dir: str, asset: st
     return Decimal(db.execute("SELECT sigma FROM v3_sigma WHERE asset=? AND day=?", (asset, day)).fetchone()[0])
 
 
+def _cal_spans(db: sqlite3.Connection, mid: str, start: int, end: int) -> list[tuple[int, int]]:
+    """[t0, t1] ms spans a calendar market's grade reads: the target and settle minutes and, for every
+    bet taken in the window, its fill (receipt .. receipt + FILL_WAIT). rows_for_spans adds the
+    max-age lead-in before each, so the value in effect at every span start is in hand."""
+    avg = config.MARKETS_AVG_S
+    spans = [((start - avg) * 1000, start * 1000), ((end - avg) * 1000, end * 1000)]
+    for (t_us,) in db.execute("SELECT t_recv_us FROM bets WHERE market_id=?", (mid,)):
+        t = int(t_us) // 1000
+        if t >= start * 1000:
+            spans.append((t, t + config.MARKETS_ORACLE_FILL_WAIT_S * 1000))
+    return spans
+
+
 def sync_and_grade(base: str, cache_dir: str, now: float, chain_view: ChainView | None = None) -> None:
     """Pull Markets receipts from the published windows, decide V2 collateral, grade every market
     whose receipts and ticks are complete, and close finished settlement cycles. Incremental; a from-scratch
@@ -1393,7 +1464,12 @@ def sync_and_grade(base: str, cache_dir: str, now: float, chain_view: ChainView 
                     (mid,)).fetchone()[0]
                 if undecided:
                     continue                     # collateral first, then price
-            if uses_oracle(mid):
+            if uses_oracle(mid) and _w in config.MARKETS_CAL_WINDOWS:
+                # a day or a week: only the minutes that decide it (target, settle, each bet's fill)
+                rows, missing = oracle.rows_for_spans(config.MARKETS_ORACLE_PUBLIC_BASE,
+                                                      os.path.join(cache_dir, "oracle"), asset,
+                                                      _cal_spans(db, mid, start, end))
+            elif uses_oracle(mid):
                 # V4: the separate, published oracle record (oracle.py); the HF windows are not read
                 rows, missing = oracle.rows_for(config.MARKETS_ORACLE_PUBLIC_BASE,
                                                 os.path.join(cache_dir, "oracle"), asset,

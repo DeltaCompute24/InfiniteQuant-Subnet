@@ -166,6 +166,26 @@ def rows_for(base: str, cache_dir: str, asset: str, t0_ms: int, t1_ms: int) -> t
     return out, missing
 
 
+def rows_for_spans(base: str, cache_dir: str, asset: str,
+                   spans: list[tuple[int, int]]) -> tuple[list[dict], list[int]]:
+    """rows_for over several [t0, t1] ms spans: each window touched (lead-in included) once."""
+    ws: set[int] = set()
+    for t0, t1 in spans:
+        w = window_of(int(t0) - config.MARKETS_ORACLE_MAX_AGE_S * 1000)
+        while w <= window_of(int(t1)):
+            ws.add(w)
+            w += WINDOW_MS
+    out, missing = [], []
+    for w in sorted(ws):
+        rows = load_window(base, cache_dir, w)
+        if rows is None:
+            missing.append(w)
+        else:
+            out.extend(r for r in rows if r["a"] == asset)
+    out.sort(key=row_order)
+    return out, missing
+
+
 def value_at(rows: list[dict], t_ms: int) -> tuple[int, Decimal] | None:
     """(row t, value) in effect at t_ms: the last row at or before it, if not older than max age."""
     best = None

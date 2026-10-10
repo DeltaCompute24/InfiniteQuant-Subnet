@@ -24,6 +24,8 @@ def armed(monkeypatch):
     monkeypatch.setattr(config, "MARKETS_FROM_UNIX", 1)
     monkeypatch.setattr(config, "MARKETS_V3_FROM_UNIX", 2**62)
     monkeypatch.setattr(config, "MARKETS_COLLATERAL_FROM_UNIX", 2**62)
+    # Same trap for the V4 oracle arm (2026-10-10 17:00 UTC): these grade off HF tick rows.
+    monkeypatch.setattr(config, "MARKETS_ORACLE_FROM_UNIX", 2**62)
     return config
 
 
