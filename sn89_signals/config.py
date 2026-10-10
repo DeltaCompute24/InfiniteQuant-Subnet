@@ -1591,7 +1591,7 @@ MARKETS_V3_SIGMA_DEFAULT = _Decimal("0.00010")
 # ── Markets V4: settle on the Hyperliquid oracle price (Whit, 2026-10-10) ───────────────────────
 # The HF book mid moved twice in three minutes on BTC (a $1 tick on a $1-pinned spread), so a live
 # chart drawn from it was flat with cliffs. Hyperliquid's oraclePx is a median of exchange prices,
-# printed every ~3 s to $0.10 on BTC. A market STARTING at or after MARKETS_ORACLE_FROM_UNIX whose
+# changing about 5 times a minute on BTC (median step $1.40, gaps of 12-18 s are common). A market STARTING at or after MARKETS_ORACLE_FROM_UNIX whose
 # asset has an entry in the map as of its start is priced, filled and settled from the oracle
 # record (sn89_signals/oracle.py), a record SEPARATE from the HF/LF tick windows, which are not
 # read or changed by any of this. Every other market keeps the tick mid. 0 = not armed.
