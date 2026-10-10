@@ -924,8 +924,24 @@ class RpcChainView(ChainView):
         self.c = _chain.Chain(network=network, netuid=netuid)
         self.netuid = self.c.netuid
 
+    # The public finney node answers a query for PRUNED state (older than ~256 blocks) with the
+    # storage default (0, None, []) instead of an error, so "try public, fall back on error" read
+    # SubnetAlphaOutEmission = 0 for settle cycle 1791598320 and burned that cycle's whole Markets
+    # share (2026-10-10). Historic reads go to the archive first; the public node only serves blocks
+    # it still holds. Testnet has no archive alias, so it reads its own node.
+    _RECENT_BLOCKS = 200
+
+    def _nodes(self, block):
+        if str(getattr(config, "NETWORK", "finney")).startswith("test"):
+            return (self.c.st,)
+        try:
+            recent = self.c.current_block() - int(block) <= self._RECENT_BLOCKS
+        except Exception:  # noqa: BLE001
+            recent = False
+        return (self.c.st, self.c._archive()) if recent else (self.c._archive(),)
+
     def _q(self, module, name, params, block):
-        for st in (self.c.st, self.c._archive()):
+        for st in self._nodes(block):
             try:
                 bh = st.get_block_hash(block)
                 r = st.substrate.query(module, name, params, block_hash=bh)
@@ -955,7 +971,7 @@ class RpcChainView(ChainView):
     def entity_stake(self, hotkey: str, block: int) -> Decimal:
         owner = self._q("SubtensorModule", "Owner", [hotkey], block)
         err = None
-        for st in (self.c.st, self.c._archive()):    # the public node prunes state older than ~256 blocks
+        for st in self._nodes(block):                 # pruned state reads as 0 on the public node
             try:
                 bal = st.get_stake(coldkey_ss58=str(owner), hotkey_ss58=hotkey, netuid=self.netuid, block=block)
                 return Decimal(str(getattr(bal, "tao", bal)))
@@ -978,7 +994,7 @@ class RpcChainView(ChainView):
 
     def burn_events(self, block: int, ext_index: int) -> list[dict]:
         out = []
-        for st in (self.c.st, self.c._archive()):
+        for st in self._nodes(block):
             try:
                 evs = st.substrate.get_events(block_hash=st.get_block_hash(block))
                 break
