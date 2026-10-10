@@ -1595,7 +1595,7 @@ MARKETS_V3_SIGMA_DEFAULT = _Decimal("0.00010")
 # asset has an entry in the map as of its start is priced, filled and settled from the oracle
 # record (sn89_signals/oracle.py), a record SEPARATE from the HF/LF tick windows, which are not
 # read or changed by any of this. Every other market keeps the tick mid. 0 = not armed.
-MARKETS_ORACLE_FROM_UNIX = int(os.getenv("SN89_MARKETS_ORACLE_FROM", "0"))
+MARKETS_ORACLE_FROM_UNIX = int(os.getenv("SN89_MARKETS_ORACLE_FROM", "1791651600"))  # 2026-10-10T17:00:00Z
 # Published oracle windows (served by the Markets service; same shape as the HF public windows).
 MARKETS_ORACLE_PUBLIC_BASE = os.getenv(
     "SN89_MARKETS_ORACLE_PUBLIC_BASE", "https://partner.infinitequant.app/sn89-markets/v1/oracle")
