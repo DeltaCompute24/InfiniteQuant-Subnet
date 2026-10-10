@@ -1618,6 +1618,19 @@ MARKETS_V3_SIGMA_FALLBACK = {
     "commodities": _Decimal("0.000060"), "equities": _Decimal("0.00010"), "indices": _Decimal("0.000050"),
 }
 MARKETS_V3_SIGMA_DEFAULT = _Decimal("0.00010")
+# V3.1 TRAILING SIGMA (Whit, 2026-10-10). The previous UTC day overstated the volatility a 15m/1h market
+# actually saw (median 0.59x on the 10-09/10 replay; busy Friday -> quiet Saturday), so the model was
+# under-confident and the leading side ~10% cheap: model 0.667 vs actual 0.805 on 755 bets, and
+# "always buy the favourite" returned +7.7% per $ at the spread. Replayed over 1,228 in-window bets, a
+# sigma from the 3 h BEFORE the market's start (same estimator, minute-average returns, sealed ticks
+# only) fit best (logloss 0.487 vs 0.525) and turned that strategy to -5.7%. Fewer than MIN_RETURNS
+# returns in the span (a session open, a feed gap) -> the previous-day sigma, as before. Daily and
+# weekly windows keep the previous day (a 3 h reading is noise for a 24 h or 7 d bet).
+# ⚑ MAINNET ARM: markets starting at/after 2026-10-11 00:00:00 UTC. 0 = off.
+MARKETS_SIGMA_TRAILING_FROM_UNIX = int(os.getenv("SN89_MARKETS_SIGMA_TRAILING_FROM", "1791676800"))
+MARKETS_SIGMA_TRAILING_S = int(os.getenv("SN89_MARKETS_SIGMA_TRAILING_S", "10800"))
+MARKETS_SIGMA_TRAILING_MIN_RETURNS = int(os.getenv("SN89_MARKETS_SIGMA_TRAILING_MIN_RETURNS", "90"))
+MARKETS_SIGMA_TRAILING_WINDOWS = ("15m", "1h")
 
 
 # ── Markets V4: settle on the Hyperliquid oracle price (Whit, 2026-10-10) ───────────────────────

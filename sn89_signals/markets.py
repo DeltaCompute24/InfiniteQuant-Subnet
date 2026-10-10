@@ -620,7 +620,29 @@ def sigma_per_s(rows: list[dict], day_unix: int) -> Decimal | None:
     """Per-second sigma from one asset's ticks of the UTC day starting at day_unix: the RMS of the
     one-minute log returns between CONSECUTIVE minute averages (a session gap contributes nothing).
     None when fewer than MARKETS_V3_SIGMA_MIN_RETURNS returns exist."""
-    mins = minute_marks(rows, day_unix * 1000, (day_unix + 86400) * 1000)
+    return sigma_span(rows, day_unix * 1000, (day_unix + 86400) * 1000, config.MARKETS_V3_SIGMA_MIN_RETURNS)
+
+
+def uses_trailing_sigma(mid: str) -> bool:
+    """V3.1: this market's sigma is the trailing span before its start (trailing_sigma_span)."""
+    _a, window, start, _e = parse_market_id(mid)
+    return bool(config.MARKETS_SIGMA_TRAILING_FROM_UNIX and start >= config.MARKETS_SIGMA_TRAILING_FROM_UNIX
+                and window in config.MARKETS_SIGMA_TRAILING_WINDOWS)
+
+
+def trailing_sigma_span(start: int) -> tuple[int, int]:
+    """[lo, hi) ms of the ticks a trailing-sigma market is sized from: the span ending at its start."""
+    return (int(start) - config.MARKETS_SIGMA_TRAILING_S) * 1000, int(start) * 1000
+
+
+def trailing_sigma(rows: list[dict], start: int) -> Decimal | None:
+    lo, hi = trailing_sigma_span(start)
+    return sigma_span(rows, lo, hi, config.MARKETS_SIGMA_TRAILING_MIN_RETURNS)
+
+
+def sigma_span(rows: list[dict], lo_ms: int, hi_ms: int, min_returns: int) -> Decimal | None:
+    """Per-second sigma from the minute-average returns of `rows` in [lo_ms, hi_ms)."""
+    mins = minute_marks(rows, lo_ms, hi_ms)
     acc, n = Decimal(0), 0
     for (k0, m0), (k1, m1) in zip(mins, mins[1:]):
         if k1 != k0 + 1 or m0 <= 0 or m1 <= 0:
@@ -628,7 +650,7 @@ def sigma_per_s(rows: list[dict], day_unix: int) -> Decimal | None:
         r = CTX.ln(CTX.divide(Decimal(str(m1)), Decimal(str(m0))))
         acc = CTX.add(acc, CTX.multiply(r, r))
         n += 1
-    if n < config.MARKETS_V3_SIGMA_MIN_RETURNS:
+    if n < min_returns:
         return None
     s_min = CTX.sqrt(CTX.divide(acc, Decimal(n)))
     return CTX.divide(s_min, CTX.sqrt(Decimal(60))).quantize(SIGMA_Q, rounding=ROUND_HALF_EVEN)
@@ -852,6 +874,8 @@ def _db(cache_dir: str) -> sqlite3.Connection:
     # V3 (additive: a cache built before V3 keeps its grader version; these fill in from the replay)
     c.execute("CREATE TABLE IF NOT EXISTS v3_prices (key TEXT PRIMARY KEY, market_id TEXT, p_model TEXT, "
               "price_paid TEXT, tick_t INTEGER, tick_mark REAL)")
+    c.execute("CREATE TABLE IF NOT EXISTS v3_sigma_trail (asset TEXT, start INTEGER, sigma TEXT, measured INTEGER, "
+              "PRIMARY KEY (asset, start))")
     c.execute("CREATE TABLE IF NOT EXISTS v3_sigma (asset TEXT, day INTEGER, sigma TEXT, measured INTEGER, "
               "PRIMARY KEY (asset, day))")
     row = c.execute("SELECT v FROM meta WHERE k='grader_version'").fetchone()
@@ -1384,11 +1408,29 @@ def day_ticks(base: str, tick_dir: str, pairs: set, day_unix: int) -> tuple[dict
 
 
 def sigma_for_market(db: sqlite3.Connection, base: str, tick_dir: str, asset: str, start: int,
-                     final: bool = False) -> Decimal | None:
+                     final: bool = False, window: str | None = None) -> Decimal | None:
     """The V3 sigma for a market starting at `start`: measured from the previous UTC day's sealed
     ticks (every board asset of that day computed and cached in one pass), else the class
     fallback. None while a window of that day is still unfetchable and `final` is False (wait);
-    with `final` the fallback is used, and remembered."""
+    with `final` the fallback is used, and remembered. V3.1: a 15m/1h market from the trailing arm is
+    sized from the sealed ticks of the span before its start; too few returns -> the day rule."""
+    if window in config.MARKETS_SIGMA_TRAILING_WINDOWS and uses_trailing_sigma(market_id(asset, window, start)):
+        row = db.execute("SELECT sigma FROM v3_sigma_trail WHERE asset=? AND start=?", (asset, start)).fetchone()
+        if row:
+            return Decimal(row[0])
+        from . import hf_grade
+        lo, hi = trailing_sigma_span(start)
+        rows, missing = hf_grade._ticks_for(base, tick_dir, asset, lo, hi - 1)
+        if missing and not final:
+            return None
+        s = trailing_sigma(rows, start) if not missing else None
+        if s is None:
+            s = sigma_for_market(db, base, tick_dir, asset, start, final=final)
+            if s is None:
+                return None
+        db.execute("INSERT OR REPLACE INTO v3_sigma_trail VALUES (?,?,?,?)", (asset, start, str(s), int(not missing)))
+        db.commit()
+        return s
     day = sigma_day(start)
     row = db.execute("SELECT sigma FROM v3_sigma WHERE asset=? AND day=?", (asset, day)).fetchone()
     if row:
@@ -1494,7 +1536,7 @@ def sync_and_grade(base: str, cache_dir: str, now: float, chain_view: ChainView 
                 continue                       # never grade a hole: wait, then void
             sigma = None
             if is_v3(start):
-                sigma = sigma_for_market(db, base, tick_dir, asset, start,
+                sigma = sigma_for_market(db, base, tick_dir, asset, start, window=_w,
                                          final=now_s >= end + config.MARKETS_GRADE_ABANDON_S)
                 if sigma is None:
                     continue                   # previous day's ticks not all in hand yet: wait
