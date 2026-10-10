@@ -1599,10 +1599,12 @@ MARKETS_ORACLE_FROM_UNIX = int(os.getenv("SN89_MARKETS_ORACLE_FROM", "0"))
 # Published oracle windows (served by the Markets service; same shape as the HF public windows).
 MARKETS_ORACLE_PUBLIC_BASE = os.getenv(
     "SN89_MARKETS_ORACLE_PUBLIC_BASE", "https://partner.infinitequant.app/sn89-markets/v1/oracle")
-# A bet fills at the oracle value IN EFFECT this long after its receipt. The oracle prints every
-# ~3 s, so the value in effect 6 s on was printed at least ~3 s after the bet landed: the same
-# protection the 3 s next-tick fill gives on the mid.
-MARKETS_ORACLE_FILL_DELAY_S = int(os.getenv("SN89_MARKETS_ORACLE_FILL_DELAY_S", "6"))
+# A bet fills at the first oracle CHANGE at least FILL_DELAY after its receipt (a print the bettor
+# could not have seen), or, if the price does not change for FILL_WAIT, at the value then. Measured
+# 2026-10-10: BTC printed ~5 times a minute with 12-18 s gaps, so "the value in effect a few
+# seconds on" could predate the bet while the exchanges it follows had already moved.
+MARKETS_ORACLE_FILL_DELAY_S = int(os.getenv("SN89_MARKETS_ORACLE_FILL_DELAY_S", "3"))
+MARKETS_ORACLE_FILL_WAIT_S = int(os.getenv("SN89_MARKETS_ORACLE_FILL_WAIT_S", "30"))
 # A value is "in effect" only while its row is at most this old. The recorder writes a heartbeat
 # row per asset every 30 s even when the price did not move, so an older row means the recorder
 # saw nothing (down or disconnected), and a market depending on that gap voids.

@@ -62,14 +62,20 @@ def test_twap_weights_by_time_and_voids_on_a_gap(monkeypatch):
 
 def test_resolve_and_fill(monkeypatch):
     monkeypatch.setattr(config, "MARKETS_ORACLE_MAX_AGE_S", 90)
-    monkeypatch.setattr(config, "MARKETS_ORACLE_FILL_DELAY_S", 6)
+    monkeypatch.setattr(config, "MARKETS_ORACLE_FILL_DELAY_S", 3)
+    monkeypatch.setattr(config, "MARKETS_ORACLE_FILL_WAIT_S", 30)
     monkeypatch.setattr(config, "MARKETS_AVG_S", 60)
     start, end = 1_000, 1_900
     rows = [R(t * 1000, "100") for t in range(start - 70, start + 1, 30)]
     rows += [R(t * 1000, "101") for t in range(start + 3, end + 1, 3)]
     out, target, settle = oracle.resolve(rows, start, end)
     assert out == "UP" and target == 100.0 and settle == 101.0
-    assert oracle.fill_at(rows, (start + 10) * 1000) == ((start + 16) * 1000, 101.0)
+    # flat at 101 after start+3: no change within the wait, so the value at receipt + 30 s
+    assert oracle.fill_at(rows, (start + 10) * 1000) == ((start + 40) * 1000, 101.0)
+    moving = [R(0, "100"), R(5_000, "100"), R(9_000, "100"), R(14_000, "102"), R(20_000, "103")]
+    assert oracle.fill_at(moving, 4_000) == (14_000, 102.0)      # first change at/after receipt + 3 s
+    assert oracle.fill_at(moving, 12_000) == (20_000, 103.0)
+    assert oracle.fill_at([R(0, "100")], 70_000) is None            # nothing in effect at the wait
     assert oracle.resolve([R((start - 61) * 1000, "1")], start, end)[0] == "VOID"
 
 
@@ -105,7 +111,8 @@ def test_load_window_refuses_a_mismatched_root(tmp_path, monkeypatch):
 def test_markets_dispatch_oracle_markets_only(monkeypatch, tmp_path):
     from sn89_signals import markets
     monkeypatch.setattr(config, "MARKETS_ORACLE_MAX_AGE_S", 90)
-    monkeypatch.setattr(config, "MARKETS_ORACLE_FILL_DELAY_S", 6)
+    monkeypatch.setattr(config, "MARKETS_ORACLE_FILL_DELAY_S", 3)
+    monkeypatch.setattr(config, "MARKETS_ORACLE_FILL_WAIT_S", 30)
     start = (config.MARKETS_V3_FROM_UNIX // 900 + 400) * 900
     end = start + 900
     btc, aud = f"UD:BTCUSD:15m:{start}", f"UD:AUDUSD:15m:{start}"
@@ -119,7 +126,7 @@ def test_markets_dispatch_oracle_markets_only(monkeypatch, tmp_path):
     assert markets.market_spot(btc, rows, (start + 10) * 1000) == ((start + 9) * 1000, 99.0)
     pricer = markets.make_pricer(btc, rows, 100.0, Decimal("0.0001"))
     q = pricer({"order": (0, (start + 100) * 1_000_000, "", 0)})
-    assert q["tick_t"] == (start + 106) * 1000 and q["tick_mark"] == 99.0 and q["p"] < Decimal("0.5")
+    assert q["tick_t"] == (start + 130) * 1000 and q["tick_mark"] == 99.0 and q["p"] < Decimal("0.5")
     db = markets._db(str(tmp_path))
     assert markets.grade_market(db, btc, rows, Decimal("0.0001")) == "DOWN"
     assert db.execute("SELECT target, settle FROM outcomes WHERE market_id=?", (btc,)).fetchone() == (100.0, 99.0)

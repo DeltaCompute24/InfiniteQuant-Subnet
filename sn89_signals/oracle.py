@@ -216,7 +216,22 @@ def resolve(rows: list[dict], start: int, end: int) -> tuple[str, float | None, 
 
 
 def fill_at(rows: list[dict], receipt_ms: int) -> tuple[int, float] | None:
-    """(fill instant ms, value) for a bet received at receipt_ms: the value in effect FILL_DELAY on."""
-    t = int(receipt_ms) + config.MARKETS_ORACLE_FILL_DELAY_S * 1000
-    v = value_at(rows, t)
-    return (t, float(v[1])) if v is not None else None
+    """(fill instant ms, value) for a bet received at receipt_ms: the first oracle CHANGE at or after
+    receipt + FILL_DELAY (a print the bettor could not have seen), else, when the price does not
+    change for FILL_WAIT, the value in effect then. The oracle can sit 12-18 s between prints
+    (measured 2026-10-10), so the value merely in effect a few seconds on could be a print from
+    before the bet, priced against exchanges that had already moved."""
+    lo = int(receipt_ms) + config.MARKETS_ORACLE_FILL_DELAY_S * 1000
+    hi = int(receipt_ms) + config.MARKETS_ORACLE_FILL_WAIT_S * 1000
+    prev = value_at(rows, lo - 1)
+    for r in rows:
+        t = int(r["t"])
+        if t < lo:
+            continue
+        if t > hi:
+            break
+        v = Decimal(str(r["o"]))
+        if prev is None or v != prev[1]:
+            return t, float(v)
+    end = value_at(rows, hi)
+    return (hi, float(end[1])) if end is not None else None
