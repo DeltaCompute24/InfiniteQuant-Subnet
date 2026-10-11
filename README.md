@@ -347,8 +347,7 @@ an estimate. Bets placed before the start work as before.
 - A winning bet's stake and winnings are added to your balance at settlement and can be bet
   immediately. A losing bet's stake is lost.
 - Withdraw from the Markets page once your withdrawable balance is $100 or more. Choose USDC on
-  Arbitrum or SN89 alpha and enter your address. Each withdrawal is reviewed by a person before
-  sending.
+  Arbitrum or SN89 alpha and enter your address. USDC withdrawals are sent within about 10 minutes.
 - A $200 betting credit is added after identity verification at
   terminal.infinitequant.app/profile. Credit is spent before your own money. The credit cannot be
   withdrawn. Winnings from credit bets can be withdrawn up to $500 per account; amounts beyond
