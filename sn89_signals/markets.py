@@ -876,6 +876,9 @@ def _db(cache_dir: str) -> sqlite3.Connection:
             c.execute(f"ALTER TABLE settle ADD COLUMN {col} TEXT DEFAULT '0'")
     if "lock_breach" not in cols:                              # V2d: first short checkpoint, 0 = none
         c.execute("ALTER TABLE settle ADD COLUMN lock_breach INTEGER DEFAULT 0")
+    for col in ("claim", "paid", "owed"):                      # V2e: unpaid carry
+        if col not in cols:
+            c.execute(f"ALTER TABLE settle ADD COLUMN {col} TEXT DEFAULT '0'")
     # V3 (additive: a cache built before V3 keeps its grader version; these fill in from the replay)
     c.execute("CREATE TABLE IF NOT EXISTS v3_prices (key TEXT PRIMARY KEY, market_id TEXT, p_model TEXT, "
               "price_paid TEXT, tick_t INTEGER, tick_mark REAL)")
@@ -1359,10 +1362,55 @@ def settle_cycles(db: sqlite3.Connection, ch: CachedChain, base: str, cache_dir:
         emission = CTX.multiply(CTX.multiply(CTX.multiply(CTX.multiply(
             Decimal(b1 - b0), ch.alpha_out_per_block(b0)), config.MARKETS_MINER_FRACTION),
             ch.mecid0_fraction(b0)), share)
+        if config.markets_owed_as_of(c):
+            if c == config.MARKETS_OWED_FROM_UNIX:
+                prev = owed_seed(db, c)
+            else:
+                prev = {e: Decimal(o) for e, o in db.execute("SELECT entity, owed FROM settle WHERE cycle=?", (c - P,))}
+            rows = {e: (Decimal(p), prev.get(e, Z), bool(br)) for e, p, br in db.execute(
+                "SELECT entity, payable, lock_breach FROM settle WHERE cycle=?", (c,))}
+            for e, (cl, pd, ow) in owed_step(rows, emission).items():
+                db.execute("UPDATE settle SET claim=?, paid=?, owed=? WHERE cycle=? AND entity=?",
+                           (str(cl), str(pd), str(ow), c, e))
         db.execute("INSERT OR REPLACE INTO settle_meta VALUES (?,?)", (c, str(emission)))
         c += P
         closed += 1
     return closed
+
+
+def owed_step(rows: dict[str, tuple[Decimal, Decimal, bool]], emission: Decimal
+              ) -> dict[str, tuple[Decimal, Decimal, Decimal]]:
+    """V2e: {entity: (payable, owed_prev, breach)} -> {entity: (claim, paid, owed)}. Claims share the
+    cycle's emission pro rata when they exceed it; what is not paid is owed next cycle. A breach
+    claims nothing this cycle and keeps its owed balance."""
+    Z = Decimal(0)
+    claims = {e: (Z if br else p + o) for e, (p, o, br) in rows.items()}
+    tot = sum(claims.values(), Z)
+    scale = CTX.divide(emission, tot) if tot > emission and tot > 0 else Decimal(1)
+    out = {}
+    for e, (p, o, br) in rows.items():
+        cl = claims[e]
+        paid = CTX.multiply(cl, scale)
+        owed = o if br else cl - paid
+        if abs(owed) < RAO:
+            owed = Z
+        out[e] = (cl, paid, owed)
+    return out
+
+
+def owed_seed(db: sqlite3.Connection, upto: int) -> dict[str, Decimal]:
+    """V2e: the owed balances at `upto`, replaying owed_step over the settled cycles from the carry arm
+    (payable then is the true net above the high-water mark; lock breaches already zeroed it)."""
+    owed: dict[str, Decimal] = {}
+    if not config.MARKETS_CARRY_FROM_UNIX:
+        return owed
+    for c, em in db.execute("SELECT cycle, emission FROM settle_meta WHERE cycle >= ? AND cycle < ? ORDER BY cycle",
+                            (config.MARKETS_CARRY_FROM_UNIX, upto)).fetchall():
+        rows = {e: (Decimal(p), owed.get(e, Decimal(0)), False)
+                for e, p in db.execute("SELECT entity, payable FROM settle WHERE cycle=?", (c,))}
+        for e, (_cl, _pd, ow) in owed_step(rows, Decimal(em)).items():
+            owed[e] = ow
+    return owed
 
 
 def carry_step(rcum0: Decimal, hwm0: Decimal, net: Decimal) -> tuple[Decimal, Decimal, Decimal]:
@@ -1389,7 +1437,8 @@ def pnl_vector(db: sqlite3.Connection, uid_by_hk: dict, now: int) -> dict[int, f
     if row is not None and Decimal(row[1]) > 0:
         c, emission = row[0], Decimal(row[1])
         x = {}
-        for ent, payable in db.execute("SELECT entity, payable FROM settle WHERE cycle=?", (c,)):
+        col = "paid" if config.markets_owed_as_of(c) else "payable"     # V2e: paid already fits the emission
+        for ent, payable in db.execute(f"SELECT entity, {col} FROM settle WHERE cycle=?", (c,)):
             p = Decimal(payable)
             if p > 0 and ent in uid_by_hk:
                 x[uid_by_hk[ent]] = x.get(uid_by_hk[ent], Decimal(0)) + CTX.divide(p, emission)

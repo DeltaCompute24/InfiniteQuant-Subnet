@@ -1501,6 +1501,24 @@ def markets_lock_as_of(cycle: int) -> bool:
     return bool(MARKETS_LOCK_FROM_UNIX and cycle >= MARKETS_LOCK_FROM_UNIX)
 
 
+# V2e UNPAID CARRY (Whit, 2026-10-11). A cycle's Markets emission is split pro rata when the claims
+# exceed it, and the unpaid part was dropped while the high-water mark still rose by the whole claim,
+# so a busy cycle's winnings were never paid and a quiet cycle's emission was burned. From this cycle
+# on, each entity carries what it was not paid:
+#   claim_c = payable_c + owed_{c-1};  paid_c = claim_c x min(1, emission_c / sum of claims);
+#   owed_c = claim_c - paid_c.   The weight is paid_c / emission_c; the rest goes to the burn UID.
+# A lock breach pays nothing that cycle and keeps owed_{c-1} as it was. owed at the arm is SEEDED with
+# the same arithmetic replayed over the cycles from MARKETS_CARRY_FROM_UNIX (when payable became the
+# true net above the high-water mark) to the arm, so what was owed since then is paid too.
+# Must be a settlement-cycle boundary (MARKETS_COLLATERAL_FROM_UNIX + k x MARKETS_SETTLE_PERIOD_S). 0 = off.
+# ⚑ MAINNET ARM: the cycle starting 2026-10-12 01:00:00 UTC.
+MARKETS_OWED_FROM_UNIX = int(os.getenv("SN89_MARKETS_OWED_FROM", "1791766800"))
+
+
+def markets_owed_as_of(cycle: int) -> bool:
+    return bool(MARKETS_OWED_FROM_UNIX and cycle >= MARKETS_OWED_FROM_UNIX)
+
+
 MARKETS_V2_MIN_BET = _Decimal(os.getenv("SN89_MARKETS_V2_MIN_BET", "1"))
 MARKETS_V2_MAX_BET = _Decimal(os.getenv("SN89_MARKETS_V2_MAX_BET", "10000"))
 MARKETS_V2_MAX_PER_MARKET = _Decimal(os.getenv("SN89_MARKETS_V2_MAX_PER_MARKET", "25000"))
