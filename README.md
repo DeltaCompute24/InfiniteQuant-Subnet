@@ -329,9 +329,6 @@ Reveals still take 2 h; grading follows each call's horizon.
 2. Pick an asset and a 15-minute or 1-hour window.
 3. Choose Up or Down and enter an amount.
 
-**Now:** bets use play dollars, and emission goes to accounts that pass the skill gate described
-below.
-
 **From 2026-10-09 15:00 UTC: bet while the window runs.** Until now a bet had to be placed before
 a window started. From the 10th you can also bet during the window, up to the last 3 minutes of a
 15-minute market and the last 5 minutes of a 1-hour market. While the window runs, the chance of
@@ -342,16 +339,20 @@ window pays a spread over that chance: 2 cents a share plus a part that grows as
 It is filled at the first price recorded 3 seconds after it is received, so the price you see is
 an estimate. Bets placed before the start work as before.
 
-**Coming soon: real-money bets.** Not live yet; this section will say when it is.
-- Deposit TAO or SN89 alpha to your Markets account. TAO is converted to SN89 alpha
-  automatically.
-- Bets from $1 to $10,000. Each bet locks its amount from your balance.
-- A fee on each bet: 0.07 × shares × price × (1 − price). A $10 bet at even odds pays about
-  $0.35.
-- A winning bet's stake and winnings are added to your balance when it settles, and you can bet
-  with them straight away. A losing bet's stake is lost.
-- Every day, a balance over $100 is paid to your Bittensor wallet in SN89 alpha. Each payment is
-  listed with its on-chain transaction at infinitequant.app/markets/payouts.
+**Now: real-money bets.**
+- Your balance is in dollars. Deposit USDC on Arbitrum, TAO, or SN89 alpha. Each deposit converts
+  to dollars on arrival. The minimum is $10 for USDC and for TAO.
+- Each bet carries a fee: 0.07 × shares × price × (1 − price). A $10 bet at even odds pays about
+  $0.35 in fees.
+- A winning bet's stake and winnings are added to your balance at settlement and can be bet
+  immediately. A losing bet's stake is lost.
+- Withdraw from the Markets page once your withdrawable balance is $100 or more. Choose USDC on
+  Arbitrum or SN89 alpha and enter your address. Each withdrawal is reviewed by a person before
+  sending.
+- A $200 betting credit is added after identity verification at
+  terminal.infinitequant.app/profile. Credit is spent before your own money. The credit cannot be
+  withdrawn. Winnings from credit bets can be withdrawn up to $500 per account; amounts beyond
+  that return as credit. A credit bet fills at $0.90 a share or less and pays up to $2,000.
 
 **For miners and developers:** the mechanism below.
 
