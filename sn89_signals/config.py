@@ -1475,12 +1475,30 @@ def markets_retain_as_of(t_unix: float) -> bool:
 # ever be paid is bounded; an entity with real users is paid exactly its users' cumulative net
 # winnings above their best previous level. Must be a settlement-cycle boundary
 # (MARKETS_COLLATERAL_FROM_UNIX + k x MARKETS_SETTLE_PERIOD_S). 0 = off.
-# ⚑ MAINNET ARM: the cycle starting 2026-10-10 19:52:00 UTC.
+# ⚑ MAINNET ARM: the cycle starting 2026-10-10 20:12:00 UTC.
 MARKETS_CARRY_FROM_UNIX = int(os.getenv("SN89_MARKETS_CARRY_FROM", "1791663120"))
 
 
 def markets_carry_as_of(cycle: int) -> bool:
     return bool(MARKETS_CARRY_FROM_UNIX and cycle >= MARKETS_CARRY_FROM_UNIX)
+
+
+# V2d LOCK WHILE OPEN (Whit, 2026-10-11). The collateral check ran only when a bet was taken, so an
+# entity could unstake right after and its bets stayed valid: winners were owed by an entity holding
+# nothing. From this cycle on, the entity's collateral (owner-coldkey stake on the entity hotkey minus
+# debt) is read at every MARKETS_LOCK_CHECK_S checkpoint of the cycle and compared with the alpha of
+# its open bets (accepted before the checkpoint, market ending at or after it). Short at ANY
+# checkpoint -> that cycle's payable is 0. Carry still advances, so the forfeited amount is never
+# paid later. 15-minute checkpoints sit on every 15m/1h market's end; hourly snapshots fell where
+# those markets had just ended and saw almost nothing open. Must be a settlement-cycle boundary
+# (MARKETS_COLLATERAL_FROM_UNIX + k x MARKETS_SETTLE_PERIOD_S). 0 = off.
+# ⚑ MAINNET ARM: the cycle starting 2026-10-11 13:00:00 UTC.
+MARKETS_LOCK_FROM_UNIX = int(os.getenv("SN89_MARKETS_LOCK_FROM", "1791723600"))
+MARKETS_LOCK_CHECK_S = int(os.getenv("SN89_MARKETS_LOCK_CHECK_S", "900"))
+
+
+def markets_lock_as_of(cycle: int) -> bool:
+    return bool(MARKETS_LOCK_FROM_UNIX and cycle >= MARKETS_LOCK_FROM_UNIX)
 
 
 MARKETS_V2_MIN_BET = _Decimal(os.getenv("SN89_MARKETS_V2_MIN_BET", "1"))

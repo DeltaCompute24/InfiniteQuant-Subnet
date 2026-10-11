@@ -62,6 +62,9 @@ config.MARKETS_COLLATERAL_FROM_UNIX; Whit 2026-10-08, modelled on Vanta's P&L pa
            losses as of the last closed cycle. Bets of all its subaccounts are taken in canonical
            order; a bet is IGNORED ("ignored:collateral") when the alpha stake of the entity's open
            bets (markets not yet ended at that receipt) plus this one would exceed it.
+  lock     (V2d, config.MARKETS_LOCK_FROM_UNIX) the same collateral must still cover the entity's
+           open bets at every MARKETS_LOCK_CHECK_S checkpoint of a settlement cycle; short at any
+           checkpoint -> payable 0 for that cycle (settle.lock_breach = the first such checkpoint).
   losses   a losing bet's stake is owed as a burn. The entity burns it on chain (burn_alpha or
            recycle_alpha on its own hotkey) and files a signed `mk.burn` claim {amount_alpha,
            block, ext_index}; validators read that extrinsic's AlphaBurned/AlphaRecycled event and
@@ -871,6 +874,8 @@ def _db(cache_dir: str) -> sqlite3.Connection:
     for col in ("won_ret", "lost_ret", "rcum", "hwm"):        # rcum/hwm: V2c loss carry-forward
         if col not in cols:
             c.execute(f"ALTER TABLE settle ADD COLUMN {col} TEXT DEFAULT '0'")
+    if "lock_breach" not in cols:                              # V2d: first short checkpoint, 0 = none
+        c.execute("ALTER TABLE settle ADD COLUMN lock_breach INTEGER DEFAULT 0")
     # V3 (additive: a cache built before V3 keeps its grader version; these fill in from the replay)
     c.execute("CREATE TABLE IF NOT EXISTS v3_prices (key TEXT PRIMARY KEY, market_id TEXT, p_model TEXT, "
               "price_paid TEXT, tick_t INTEGER, tick_mark REAL)")
@@ -1175,6 +1180,33 @@ def debt_as_of(db: sqlite3.Connection, entity: str, t: int) -> Decimal:
     return max(Decimal(row[0]), Decimal(0)) if row else Decimal(0)
 
 
+def open_alpha_at(db: sqlite3.Connection, entity: str, t: int) -> Decimal:
+    """V2d: alpha of the entity's accepted bets received before t whose market ends at or after t."""
+    tot = Decimal(0)
+    for a, mid in db.execute("SELECT c.alpha, b.market_id FROM coll c JOIN bets b ON b.key = c.key "
+                             "WHERE c.entity=? AND c.status='ok' AND c.t_recv_us < ?", (entity, int(t) * 1_000_000)):
+        if parse_market_id(mid)[3] >= t:
+            tot += Decimal(a)
+    return tot
+
+
+def lock_breach(db: sqlite3.Connection, ch: CachedChain, entity: str, cycle: int) -> int | None:
+    """V2d: the first checkpoint of `cycle` at which the entity's collateral was below its open bets;
+    0 when there was none; None while a checkpoint's block is not known yet (wait)."""
+    step, end = config.MARKETS_LOCK_CHECK_S, cycle + config.MARKETS_SETTLE_PERIOD_S
+    t = -(-int(cycle) // step) * step
+    while t < end:
+        opn = open_alpha_at(db, entity, t)
+        if opn > 0:
+            blk = ch.block_at(t)
+            if blk is None:
+                return None
+            if opn > ch.entity_stake(entity, blk) - debt_as_of(db, entity, t):
+                return t
+        t += step
+    return 0
+
+
 def collateral_pass(db: sqlite3.Connection, ch: CachedChain, base: str, cache_dir: str, frontier_us: int) -> int:
     """Decide ok / ignored:collateral for every undecided V2 bet received before `frontier_us`,
     entity by entity in canonical order. A bet waits (and so does every later bet of the same
@@ -1287,6 +1319,9 @@ def settle_cycles(db: sqlite3.Connection, ch: CachedChain, base: str, cache_dir:
                 burned[hk] = burned.get(hk, Decimal(0)) + ok
         ents = set(per) | set(burned) | {e for (e,) in db.execute("SELECT DISTINCT entity FROM settle")}
         Z = Decimal(0)
+        lock = {e: lock_breach(db, ch, e, c) for e in sorted(ents)} if config.markets_lock_as_of(c) else {}
+        if any(v is None for v in lock.values()):
+            break                                      # a checkpoint block is not known yet
         for ent in sorted(ents):
             won, lost, won_r, lost_r = per.get(ent, [Z, Z, Z, Z])
             prev = db.execute("SELECT lcum, bcum, dcum FROM settle WHERE entity=? AND cycle < ? ORDER BY cycle DESC "
@@ -1312,11 +1347,14 @@ def settle_cycles(db: sqlite3.Connection, ch: CachedChain, base: str, cache_dir:
                 rcum, hwm, net_r = carry_step(*((Decimal(x) for x in pc) if pc else (Z, Z)), won_r - lost_r)
             else:
                 rcum, hwm, net_r = Z, Z, max(Z, won_r - lost_r)
+            breach = lock.get(ent) or 0
+            payable = Z if breach else won - deducted + net_r       # V2d: short at a checkpoint -> nothing
             db.execute("INSERT OR REPLACE INTO settle (cycle, entity, won, lost, burned, deducted, debt, payable, "
-                       "lcum, bcum, dcum, won_ret, lost_ret, rcum, hwm) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                       "lcum, bcum, dcum, won_ret, lost_ret, rcum, hwm, lock_breach) "
+                       "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                        (c, ent, str(won), str(lost), str(burned.get(ent, Z)), str(deducted), str(debt),
-                        str(won - deducted + net_r), str(lcum), str(bcum), str(dcum), str(won_r), str(lost_r),
-                        str(rcum), str(hwm)))
+                        str(payable), str(lcum), str(bcum), str(dcum), str(won_r), str(lost_r),
+                        str(rcum), str(hwm), int(breach)))
         share = Decimal(str(config.comp_weights_as_of(c).get("markets", 0)))
         emission = CTX.multiply(CTX.multiply(CTX.multiply(CTX.multiply(
             Decimal(b1 - b0), ch.alpha_out_per_block(b0)), config.MARKETS_MINER_FRACTION),
