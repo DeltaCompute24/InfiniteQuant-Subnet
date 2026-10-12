@@ -1940,8 +1940,8 @@ def active_entities(db: sqlite3.Connection, now: float) -> list[str]:
 def entity_dust_uids(db: sqlite3.Connection, uid_by_hk: dict, now: float,
                      chain_view: ChainView | None = None) -> set[int]:
     """UIDs of active entities whose owner coldkey holds >= markets_dust_min_collateral_as_of(now)
-    on their hotkey at the first block of the cycle's UTC hour. A chain read failure gives no dust
-    this cycle (logged), never a crash."""
+    on their hotkey at the first block of the cycle's UTC hour (from the vault arm: whose vault
+    balance minus lock does). A chain read failure gives no dust this cycle (logged), never a crash."""
     ents = [h for h in active_entities(db, now) if h in uid_by_hk and uid_by_hk[h] != config.BURN_UID]
     if not ents:
         return set()
@@ -1953,8 +1953,15 @@ def entity_dust_uids(db: sqlite3.Connection, uid_by_hk: dict, now: float,
         if blk is None:
             raise RuntimeError(f"no block at {hour}")
         out = set()
+        in_vault = config.markets_vault_as_of(hour)
         for h in ents:
-            if ch.entity_stake(h, blk) >= minimum:
+            if in_vault:
+                # V5: the entity's collateral lives in the vault, not on its hotkey: qualify on what it
+                # holds there minus its lock (vault.collateral_at). Unknown yet (None) = no dust.
+                c = vault.collateral_at(db, ch, h, hour * 1_000_000, blk)
+                if c is not None and c >= minimum:
+                    out.add(uid_by_hk[h])
+            elif ch.entity_stake(h, blk) >= minimum:
                 out.add(uid_by_hk[h])
         db.commit()
         return out

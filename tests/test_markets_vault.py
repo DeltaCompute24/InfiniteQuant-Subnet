@@ -342,3 +342,27 @@ def test_a_sweep_from_the_wrong_hotkey_or_signer_credits_nothing(v5b, tmp_path):
     assert not db.execute("SELECT 1 FROM vault_ledger WHERE kind='emission'").fetchone()
     with pytest.raises(hf.HFRejected, match="sweep_not_operator"):
         vault.validate(_vf(vault.KIND_SWEEP, block=1, ext_index=0), ENTITY, DAY + 10)
+
+
+# ── dust qualifies on the vault balance ──────────────────────────────────────
+def _dust_db(tmp_path, alpha, name):
+    blk = (DAY + 240) // 12
+    chain = VaultChain(xfers={(blk, 1): _xfer("5OwnerA", VCK, alpha)}, stake=D(0))   # hotkey holds nothing
+    entries = [_dep(ENTITY, DAY + 300, 1, blk, alpha), _bet(ENTITY, S1 - 600, 2, S1)]
+    db, _ = _run(tmp_path, entries, chain, S1 + 1800, name=name)
+    return db, chain
+
+
+def test_dust_qualifies_on_the_vault_balance_not_the_emptied_hotkey(v5, tmp_path):
+    m = config.markets_dust_min_collateral_as_of(S1 + 1800)
+    db, chain = _dust_db(tmp_path, m + 100, "dv")
+    assert markets.entity_dust_uids(db, {ENTITY: 7}, S1 + 1800, chain) == {7}
+    db2, chain2 = _dust_db(tmp_path, m - 100, "dv2")
+    assert markets.entity_dust_uids(db2, {ENTITY: 7}, S1 + 1800, chain2) == set()
+
+
+def test_dust_reads_the_hotkey_while_the_vault_is_off(v5, tmp_path, monkeypatch):
+    m = config.markets_dust_min_collateral_as_of(S1 + 1800)
+    db, chain = _dust_db(tmp_path, m + 100, "doff")
+    monkeypatch.setattr(config, "MARKETS_VAULT_FROM_UNIX", 0)
+    assert markets.entity_dust_uids(db, {ENTITY: 7}, S1 + 1800, chain) == set()     # hotkey stake is 0
