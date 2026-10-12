@@ -714,6 +714,91 @@ def quote_context(mid: str, rows: list[dict], target: float | None, sigma: Decim
     return {"p": p, "tick_t": tk[0], "tick_mark": tk[1], "tau": tau, "spread": spread_for(tau)}
 
 
+def uses_depth(mid: str) -> bool:
+    """V3.2: this market's in-window bets are priced with finite house depth (depth_shares)."""
+    _a, window, start, _e = parse_market_id(mid)
+    return bool(config.MARKETS_DEPTH_FROM_UNIX and start >= config.MARKETS_DEPTH_FROM_UNIX
+                and window in config.MARKETS_DEPTH_WINDOWS)
+
+
+def depth_group_like(mid: str) -> str:
+    """SQL LIKE pattern for every market sharing `mid`'s window and start."""
+    _a, window, start, _e = parse_market_id(mid)
+    return f"UD:%:{window}:{int(start)}"
+
+
+def depth_prior(rows: list[tuple]) -> dict[str, tuple[Decimal, Decimal]]:
+    """{bet key: (account stake, entity stake)} already placed on the bet's SIDE before it, in canonical
+    order, across a window+start group. `rows` are the group's counted bets as
+    (key, account, side, dollars, order): in-window (receipt at/after the start), inside the entry
+    window, and not refused by the collateral pass. Stake submitted counts whatever the bet's own
+    market later made of it, so no market's pricing depends on another market's prices."""
+    acc: dict[tuple[str, str], Decimal] = {}
+    out = {}
+    for key, account, side, dollars, _order in sorted(rows, key=lambda r: r[4]):
+        ent = account_owner(account)
+        a0 = acc.get(("a:" + account, side), Decimal(0))
+        e0 = acc.get(("e:" + ent, side), Decimal(0))
+        out[key] = (a0, e0)
+        acc[("a:" + account, side)] = a0 + dollars
+        acc[("e:" + ent, side)] = e0 + dollars
+    return out
+
+
+def depth_group_rows(db: sqlite3.Connection, mid: str, v2: bool) -> list[tuple]:
+    """The counted bets of `mid`'s window+start group, for depth_prior."""
+    _a, _w, start, _e = parse_market_id(mid)
+    if v2:
+        q = ("SELECT b.key, b.market_id, b.account, b.side, b.dollars, b.w, b.t_recv_us, b.hk, b.seq, c.status "
+             "FROM bets b LEFT JOIN coll c ON c.key = b.key WHERE b.market_id LIKE ? AND b.t_recv_us >= ?")
+    else:
+        q = ("SELECT key, market_id, account, side, dollars, w, t_recv_us, hk, seq, 'ok' "
+             "FROM bets WHERE market_id LIKE ? AND t_recv_us >= ?")
+    out = []
+    for k, m, a, s, d, w, t, h, sq, st in db.execute(q, (depth_group_like(mid), int(start) * 1_000_000)):
+        if (st or "ok") != "ok" or not in_entry_us(m, int(t)):
+            continue
+        out.append((k, a, s, Decimal(d), (w, t, h, sq)))
+    return out
+
+
+def depth_group_undecided(db: sqlite3.Connection, mid: str, upto_us: int) -> int:
+    """Bets of `mid`'s group, received at/after its start and no later than upto_us, that the
+    collateral pass has not decided yet. Depth counts them, so a depth market waits for them."""
+    _a, _w, start, _e = parse_market_id(mid)
+    return db.execute(
+        "SELECT COUNT(*) FROM bets b LEFT JOIN coll c ON c.key = b.key WHERE b.market_id LIKE ? "
+        "AND b.t_recv_us >= ? AND b.t_recv_us <= ? AND c.key IS NULL",
+        (depth_group_like(mid), int(start) * 1_000_000, int(upto_us))).fetchone()[0]
+
+
+def depth_shares(d: Decimal, side: str, p_flat: Decimal, ctx: dict) -> Decimal:
+    """Shares for `d` dollars under finite house depth. ctx["depth"] = (account stake, entity stake)
+    already on this side in the window+start group. Dollars inside both allowances fill at `p_flat`
+    (what the bet pays without depth). The rest pay p_flat plus a premium: how far their average
+    price on an LMSR of MARKETS_DEPTH_B, anchored at the model probability of the side and already
+    loaded by the holder's dollars past its allowance, sits above that probability."""
+    a0, e0 = ctx["depth"]
+    lim_a, lim_e = config.MARKETS_DEPTH_ACCOUNT, config.MARKETS_DEPTH_ENTITY
+    over0 = max(a0 - lim_a, e0 - lim_e, Decimal(0))
+    over1 = max(a0 + d - lim_a, e0 + d - lim_e, Decimal(0))
+    flat_d = max(d - over1, Decimal(0))
+    deep_d = d - flat_d
+    shares = CTX.divide(flat_d, p_flat) if flat_d > 0 else Decimal(0)
+    if deep_d > 0:
+        bb = config.MARKETS_DEPTH_B
+        p_side = Decimal(ctx["p"]) if side == "UP" else CTX.subtract(Decimal(1), Decimal(ctx["p"]))
+        a = anchor(p_side, bb)
+        q0 = shares_for(over0, "UP", a, Decimal(0), bb) if over0 > 0 else Decimal(0)
+        lm = shares_for(deep_d, "UP", CTX.add(a, q0), Decimal(0), bb)
+        p2 = config.MARKETS_V3_PRICE_CAP
+        if lm > 0:
+            premium = max(CTX.subtract(CTX.divide(deep_d, lm), p_side), Decimal(0))
+            p2 = min(CTX.add(p_flat, premium), p2)
+        shares = CTX.add(shares, CTX.divide(deep_d, p2))
+    return shares.quantize(SHARE_Q, rounding=ROUND_DOWN)
+
+
 def replay(bets: list[dict], b: Decimal | None = None, start: int | None = None, pricer=None) -> list[dict]:
     """Price one market's bets in canonical order. Each bet: {key, account, side, dollars(Decimal),
     order(tuple)}. Returns the bets in order with `shares` (what the bet pays per $1 share) and
@@ -749,7 +834,11 @@ def replay(bets: list[dict], b: Decimal | None = None, start: int | None = None,
         if ctx:
             p_avg = CTX.divide(d, sh)
             p_paid = min(CTX.add(p_avg, ctx["spread"]), pcap)
-            rec["shares"] = CTX.divide(d, p_paid).quantize(SHARE_Q, rounding=ROUND_DOWN)
+            if ctx.get("depth") is not None:
+                rec["shares"] = depth_shares(d, bet["side"], p_paid, ctx)
+                p_paid = CTX.divide(d, rec["shares"]) if rec["shares"] > 0 else pcap
+            else:
+                rec["shares"] = CTX.divide(d, p_paid).quantize(SHARE_Q, rounding=ROUND_DOWN)
             rec.update(price_paid=p_paid, p_model=ctx["p"], tick_t=ctx["tick_t"], tick_mark=ctx["tick_mark"],
                        spread=ctx["spread"], tau=ctx["tau"])
         else:
@@ -949,6 +1038,15 @@ def grade_market(db: sqlite3.Connection, mid: str, rows: list[dict], sigma: Deci
             bet["status"] = coll[k]                  # ignored:collateral — never priced
         # The replay decides the entry window, whatever the ingest accepted.
         (bets if in_entry_us(mid, int(t)) else outside).append(bet)
+    if pricer is not None and uses_depth(mid):
+        prior = depth_prior(depth_group_rows(db, mid, v2))
+        base_pricer = pricer
+
+        def pricer(bet: dict):
+            ctx = base_pricer(bet)
+            if ctx and not ctx.get("ignore"):
+                ctx = {**ctx, "depth": prior.get(bet["key"], (Decimal(0), Decimal(0)))}
+            return ctx
     for r in replay(bets, start=start, pricer=pricer) + [
             {**b, "shares": Decimal(0), "status": "ignored:outside_entry_window"} for b in outside]:
         pnl = bet_pnl(r["side"], r["shares"], r["dollars"], outcome) if r["status"] == "ok" else Decimal(0)
@@ -1606,6 +1704,10 @@ def sync_and_grade(base: str, cache_dir: str, now: float, chain_view: ChainView 
                     (mid,)).fetchone()[0]
                 if undecided:
                     continue                     # collateral first, then price
+                if uses_depth(mid):
+                    last = db.execute("SELECT MAX(t_recv_us) FROM bets WHERE market_id=?", (mid,)).fetchone()[0]
+                    if last and depth_group_undecided(db, mid, int(last)):
+                        continue                 # depth counts the group's earlier bets: wait for them
             if uses_oracle(mid) and _w in config.MARKETS_CAL_WINDOWS:
                 # a day or a week: only the minutes that decide it (target, settle, each bet's fill)
                 rows, missing = oracle.rows_for_spans(config.MARKETS_ORACLE_PUBLIC_BASE,

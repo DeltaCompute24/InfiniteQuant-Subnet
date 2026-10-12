@@ -1667,6 +1667,23 @@ MARKETS_SIGMA_TRAILING_FROM_UNIX = int(os.getenv("SN89_MARKETS_SIGMA_TRAILING_FR
 MARKETS_SIGMA_TRAILING_S = int(os.getenv("SN89_MARKETS_SIGMA_TRAILING_S", "10800"))
 MARKETS_SIGMA_TRAILING_MIN_RETURNS = int(os.getenv("SN89_MARKETS_SIGMA_TRAILING_MIN_RETURNS", "90"))
 MARKETS_SIGMA_TRAILING_WINDOWS = ("15m", "1h")
+# V3.2 FINITE HOUSE DEPTH (Whit, 2026-10-12). The model price had unlimited depth: every bet, of any
+# size, in any number of markets, filled at model + spread. An entity betting one view across ten
+# markets of the same start (e.g. "crypto down" on SOL, DOGE, LINK, BTC, SUI, ... at 01:02 on 10-12)
+# took the full price on all of them, so any model error was free to whoever found it first
+# (5CDPZpc5 +$3,016 on $45.7k, 10-09..10-12). Now each holder, the ACCOUNT and its ENTITY, gets a
+# flat allowance of same-direction STAKE across every market with the same window and start: the
+# first DEPTH_ACCOUNT / DEPTH_ENTITY dollars fill at the model price as before; dollars past the
+# smaller remaining allowance walk an LMSR of DEPTH_B anchored at the model, loaded by what that
+# holder has already put past it. Stake, not shares, so a market's pricing never depends on another
+# market's prices. Replayed over every graded V3 bet 10-09 15:00 .. 10-12 02:30 UTC: 5CDPZpc5
+# +$3,383 -> -$656, IQ users +$327 -> +$233, every other entity unchanged.
+# ⚑ MAINNET ARM: 15m/1h markets starting at/after 2026-10-12 05:00:00 UTC. 0 = off.
+MARKETS_DEPTH_FROM_UNIX = int(os.getenv("SN89_MARKETS_DEPTH_FROM", "1791781200"))
+MARKETS_DEPTH_B = _Decimal(os.getenv("SN89_MARKETS_DEPTH_B", "300"))
+MARKETS_DEPTH_ACCOUNT = _Decimal(os.getenv("SN89_MARKETS_DEPTH_ACCOUNT", "100"))
+MARKETS_DEPTH_ENTITY = _Decimal(os.getenv("SN89_MARKETS_DEPTH_ENTITY", "400"))
+MARKETS_DEPTH_WINDOWS = ("15m", "1h")
 
 
 # ── Markets V4: settle on the Hyperliquid oracle price (Whit, 2026-10-10) ───────────────────────
