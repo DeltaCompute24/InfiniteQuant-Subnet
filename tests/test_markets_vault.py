@@ -215,3 +215,130 @@ def test_vault_off_changes_nothing(v2b, tmp_path):
     chain = VaultChain()
     db, _ = _run(tmp_path, [_bet(ENTITY, S1 - 600, 1, S1)], chain, S1 + 1800)
     assert _status(db) == ["ok"] and db.execute("SELECT COUNT(*) FROM vault_checks").fetchone()[0] == 0
+
+
+# ── V5b: emission through the vault UID, the vault as the float ──────────────
+VUID_HK = "5VaultUidHotkey"
+
+
+@pytest.fixture
+def v5b(v5, monkeypatch):
+    monkeypatch.setattr(config, "MARKETS_VAULT_UID_HOTKEY", VUID_HK)
+    return config
+
+
+def _sweep(alpha, src=VUID_HK, dst=VHK, ck=VCK):
+    net = config.NETUID
+    return [{"event": "StakeMoved", "coldkey": ck, "origin_hotkey": src, "origin_netuid": net,
+             "destination_hotkey": dst, "destination_netuid": net},
+            {"event": "StakeAdded", "coldkey": ck, "hotkey": dst, "alpha": D(alpha), "netuid": net}]
+
+
+def _sweep_claim(t, seq, block, idx=2, signer=OP):
+    return _entry_for(signer, t, seq, _vf(vault.KIND_SWEEP, block=block, ext_index=idx))
+
+
+def _paid_through(db, c):
+    out = {}
+    for e, p in db.execute("SELECT entity, paid FROM settle WHERE cycle <= ?", (c,)):
+        out[e] = out.get(e, D(0)) + D(p)
+    return out
+
+
+def _two_winners(chain_kw=None, extra=()):
+    """A and B each deposit 100; A's player wins $60 UP and B's player wins $30 UP in 00:30-00:45."""
+    ba, bb = (DAY + 240) // 12, (DAY + 264) // 12
+    xf = {(ba, 1): _xfer("5OwnerA", VCK, 100), (bb, 1): _xfer("5OwnerB", VCK, 100)}
+    xf.update((chain_kw or {}).pop("xfers", {}))
+    chain = VaultChain(xfers=xf, **(chain_kw or {}))
+    entries = [_dep(ENTITY, DAY + 300, 1, ba, 100), _dep(ENTITY_B, DAY + 300, 1, bb, 100),
+               _bet(ENTITY, S1 - 600, 2, S1, dollars="60.00"), _bet(ENTITY_B, S1 - 590, 2, S1, dollars="30.00")]
+    return chain, entries + list(extra)
+
+
+def test_players_net_winnings_are_debited_from_the_vault_and_sent_as_a_payout(v5b, tmp_path):
+    chain, entries = _two_winners()
+    db, _ = _run(tmp_path, entries, chain, DAY + 2 * 3600)
+    tc = DAY + config.MARKETS_SETTLE_PERIOD_S + config.MARKETS_SETTLE_GRACE_S
+    rows = {e: (cp, D(req), D(ok), st) for e, cp, req, ok, st in db.execute(
+        "SELECT entity, cp, requested, approved, status FROM vault_requests WHERE kind=?", (vault.KIND_PAYOUT,))}
+    won = {e: D(w) for e, w in db.execute("SELECT entity, won_ret FROM settle WHERE cycle=?", (DAY,))}
+    assert set(rows) == {ENTITY, ENTITY_B}
+    for e in rows:
+        cp, req, ok, st = rows[e]
+        assert cp == tc and st == "approved" and req == ok == won[e].quantize(markets.RAO, rounding="ROUND_DOWN")
+    bal = vault.balances(db, chain, DAY + 2 * 3600)
+    assert D(bal[ENTITY]["alpha"]) == 100 - rows[ENTITY][2]
+    assert not db.execute("SELECT 1 FROM vault_checks WHERE short=1").fetchone()   # pending payouts count
+
+
+def test_a_payout_is_capped_at_the_balance_and_the_rest_recorded_uncovered(v5b, tmp_path):
+    # A deposits 30 alpha ($36) and its player's $30 bet pays well over 30 alpha of winnings
+    ba = (DAY + 240) // 12
+    chain = VaultChain(xfers={(ba, 1): _xfer("5OwnerA", VCK, 30)})
+    db, _ = _run(tmp_path, [_dep(ENTITY, DAY + 300, 1, ba, 30), _bet(ENTITY, S1 - 600, 2, S1, dollars="30.00")],
+                 chain, DAY + 2 * 3600)
+    won = D(db.execute("SELECT won_ret FROM settle WHERE cycle=? AND entity=?", (DAY, ENTITY)).fetchone()[0])
+    req, ok = db.execute("SELECT requested, approved FROM vault_requests WHERE kind=?", (vault.KIND_PAYOUT,)).fetchone()
+    if won > 30:
+        assert D(ok) == 30 and D(req) > D(ok)
+    else:
+        assert D(ok) == D(req)
+    assert D(vault.balances(db, chain, DAY + 2 * 3600)[ENTITY]["alpha"]) >= 0
+
+
+def test_the_markets_share_goes_to_the_vault_uid(v5b, tmp_path):
+    chain, entries = _two_winners()
+    db, _ = _run(tmp_path, entries, chain, DAY + 2 * 3600)
+    uids = {ENTITY: 10, ENTITY_B: 11, VUID_HK: 99}
+    vec = markets.pnl_vector(db, uids, DAY + 2 * 3600)
+    em = D(db.execute("SELECT emission FROM settle_meta WHERE cycle=?", (DAY,)).fetchone()[0])
+    paid = sum(D(p) for (p,) in db.execute("SELECT paid FROM settle WHERE cycle=?", (DAY,)))
+    assert 10 not in vec and 11 not in vec
+    assert vec[99] == pytest.approx(float(min(D(1), paid / em)))
+    assert sum(vec.values()) == pytest.approx(1.0)
+    # an unregistered vault UID sends the share to the burn UID (and says so), never to the entities
+    vec2 = markets.pnl_vector(db, {ENTITY: 10, ENTITY_B: 11}, DAY + 2 * 3600)
+    assert vec2 == {config.BURN_UID: 1.0}
+
+
+def test_a_sweep_is_credited_pro_rata_to_owed_emission_once_and_the_excess_to_the_reserve(v5b, tmp_path):
+    t_sw = DAY + 2 * 3600 + 100
+    bs = t_sw // 12 - 2
+    chain, entries = _two_winners({"xfers": {(bs, 2): _sweep(10**6)}},
+                                  extra=[_sweep_claim(t_sw, 1, bs), _sweep_claim(t_sw + 10, 2, bs)])
+    db, _ = _run(tmp_path, entries, chain, DAY + 3 * 3600)
+    paid = _paid_through(db, DAY + 3600)                          # every cycle closed by the sweep's checkpoint
+    em = {e: D(a) for e, a in db.execute("SELECT entity, alpha FROM vault_ledger WHERE kind='emission'")}
+    for e in (ENTITY, ENTITY_B):
+        assert abs(em[e] - paid[e]) < D("0.000000001")            # owed in full: 10**6 arrived
+    assert abs(em[vault.RESERVE] - (10**6 - em[ENTITY] - em[ENTITY_B])) < D("0.000000001")
+    assert db.execute("SELECT COUNT(DISTINCT ref) FROM vault_ledger WHERE kind='emission'").fetchone()[0] == 1
+    assert vault.emission_outstanding(db, DAY + 3600, (DAY + 3 * 3600) * 1_000_000) == {}
+
+
+def test_a_short_sweep_is_shared_pro_rata_and_the_rest_stays_outstanding(v5b, tmp_path):
+    t_sw = DAY + 2 * 3600 + 100
+    bs = t_sw // 12 - 2
+    chain, entries = _two_winners({"xfers": {(bs, 2): _sweep("0.001")}}, extra=[_sweep_claim(t_sw, 1, bs)])
+    db, _ = _run(tmp_path, entries, chain, DAY + 3 * 3600)
+    paid = _paid_through(db, DAY + 3600)                          # every cycle closed by the sweep's checkpoint
+    em = {e: D(a) for e, a in db.execute("SELECT entity, alpha FROM vault_ledger WHERE kind='emission'")}
+    tot = paid[ENTITY] + paid[ENTITY_B]
+    if tot > D("0.001"):
+        for e in (ENTITY, ENTITY_B):
+            assert abs(em[e] - D("0.001") * paid[e] / tot) < D("0.000000002")
+        left = vault.emission_outstanding(db, DAY + 3600, (DAY + 3 * 3600) * 1_000_000)
+        assert abs(sum(left.values()) - (tot - em[ENTITY] - em[ENTITY_B])) < D("0.000000001")
+        assert vault.RESERVE not in em
+
+
+def test_a_sweep_from_the_wrong_hotkey_or_signer_credits_nothing(v5b, tmp_path):
+    t_sw = DAY + 2 * 3600 + 100
+    bs = t_sw // 12 - 2
+    chain, entries = _two_winners({"xfers": {(bs, 2): _sweep(100, src="5SomeEntityHotkey")}},
+                                  extra=[_sweep_claim(t_sw, 1, bs)])
+    db, _ = _run(tmp_path, entries, chain, DAY + 3 * 3600)
+    assert not db.execute("SELECT 1 FROM vault_ledger WHERE kind='emission'").fetchone()
+    with pytest.raises(hf.HFRejected, match="sweep_not_operator"):
+        vault.validate(_vf(vault.KIND_SWEEP, block=1, ext_index=0), ENTITY, DAY + 10)

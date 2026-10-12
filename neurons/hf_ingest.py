@@ -612,7 +612,7 @@ class Ingest:
         # its own rate ledger is per ACCOUNT, because an entity bets for many subaccounts.
         # `mk.burn` (V2): an entity's claim that it burned alpha on chain; validators credit it only
         # after reading the extrinsic's event. It rides the same anchored window, no rate ledger.
-        # `mk.deposit/withdraw/exit/release` (V5): collateral vault frames (markets_vault.py), same path.
+        # `mk.deposit/withdraw/exit/release/sweep` (V5): collateral vault frames (markets_vault.py), same path.
         kind = str((payload or {}).get("kind", ""))
         is_market = kind in markets.MARKETS_KINDS
         try:

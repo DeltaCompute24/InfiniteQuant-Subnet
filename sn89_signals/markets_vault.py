@@ -30,6 +30,20 @@ guarantees is that every movement is replayable and checked.
   reserve   ledger entity RESERVE. At each closed cycle it pays the cycle's claims (payable + owed) pro
             rata up to its balance, as credits to the claimants' vault balances at the cycle's close
             (c + period + grace); the emission then pays what is left (V2e). See markets.settle_cycles.
+  emission  (V5b) from the arm the Markets share of the weight vector goes to the vault's own UID
+            (config.MARKETS_VAULT_UID_HOTKEY, owned by the vault coldkey), so the emission lands in the vault
+            on chain. An operator sweeps it onto the vault hotkey (move_stake) and files `mk.sweep {block,
+            ext_index}`; validators verify the StakeMoved and credit the alpha the vault hotkey received to
+            the entities pro rata to the emission they are owed and not yet credited (settle.paid summed
+            over armed cycles, minus earlier sweep credits). Anything above what is owed goes to the reserve.
+            Credit follows what ARRIVED, not what the vector asked for: validators that set other weights
+            leave part of it unpaid, and that part stays outstanding (visible) instead of being invented.
+  payouts   (V5b) the vault is also the float. When a cycle closes with an entity's players net ahead
+            (won_ret - lost_ret > 0, alpha), that amount is debited from the entity's vault balance at the
+            close and becomes an approved `mk.payout` request: the custodian sends it to the entity's owner
+            coldkey (which pays the players) and files mk.release like any withdrawal. A cycle where the
+            players net lost moves nothing: the lost stakes are with the entity's custodian, which may
+            deposit them. A debit is capped at the balance; the uncovered part is recorded, not owed.
   solvency  at each checkpoint the vault coldkey's on-chain stake on the vault hotkey is compared with the
             ledger (all balances + reserve + approved, unreleased withdrawals). Short by more than
             MARKETS_VAULT_SOLVENCY_TOL -> no bet is accepted until a later checkpoint is whole.
@@ -47,7 +61,8 @@ from decimal import Decimal
 from . import config, hf
 
 KIND_DEPOSIT, KIND_WITHDRAW, KIND_EXIT, KIND_RELEASE = "mk.deposit", "mk.withdraw", "mk.exit", "mk.release"
-VAULT_KINDS = (KIND_DEPOSIT, KIND_WITHDRAW, KIND_EXIT, KIND_RELEASE)
+KIND_SWEEP, KIND_PAYOUT = "mk.sweep", "mk.payout"      # mk.payout is a request the ledger writes, never a frame
+VAULT_KINDS = (KIND_DEPOSIT, KIND_WITHDRAW, KIND_EXIT, KIND_RELEASE, KIND_SWEEP)
 RESERVE = "_reserve"
 Z = Decimal(0)
 
@@ -86,14 +101,14 @@ def validate(payload: dict, signer_hk: str, t_unix: float) -> None:
             raise m.MarketError(f"trade_pair_mismatch:expected {config.MARKETS_RATE_PAIR}")
         if kind in (KIND_DEPOSIT, KIND_WITHDRAW):
             m.parse_alpha(payload.get("amount_alpha"))
-        if kind in (KIND_DEPOSIT, KIND_RELEASE):
+        if kind in (KIND_DEPOSIT, KIND_RELEASE, KIND_SWEEP):
             blk, idx = int(payload.get("block")), int(payload.get("ext_index"))
             if blk <= 0 or idx < 0:
                 raise m.MarketError("bad_extrinsic_ref")
-        if kind == KIND_RELEASE:
+        if kind in (KIND_RELEASE, KIND_SWEEP):
             if signer_hk not in config.MARKETS_VAULT_OPERATORS:
-                raise m.MarketError("release_not_operator")
-            if not str(payload.get("withdraw_key") or ""):
+                raise m.MarketError(f"{kind.split('.')[1]}_not_operator")
+            if kind == KIND_RELEASE and not str(payload.get("withdraw_key") or ""):
                 raise m.MarketError("release_needs_withdraw_key")
     except (TypeError, ValueError) as e:
         raise hf.HFRejected(str(e) if isinstance(e, m.MarketError) else "bad_extrinsic_ref")
@@ -102,8 +117,8 @@ def validate(payload: dict, signer_hk: str, t_unix: float) -> None:
 def ingest(db: sqlite3.Connection, w: int, hk: str, seq: int, t_us: int, p: dict) -> None:
     kind = str(p["kind"])
     amount = str(_m().parse_alpha(p["amount_alpha"])) if kind in (KIND_DEPOSIT, KIND_WITHDRAW) else None
-    blk = int(p["block"]) if kind in (KIND_DEPOSIT, KIND_RELEASE) else None
-    idx = int(p["ext_index"]) if kind in (KIND_DEPOSIT, KIND_RELEASE) else None
+    blk = int(p["block"]) if kind in (KIND_DEPOSIT, KIND_RELEASE, KIND_SWEEP) else None
+    idx = int(p["ext_index"]) if kind in (KIND_DEPOSIT, KIND_RELEASE, KIND_SWEEP) else None
     ref = str(p["withdraw_key"]) if kind == KIND_RELEASE else None
     db.execute("INSERT OR IGNORE INTO vault_claims VALUES (?,?,?,?,?,?,?,?,?)",
                (f"{hk}:{seq}", kind, hk, amount, blk, idx, ref, int(w), int(t_us)))
@@ -216,6 +231,96 @@ def _xfer_alpha(ch, block, idx, origin_ck, dest_ck) -> Decimal:
                 and e["hotkey"] == hk and int(e["netuid"]) == net), Z)
 
 
+def _sweep_alpha(ch, block, idx) -> Decimal:
+    """Alpha a move_stake in (block, idx) moved, for the vault coldkey, from the vault UID hotkey onto the
+    vault hotkey on this subnet (the StakeAdded the vault hotkey received). 0 when it is not that move."""
+    V, src, dst, net = (config.MARKETS_VAULT_COLDKEY, config.MARKETS_VAULT_UID_HOTKEY, config.MARKETS_VAULT_HOTKEY,
+                        int(config.NETUID))
+    evs = ch.transfer_events(int(block), int(idx))
+    moved = any(e["event"] == "StakeMoved" and e["coldkey"] == V and e["origin_hotkey"] == src
+                and e["destination_hotkey"] == dst and int(e["origin_netuid"]) == net
+                and int(e["destination_netuid"]) == net for e in evs)
+    if not src or not moved:
+        return Z
+    return sum((e["alpha"] for e in evs if e["event"] == "StakeAdded" and e["coldkey"] == V
+                and e["hotkey"] == dst and int(e["netuid"]) == net), Z)
+
+
+def emission_outstanding(db: sqlite3.Connection, through_cycle: int, before_us: int) -> dict[str, Decimal]:
+    """entity -> emission it was paid (settle.paid) over armed cycles up to `through_cycle`, minus sweep
+    credits posted before `before_us`. Never negative."""
+    out: dict[str, Decimal] = {}
+    if not config.MARKETS_VAULT_FROM_UNIX:
+        return out
+    for ent, pd in db.execute("SELECT entity, paid FROM settle WHERE cycle >= ? AND cycle <= ? AND paid IS NOT NULL",
+                              (config.MARKETS_VAULT_FROM_UNIX, int(through_cycle))):
+        out[ent] = out.get(ent, Z) + Decimal(pd)
+    for ent, a in db.execute("SELECT entity, alpha FROM vault_ledger WHERE kind='emission' AND entity != ? AND t_us < ?",
+                             (RESERVE, int(before_us))):
+        out[ent] = out.get(ent, Z) - Decimal(a)
+    return {e: v for e, v in out.items() if v >= _m().RAO}         # sub-rao rounding is not owed
+
+
+def _credit_sweeps(db, ch, cp: int) -> None:
+    """Phase B: sweeps received in (cp - step, cp], credited at cp pro rata to outstanding emission."""
+    m = _m()
+    step = config.MARKETS_LOCK_CHECK_S
+    lo_us, hi_us = (cp - step) * 1_000_000, cp * 1_000_000
+    for c in _claims(db, KIND_SWEEP, lo_us, hi_us):
+        ref = f"{c['block']}:{c['ext_index']}"
+        if db.execute("SELECT 1 FROM vault_ledger WHERE kind='emission' AND ref=?", (ref,)).fetchone():
+            continue                                          # once per extrinsic
+        t = c["t_recv_us"] // 1_000_000
+        if not (t - config.MARKETS_VAULT_CLAIM_MAX_AGE_S <= ch.block_time(int(c["block"])) <= t):
+            continue
+        got = _sweep_alpha(ch, c["block"], c["ext_index"])
+        p = price_at(ch, int(c["block"]))
+        if got <= 0 or p is None:
+            continue
+        owed = emission_outstanding(db, m._closed_by(cp), hi_us)
+        tot = sum(owed.values(), Z)
+        scale = min(Decimal(1), m.CTX.divide(got, tot)) if tot > 0 else Z
+        left = got
+        for ent in sorted(owed):
+            a = (owed[ent] * scale).quantize(m.RAO, rounding="ROUND_DOWN")
+            if a <= 0:
+                continue
+            _post(db, f"em:{c['key']}:{ent}", hi_us, ent, m.CTX.divide(a, p), a, "emission", ref)
+            left -= a
+        if left > 0 and scale >= 1:                           # more arrived than is owed: the reserve keeps it
+            _post(db, f"em:{c['key']}:{RESERVE}", hi_us, RESERVE, m.CTX.divide(left, p), left, "emission", ref)
+
+
+def payout_debit(db: sqlite3.Connection, ch, cycle: int, nets: dict[str, Decimal]) -> dict[str, Decimal]:
+    """V5b: debit each entity whose players finished `cycle` net ahead (nets: entity -> won_ret - lost_ret,
+    alpha) at the cycle's close, capped at its balance, and open an approved mk.payout request for the
+    custodian to send. Returns entity -> alpha debited."""
+    if not config.markets_vault_as_of(cycle):
+        return {}
+    m = _m()
+    tc = cycle + config.MARKETS_SETTLE_PERIOD_S + config.MARKETS_SETTLE_GRACE_S
+    blk = ch.block_at(tc)
+    price = price_at(ch, blk) if blk is not None else None
+    if price is None:
+        return {}
+    t_us = tc * 1_000_000
+    out = {}
+    for ent in sorted(nets):
+        net = nets[ent].quantize(m.RAO, rounding="ROUND_DOWN")
+        if net <= 0:
+            continue
+        bal = m.CTX.multiply(units_before(db, ent, t_us + 1), price)
+        a = min(net, max(bal, Z)).quantize(m.RAO, rounding="ROUND_DOWN")
+        key = f"payout:{cycle}:{ent}"
+        if a > 0:
+            _post(db, key, t_us, ent, -m.CTX.divide(a, price), -a, "payout", str(cycle))
+        db.execute("INSERT OR IGNORE INTO vault_requests VALUES (?,?,?,?,?,?,?,?,?,?)",
+                   (key, ent, KIND_PAYOUT, str(net), tc, str(a), "approved" if a > 0 else "uncovered",
+                    None, None, None))
+        out[ent] = a
+    return out
+
+
 def _settled_through(db) -> int | None:
     row = db.execute("SELECT MAX(cycle) FROM settle_meta").fetchone()
     return row[0] if row and row[0] is not None else None
@@ -303,6 +408,7 @@ def _phase_b(db, ch, cp: int, blk: int) -> None:
     step, V = config.MARKETS_LOCK_CHECK_S, config.MARKETS_VAULT_COLDKEY
     lo_us, hi_us = (cp - step) * 1_000_000, cp * 1_000_000
     price = price_at(ch, blk)
+    _credit_sweeps(db, ch, cp)
     reqs = _canonical(_claims(db, KIND_WITHDRAW, lo_us, hi_us) + _claims(db, KIND_EXIT, lo_us, hi_us))
     for c in reqs:
         ent = c["hk"]
@@ -400,4 +506,6 @@ def balances(db: sqlite3.Connection, ch, t: int) -> dict[str, dict]:
         lk = locked(db, ent, t) if ent != RESERVE else Z
         out[ent] = {"units": str(u), "alpha": str(a) if a is not None else None, "locked": str(lk),
                     "free": str(max(Z, a - lk)) if a is not None else None}
+    for ent, v in emission_outstanding(db, _m()._closed_by(int(t)), int(t) * 1_000_000 + 1).items():
+        out.setdefault(ent, {})["emission_outstanding"] = str(v)
     return out

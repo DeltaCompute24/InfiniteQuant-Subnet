@@ -1283,6 +1283,8 @@ class RpcChainView(ChainView):
         # Shapes on finney (bittensor 10.3, 2026-10-09; sn89-markets payouts.py):
         #   StakeTransferred(origin_ck, dest_ck, hotkey, origin_netuid, dest_netuid, tao_rao)
         #   StakeAdded(coldkey, hotkey, tao_rao, alpha_rao, netuid, fee)
+        #   StakeMoved(coldkey, origin_hk, origin_netuid, dest_hk, dest_netuid, tao_rao)  (move_stake, finney
+        #   block 9268482 ext 19, 2026-10-12; it also emits StakeRemoved/StakeAdded for the coldkey)
         out = []
         for ev in self._events(block):
             v = getattr(ev, "value", ev)
@@ -1294,6 +1296,10 @@ class RpcChainView(ChainView):
             if name == "StakeTransferred" and len(vals) >= 5:
                 out.append({"event": name, "origin_coldkey": str(vals[0]), "destination_coldkey": str(vals[1]),
                             "hotkey": str(vals[2]), "origin_netuid": int(vals[3]), "destination_netuid": int(vals[4])})
+            elif name == "StakeMoved" and len(vals) >= 5:
+                out.append({"event": name, "coldkey": str(vals[0]), "origin_hotkey": str(vals[1]),
+                            "origin_netuid": int(vals[2]), "destination_hotkey": str(vals[3]),
+                            "destination_netuid": int(vals[4])})
             elif name == "StakeAdded" and len(vals) >= 5:
                 out.append({"event": name, "coldkey": str(vals[0]), "hotkey": str(vals[1]),
                             "alpha": Decimal(int(vals[3])) / Decimal(10**9), "netuid": int(vals[4])})
@@ -1593,6 +1599,8 @@ def settle_cycles(db: sqlite3.Connection, ch: CachedChain, base: str, cache_dir:
             for e, (cl, pd, ow) in owed_step(rows, emission).items():
                 db.execute("UPDATE settle SET claim=?, paid=?, owed=? WHERE cycle=? AND entity=?",
                            (str(cl), str(pd), str(ow), c, e))
+        # V5b: the vault is the float: players' net winnings this cycle are debited and sent from the vault
+        vault.payout_debit(db, ch, c, {e: w - l for e, (_w0, _l0, w, l) in per.items()})
         db.execute("INSERT OR REPLACE INTO settle_meta VALUES (?,?)", (c, str(emission)))
         c += P
         closed += 1
@@ -1655,7 +1663,17 @@ def pnl_vector(db: sqlite3.Connection, uid_by_hk: dict, now: int) -> dict[int, f
     row = db.execute("SELECT cycle, emission FROM settle_meta WHERE cycle <= ? ORDER BY cycle DESC LIMIT 1",
                      (_closed_by(now),)).fetchone()
     weights: dict[int, float] = {}
-    if row is not None and Decimal(row[1]) > 0:
+    if row is not None and Decimal(row[1]) > 0 and config.markets_vault_as_of(row[0]):
+        # V5b: the whole paid share goes to the vault's UID; the ledger splits what arrives (markets_vault)
+        c, emission = row[0], Decimal(row[1])
+        tot = sum((Decimal(p) for (p,) in db.execute("SELECT paid FROM settle WHERE cycle=? AND paid IS NOT NULL",
+                                                     (c,))), Decimal(0))
+        vu = uid_by_hk.get(config.MARKETS_VAULT_UID_HOTKEY) if config.MARKETS_VAULT_UID_HOTKEY else None
+        if vu is None:
+            print(f"  !! MARKETS VAULT UID not registered: cycle {c} share ({tot}) goes to the burn UID")
+        elif tot > 0:
+            weights[vu] = float(min(Decimal(1), CTX.divide(tot, emission)))
+    elif row is not None and Decimal(row[1]) > 0:
         c, emission = row[0], Decimal(row[1])
         x = {}
         col = "paid" if config.markets_owed_as_of(c) else "payable"     # V2e: paid already fits the emission
