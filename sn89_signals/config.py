@@ -1519,6 +1519,39 @@ def markets_owed_as_of(cycle: int) -> bool:
     return bool(MARKETS_OWED_FROM_UNIX and cycle >= MARKETS_OWED_FROM_UNIX)
 
 
+# V5 COLLATERAL VAULT (Whit, 2026-10-12; sn89_signals/markets_vault.py). Collateral stops being the stake
+# an entity can unstake at will: it is alpha the entity transferred to the vault coldkey, on the vault
+# hotkey, recorded by verified on-chain transfers and signed claims (mk.deposit / mk.withdraw / mk.exit /
+# mk.release). Balances are held in hotkey SHARES, so the vault's staking yield accrues to each entity
+# pro rata. A bet needs balance - locked (net loss below the high-water mark) to cover open bets + it.
+# An exiting entity's locked amount moves to the network reserve, which pays claims before emission.
+# MARKETS_VAULT_OPEN_UNIX: deposits and withdrawals are accepted from here (the migration window).
+# MARKETS_VAULT_FROM_UNIX: bets are checked against the vault from here; must be a settlement-cycle
+# boundary. 0 = off (both). Testnet arms first.
+MARKETS_VAULT_OPEN_UNIX = int(os.getenv("SN89_MARKETS_VAULT_OPEN", "0"))
+MARKETS_VAULT_FROM_UNIX = int(os.getenv("SN89_MARKETS_VAULT_FROM", "0"))
+MARKETS_VAULT_COLDKEY = os.getenv("SN89_MARKETS_VAULT_COLDKEY", "")
+# the hotkey vault alpha is staked on (it must hold a validator permit to earn dividends)
+MARKETS_VAULT_HOTKEY = os.getenv("SN89_MARKETS_VAULT_HOTKEY", "")
+# hotkeys allowed to sign mk.release (the custodian's operators)
+MARKETS_VAULT_OPERATORS = tuple(h for h in os.getenv("SN89_MARKETS_VAULT_OPERATORS", "").split(",") if h)
+# an approved withdrawal not released within this is a published custodian default
+MARKETS_VAULT_RELEASE_DEADLINE_S = int(os.getenv("SN89_MARKETS_VAULT_RELEASE_DEADLINE_S", "86400"))
+# a deposit claim must name an extrinsic no older than this before its receipt
+MARKETS_VAULT_CLAIM_MAX_AGE_S = int(os.getenv("SN89_MARKETS_VAULT_CLAIM_MAX_AGE_S", "86400"))
+# solvency: the vault's on-chain stake may trail the ledger by at most this (alpha) before betting halts
+MARKETS_VAULT_SOLVENCY_TOL = _Decimal(os.getenv("SN89_MARKETS_VAULT_SOLVENCY_TOL", "0.001"))
+
+
+def markets_vault_open_as_of(t: float) -> bool:
+    return bool(MARKETS_VAULT_OPEN_UNIX and t >= MARKETS_VAULT_OPEN_UNIX and MARKETS_VAULT_COLDKEY
+                and MARKETS_VAULT_HOTKEY)
+
+
+def markets_vault_as_of(t: float) -> bool:
+    return bool(MARKETS_VAULT_FROM_UNIX and t >= MARKETS_VAULT_FROM_UNIX and markets_vault_open_as_of(t))
+
+
 MARKETS_V2_MIN_BET = _Decimal(os.getenv("SN89_MARKETS_V2_MIN_BET", "1"))
 MARKETS_V2_MAX_BET = _Decimal(os.getenv("SN89_MARKETS_V2_MAX_BET", "10000"))
 MARKETS_V2_MAX_PER_MARKET = _Decimal(os.getenv("SN89_MARKETS_V2_MAX_PER_MARKET", "25000"))
