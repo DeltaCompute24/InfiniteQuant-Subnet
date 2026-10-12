@@ -1530,7 +1530,8 @@ def markets_owed_as_of(cycle: int) -> bool:
 # from everything before it in its market (exactly what the grader will pay); a bet whose fill
 # cannot be computed yet waits. The same payout measure replaces stake in the V2d lock checkpoints.
 # Keyed on the bet's receipt time (and the checkpoint time for the lock). 0 = off.
-MARKETS_PAYOUT_CHECK_FROM_UNIX = int(os.getenv("SN89_MARKETS_PAYOUT_CHECK_FROM", "0"))
+# ⚑ MAINNET ARM: 2026-10-14 00:00:00 UTC (receipts).
+MARKETS_PAYOUT_CHECK_FROM_UNIX = int(os.getenv("SN89_MARKETS_PAYOUT_CHECK_FROM", "1791936000"))
 MARKETS_CREDIT_SPAN_S = int(os.getenv("SN89_MARKETS_CREDIT_SPAN_S", "86400"))
 
 
@@ -1544,7 +1545,8 @@ def markets_payout_check_as_of(t_unix: float) -> bool:
 # grid is: T0 + k x PERIOD up to the arm, then [arm + j x 86400, arm + (j+1) x 86400). Carry (V2c),
 # lock (V2d) and owed (V2e) run unchanged on the new cycles; weights still commit every tempo from the
 # latest CLOSED cycle's paid / emission, so one day's claims are paid across the next day. 0 = off.
-MARKETS_DAILY_FROM_UNIX = int(os.getenv("SN89_MARKETS_DAILY_FROM", "0"))
+# ⚑ MAINNET ARM: 2026-10-14 00:00:00 UTC (the first daily cycle).
+MARKETS_DAILY_FROM_UNIX = int(os.getenv("SN89_MARKETS_DAILY_FROM", "1791936000"))
 
 
 def markets_daily_as_of(t_unix: float) -> bool:
@@ -1555,7 +1557,8 @@ def markets_daily_as_of(t_unix: float) -> bool:
 # owner-coldkey stake at the cycle's closing block, less debt, is under that lock claims nothing for
 # the cycle and keeps its owed balance (the V2d breach shape); it is paid again from the first cycle
 # it is covered. Pulling the bankroll stops the emission, and cancels nothing. Must be a cycle start. 0 = off.
-MARKETS_HOLD_FROM_UNIX = int(os.getenv("SN89_MARKETS_HOLD_FROM", "0"))
+# ⚑ MAINNET ARM: 2026-10-14 00:00:00 UTC (the first daily cycle).
+MARKETS_HOLD_FROM_UNIX = int(os.getenv("SN89_MARKETS_HOLD_FROM", "1791936000"))
 
 
 def markets_hold_as_of(cycle: int) -> bool:
