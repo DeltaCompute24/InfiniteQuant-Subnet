@@ -965,6 +965,12 @@ def _db(cache_dir: str) -> sqlite3.Connection:
             c.execute(f"ALTER TABLE settle ADD COLUMN {col} TEXT DEFAULT '0'")
     if "lock_breach" not in cols:                              # V2d: first short checkpoint, 0 = none
         c.execute("ALTER TABLE settle ADD COLUMN lock_breach INTEGER DEFAULT 0")
+    if "held" not in cols:                                     # V6: stake under the lock at the close
+        c.execute("ALTER TABLE settle ADD COLUMN held INTEGER DEFAULT 0")
+    # V6 (additive): each bet's maximum payout (alpha) and the per-hour emission credit
+    c.execute("CREATE TABLE IF NOT EXISTS coll_pay (key TEXT PRIMARY KEY, payout TEXT)")
+    c.execute("CREATE TABLE IF NOT EXISTS coll_credit (hour INTEGER, entity TEXT, credit TEXT, "
+              "PRIMARY KEY (hour, entity))")
     for col in ("claim", "paid", "owed"):                      # V2e: unpaid carry
         if col not in cols:
             c.execute(f"ALTER TABLE settle ADD COLUMN {col} TEXT DEFAULT '0'")
@@ -977,7 +983,8 @@ def _db(cache_dir: str) -> sqlite3.Connection:
               "PRIMARY KEY (asset, day))")
     row = c.execute("SELECT v FROM meta WHERE k='grader_version'").fetchone()
     if (int(row[0]) if row else 0) != GRADER_VERSION:
-        for t in ("windows_seen", "bets", "outcomes", "results", "burns", "coll", "settle", "settle_meta"):
+        for t in ("windows_seen", "bets", "outcomes", "results", "burns", "coll", "settle", "settle_meta",
+                  "coll_pay", "coll_credit"):
             c.execute(f"DELETE FROM {t}")
         c.execute("INSERT OR REPLACE INTO meta VALUES ('grader_version', ?)", (str(GRADER_VERSION),))
         c.commit()
@@ -1015,6 +1022,43 @@ def ingest_entries(db: sqlite3.Connection, w: int, entries: list[dict]) -> int:
     return n
 
 
+def _market_bets(db: sqlite3.Connection, mid: str, v2: bool, upto: tuple | None = None
+                 ) -> tuple[list[dict], list[dict]]:
+    """(in-entry bets, outside-entry bets) of a market as replay() takes them. A bet the collateral pass
+    refused carries its status (never priced); an undecided one is treated as ok. `upto` (an order
+    tuple) keeps only the bets at or before it in canonical order (V6 prefix replay)."""
+    coll = {}
+    if v2:
+        coll = {k: s for k, s in db.execute(
+            "SELECT c.key, c.status FROM coll c JOIN bets b ON b.key = c.key WHERE b.market_id=?", (mid,))}
+    bets, outside = [], []
+    for k, a, s, d, w, t, h, q in db.execute(
+            "SELECT key, account, side, dollars, w, t_recv_us, hk, seq FROM bets WHERE market_id=?", (mid,)):
+        if upto is not None and (w, t, h, q) > upto:
+            continue
+        bet = {"key": k, "account": a, "side": s, "dollars": Decimal(d), "order": (w, t, h, q)}
+        if v2 and coll.get(k, "ok") != "ok":
+            bet["status"] = coll[k]                  # ignored:collateral — never priced
+        # The replay decides the entry window, whatever the ingest accepted.
+        (bets if in_entry_us(mid, int(t)) else outside).append(bet)
+    return bets, outside
+
+
+def _with_depth(db: sqlite3.Connection, mid: str, v2: bool, pricer):
+    """V3.2: wrap a market's pricer with each bet's depth prior (unchanged pricer otherwise)."""
+    if pricer is None or not uses_depth(mid):
+        return pricer
+    prior = depth_prior(depth_group_rows(db, mid, v2))
+    base_pricer = pricer
+
+    def wrapped(bet: dict):
+        ctx = base_pricer(bet)
+        if ctx and not ctx.get("ignore"):
+            ctx = {**ctx, "depth": prior.get(bet["key"], (Decimal(0), Decimal(0)))}
+        return ctx
+    return wrapped
+
+
 def grade_market(db: sqlite3.Connection, mid: str, rows: list[dict], sigma: Decimal | None = None) -> str:
     """Grade one market from the asset's sealed ticks (covering target minute .. end). `sigma` is the
     V3 per-second volatility (sigma_for_market); a V3 market without one prices with the class
@@ -1026,27 +1070,8 @@ def grade_market(db: sqlite3.Connection, mid: str, rows: list[dict], sigma: Deci
     pricer = None
     if is_v3(start):
         pricer = make_pricer(mid, rows, target, sigma if sigma is not None else sigma_fallback(asset, start))
-    coll = {}
-    if v2:
-        coll = {k: s for k, s in db.execute(
-            "SELECT c.key, c.status FROM coll c JOIN bets b ON b.key = c.key WHERE b.market_id=?", (mid,))}
-    bets, outside = [], []
-    for k, a, s, d, w, t, h, q in db.execute(
-            "SELECT key, account, side, dollars, w, t_recv_us, hk, seq FROM bets WHERE market_id=?", (mid,)):
-        bet = {"key": k, "account": a, "side": s, "dollars": Decimal(d), "order": (w, t, h, q)}
-        if v2 and coll.get(k, "ok") != "ok":
-            bet["status"] = coll[k]                  # ignored:collateral — never priced
-        # The replay decides the entry window, whatever the ingest accepted.
-        (bets if in_entry_us(mid, int(t)) else outside).append(bet)
-    if pricer is not None and uses_depth(mid):
-        prior = depth_prior(depth_group_rows(db, mid, v2))
-        base_pricer = pricer
-
-        def pricer(bet: dict):
-            ctx = base_pricer(bet)
-            if ctx and not ctx.get("ignore"):
-                ctx = {**ctx, "depth": prior.get(bet["key"], (Decimal(0), Decimal(0)))}
-            return ctx
+    bets, outside = _market_bets(db, mid, v2)
+    pricer = _with_depth(db, mid, v2, pricer)
     for r in replay(bets, start=start, pricer=pricer) + [
             {**b, "shares": Decimal(0), "status": "ignored:outside_entry_window"} for b in outside]:
         pnl = bet_pnl(r["side"], r["shares"], r["dollars"], outcome) if r["status"] == "ok" else Decimal(0)
@@ -1263,15 +1288,32 @@ def market_rate(db: sqlite3.Connection, ch: CachedChain, base: str, cache_dir: s
 
 
 def _cycle(t: int) -> int:
-    """Start of the settlement cycle containing t (grid anchored at the V2 arm)."""
+    """Start of the settlement cycle containing t (grid anchored at the V2 arm; V6: one UTC day per
+    cycle from MARKETS_DAILY_FROM_UNIX, the tempo cycle containing it cut short at it)."""
+    D = config.MARKETS_DAILY_FROM_UNIX
+    if D and int(t) >= D:
+        return D + (int(t) - D) // 86400 * 86400
     P, T0 = config.MARKETS_SETTLE_PERIOD_S, config.MARKETS_COLLATERAL_FROM_UNIX
     return T0 + (int(t) - T0) // P * P
 
 
+def _cycle_end(c: int) -> int:
+    """End (exclusive) of the settlement cycle starting at c."""
+    D = config.MARKETS_DAILY_FROM_UNIX
+    if D and c >= D:
+        return c + 86400
+    e = c + config.MARKETS_SETTLE_PERIOD_S
+    return min(e, D) if D else e
+
+
+def _prev_cycle(c: int) -> int:
+    """Start of the cycle before the one starting at c (cycles are contiguous)."""
+    return _cycle(int(c) - 1)
+
+
 def _closed_by(t: int) -> int:
     """Start of the latest cycle that is closed at t (end + grace <= t)."""
-    P, G = config.MARKETS_SETTLE_PERIOD_S, config.MARKETS_SETTLE_GRACE_S
-    return _cycle(int(t) - G - P)
+    return _prev_cycle(_cycle(int(t) - config.MARKETS_SETTLE_GRACE_S))
 
 
 def debt_as_of(db: sqlite3.Connection, entity: str, t: int) -> Decimal:
@@ -1291,27 +1333,158 @@ def open_alpha_at(db: sqlite3.Connection, entity: str, t: int) -> Decimal:
     return tot
 
 
+def open_payout_at(db: sqlite3.Connection, entity: str, t_us: int, at_or_after: int | None = None,
+                   after: int | None = None) -> Decimal:
+    """V6: maximum payout (alpha) of the entity's accepted bets received before t_us whose market has
+    not ended (end >= at_or_after, or end > after). A bet decided before the payout arm has no payout
+    row and counts its stake, as it was decided."""
+    tot = Decimal(0)
+    for a, pay, mid in db.execute(
+            "SELECT c.alpha, p.payout, b.market_id FROM coll c JOIN bets b ON b.key = c.key "
+            "LEFT JOIN coll_pay p ON p.key = c.key WHERE c.entity=? AND c.status='ok' AND c.t_recv_us < ?",
+            (entity, int(t_us))):
+        e = parse_market_id(mid)[3]
+        if (at_or_after is not None and e >= at_or_after) or (after is not None and e > after):
+            tot += Decimal(pay if pay is not None else a)
+    return tot
+
+
+def cycle_emission(ch: CachedChain, b0: int, b1: int, t: int) -> Decimal:
+    """Markets emission (alpha) between blocks b0 and b1, at the competition weights in force at t."""
+    share = Decimal(str(config.comp_weights_as_of(t).get("markets", 0)))
+    return CTX.multiply(CTX.multiply(CTX.multiply(CTX.multiply(
+        Decimal(b1 - b0), ch.alpha_out_per_block(b0)), config.MARKETS_MINER_FRACTION),
+        ch.mecid0_fraction(b0)), share)
+
+
+def active_entities_at(db: sqlite3.Connection, t: int) -> list[str]:
+    """Hotkeys that filed a Markets frame in [t - MARKETS_ENTITY_ACTIVE_S, t)."""
+    lo, hi = int((t - config.MARKETS_ENTITY_ACTIVE_S) * 1_000_000), int(t * 1_000_000)
+    rows = db.execute("SELECT hk FROM bets WHERE t_recv_us >= ? AND t_recv_us < ? UNION "
+                      "SELECT hk FROM burns WHERE t_recv_us >= ? AND t_recv_us < ?", (lo, hi, lo, hi)).fetchall()
+    return sorted({r[0] for r in rows if r[0]})
+
+
+def emission_credit(db: sqlite3.Connection, ch: CachedChain, hour: int) -> dict[str, Decimal] | None:
+    """V6: {entity: credit alpha} at an hour snapshot. Credit pool = Markets emission over the
+    MARKETS_CREDIT_SPAN_S before the hour (chain blocks, same arithmetic as a cycle's emission),
+    split across the entities active before the hour pro rata to posted collateral
+    max(0, stake at the hour block - debt). None while a block or a closed cycle's debt is not known
+    yet (wait). Cached per hour; every input is a function of the chain and the closed cycles."""
+    rows = db.execute("SELECT entity, credit FROM coll_credit WHERE hour=?", (int(hour),)).fetchall()
+    if rows:
+        return {e: Decimal(c) for e, c in rows if e}
+    need = _closed_by(hour)
+    if need >= config.MARKETS_COLLATERAL_FROM_UNIX:
+        m = db.execute("SELECT MAX(cycle) FROM settle_meta").fetchone()[0]
+        if m is None or m < need:
+            return None                                # debt of a closed cycle is not settled yet
+    b0, b1 = ch.block_at(int(hour) - config.MARKETS_CREDIT_SPAN_S), ch.block_at(int(hour))
+    if b0 is None or b1 is None:
+        return None
+    pool = cycle_emission(ch, b0, b1, int(hour))
+    posted = {}
+    for e in active_entities_at(db, int(hour)):
+        v = ch.entity_stake(e, b1) - debt_as_of(db, e, int(hour))
+        if v > 0:
+            posted[e] = v
+    tot = sum(posted.values(), Decimal(0))
+    out = {e: CTX.divide(CTX.multiply(pool, v), tot) for e, v in posted.items()} if tot > 0 and pool > 0 else {}
+    db.execute("INSERT OR REPLACE INTO coll_credit VALUES (?,?,?)", (int(hour), "", str(pool)))
+    for e, c in out.items():
+        db.execute("INSERT OR REPLACE INTO coll_credit VALUES (?,?,?)", (int(hour), e, str(c)))
+    return out
+
+
+def _rows_upto(base: str, cache_dir: str, db: sqlite3.Connection, mid: str, t_us: int) -> tuple[list, list]:
+    """The market's own series from its target minute through the fill of a bet received at t_us
+    (what make_pricer needs for every bet up to it). Same sources as the grader."""
+    from . import hf_grade
+    asset, w, start, _end = parse_market_id(mid)
+    avg, t_ms = config.MARKETS_AVG_S, int(t_us) // 1000
+    if uses_oracle(mid) and w in config.MARKETS_CAL_WINDOWS:
+        wait = config.MARKETS_ORACLE_FILL_WAIT_S * 1000
+        spans = [((start - avg) * 1000, start * 1000)]
+        for (tb,) in db.execute("SELECT t_recv_us FROM bets WHERE market_id=?", (mid,)):
+            tm = int(tb) // 1000
+            if start * 1000 <= tm <= t_ms:
+                spans.append((tm, tm + wait))
+        return oracle.rows_for_spans(config.MARKETS_ORACLE_PUBLIC_BASE, os.path.join(cache_dir, "oracle"),
+                                     asset, spans)
+    if uses_oracle(mid):
+        return oracle.rows_for(config.MARKETS_ORACLE_PUBLIC_BASE, os.path.join(cache_dir, "oracle"), asset,
+                               (start - avg) * 1000, t_ms + config.MARKETS_ORACLE_FILL_WAIT_S * 1000)
+    hi = t_ms + (config.MARKETS_V3_FILL_DELAY_S + config.MARKETS_V3_MAX_TICK_AGE_S) * 1000
+    return hf_grade._ticks_for(base, os.path.join(cache_dir, "ticks"), asset, (start - avg) * 1000, hi)
+
+
+def prefix_shares(db: sqlite3.Connection, base: str, cache_dir: str, key: str, mid: str, order: tuple,
+                  final: bool = False) -> Decimal | None:
+    """V6: the shares a bet will be paid if its side wins: its market replayed in canonical order up to
+    and including it, with every earlier bet's collateral decision applied. Later bets cannot change
+    it, so this is exactly what the grader computes. None (wait) while an earlier bet of the market
+    (or of its depth group) is undecided, or its ticks / sigma are not in hand. 0 when the replay
+    itself refuses it (outside the entry window, per-market cap, no fill)."""
+    asset, w, start, _end = parse_market_id(mid)
+    v2 = is_v2(start)
+    for (k, bw, bt, bh, bs) in db.execute(
+            "SELECT b.key, b.w, b.t_recv_us, b.hk, b.seq FROM bets b LEFT JOIN coll c ON c.key = b.key "
+            "WHERE b.market_id=? AND c.key IS NULL", (mid,)).fetchall():
+        if k != key and (bw, bt, bh, bs) < order:
+            return None
+    bets, _outside = _market_bets(db, mid, v2, upto=order)
+    if not any(b["key"] == key for b in bets):
+        return Decimal(0)
+    pricer = None
+    if is_v3(start) and any(int(b["order"][1]) >= start * 1_000_000 for b in bets):
+        rows, missing = _rows_upto(base, cache_dir, db, mid, int(order[1]))
+        if missing:
+            return None
+        sigma = sigma_for_market(db, base, os.path.join(cache_dir, "ticks"), asset, start, final=final, window=w)
+        if sigma is None:
+            return None
+        if uses_depth(mid) and depth_group_undecided(db, mid, int(order[1]) - 1):
+            return None
+        pricer = _with_depth(db, mid, v2, make_pricer(mid, rows, market_target(mid, rows), sigma))
+    for r in replay(bets, start=start, pricer=pricer):
+        if r["key"] == key:
+            return r["shares"] if r["status"] == "ok" else Decimal(0)
+    return Decimal(0)
+
+
 def lock_breach(db: sqlite3.Connection, ch: CachedChain, entity: str, cycle: int) -> int | None:
     """V2d: the first checkpoint of `cycle` at which the entity's collateral was below its open bets;
-    0 when there was none; None while a checkpoint's block is not known yet (wait)."""
-    step, end = config.MARKETS_LOCK_CHECK_S, cycle + config.MARKETS_SETTLE_PERIOD_S
+    0 when there was none; None while a checkpoint's block is not known yet (wait). V6: from the
+    payout arm, open bets count their maximum payout and the entity's emission credit is added."""
+    step, end = config.MARKETS_LOCK_CHECK_S, _cycle_end(cycle)
     t = -(-int(cycle) // step) * step
     while t < end:
-        opn = open_alpha_at(db, entity, t)
+        pay = config.markets_payout_check_as_of(t)
+        opn = open_payout_at(db, entity, t * 1_000_000, at_or_after=t) if pay else open_alpha_at(db, entity, t)
         if opn > 0:
             blk = ch.block_at(t)
             if blk is None:
                 return None
-            if opn > ch.entity_stake(entity, blk) - debt_as_of(db, entity, t):
+            limit = ch.entity_stake(entity, blk) - debt_as_of(db, entity, t)
+            if pay:
+                hour = t // config.MARKETS_COLLATERAL_SNAPSHOT_S * config.MARKETS_COLLATERAL_SNAPSHOT_S
+                cr = emission_credit(db, ch, hour)
+                if cr is None:
+                    return None
+                limit += cr.get(entity, Decimal(0))
+            if opn > limit:
                 return t
         t += step
     return 0
 
 
-def collateral_pass(db: sqlite3.Connection, ch: CachedChain, base: str, cache_dir: str, frontier_us: int) -> int:
+def collateral_pass(db: sqlite3.Connection, ch: CachedChain, base: str, cache_dir: str, frontier_us: int,
+                    now: int | None = None) -> int:
     """Decide ok / ignored:collateral for every undecided V2 bet received before `frontier_us`,
     entity by entity in canonical order. A bet waits (and so does every later bet of the same
-    entity) until its hour snapshot, its market's rate and the debt it depends on are known."""
+    entity) until its hour snapshot, its market's rate and the debt it depends on are known.
+    V6 (payout arm): the bet's maximum payout, plus the open bets' maximum payouts, must fit inside
+    collateral + the entity's emission credit; it also waits for its fill and the hour's credit."""
     decided = 0
     rows = db.execute(
         "SELECT b.key, b.market_id, b.account, b.dollars, b.w, b.t_recv_us, b.hk, b.seq FROM bets b "
@@ -1337,6 +1510,22 @@ def collateral_pass(db: sqlite3.Connection, ch: CachedChain, base: str, cache_di
             continue
         collateral = ch.entity_stake(entity, blk) - debt_as_of(db, entity, hour)
         alpha = CTX.divide(Decimal(dollars), rate)
+        if config.markets_payout_check_as_of(t):
+            credit = emission_credit(db, ch, hour)
+            end = parse_market_id(mid)[3]
+            final = now is not None and now >= end + config.MARKETS_GRADE_ABANDON_S
+            sh = prefix_shares(db, base, cache_dir, key, mid, (_w, t_us, _hk, _seq), final) if credit is not None else None
+            if sh is None:
+                blocked.add(entity)
+                continue
+            payout = CTX.divide(sh, rate)
+            open_pay = open_payout_at(db, entity, int(t_us), after=t)
+            status = ("ok" if open_pay + payout <= collateral + credit.get(entity, Decimal(0))
+                      else "ignored:collateral")
+            db.execute("INSERT INTO coll VALUES (?,?,?,?,?)", (key, entity, status, str(alpha), int(t_us)))
+            db.execute("INSERT OR REPLACE INTO coll_pay VALUES (?,?)", (key, str(payout)))
+            decided += 1
+            continue
         open_alpha = Decimal(0)
         for a, m2 in db.execute(
                 "SELECT c.alpha, b.market_id FROM coll c JOIN bets b ON b.key = c.key "
@@ -1359,7 +1548,7 @@ def _cycle_unclosed_before(db: sqlite3.Connection, entity: str, t: int) -> bool:
     if row and row[0] is not None and row[0] >= need:
         return False
     has = db.execute("SELECT 1 FROM coll c JOIN results r ON r.key = c.key WHERE c.entity=? AND r.end_ts < ? LIMIT 1",
-                     (entity, need + config.MARKETS_SETTLE_PERIOD_S)).fetchone()
+                     (entity, _cycle_end(need))).fetchone()
     return has is not None
 
 
@@ -1372,25 +1561,26 @@ def settle_cycles(db: sqlite3.Connection, ch: CachedChain, base: str, cache_dir:
     nor debt, and they add max(0, won_ret - lost_ret) to payable."""
     P, G, DL = config.MARKETS_SETTLE_PERIOD_S, config.MARKETS_SETTLE_GRACE_S, config.MARKETS_BURN_DEADLINE_S
     row = db.execute("SELECT MAX(cycle) FROM settle_meta").fetchone()
-    c = (row[0] + P) if row and row[0] is not None else config.MARKETS_COLLATERAL_FROM_UNIX
+    c = _cycle_end(row[0]) if row and row[0] is not None else config.MARKETS_COLLATERAL_FROM_UNIX
     closed = 0
-    while c + P + G <= int(now) and (published_through is None or c + P + G <= published_through):
+    while _cycle_end(c) + G <= int(now) and (published_through is None or _cycle_end(c) + G <= published_through):
+        E = _cycle_end(c)
         ends = {}
         for (mid,) in db.execute("SELECT DISTINCT market_id FROM bets").fetchall():
             _a, _w, st, en = parse_market_id(mid)
-            if is_v2(st) and c <= en < c + P:
+            if is_v2(st) and c <= en < E:
                 ends[mid] = en
         graded = {m for (m,) in db.execute("SELECT market_id FROM outcomes")}
         if any(m not in graded for m in ends):
             break                                      # grade first, then settle
-        b0, b1 = ch.block_at(c), ch.block_at(c + P)
+        b0, b1 = ch.block_at(c), ch.block_at(E)
         if b0 is None or b1 is None:
             break
         # entity -> [won, lost] for pre-stamp (burn) markets, [won_ret, lost_ret] for retained ones
         per: dict[str, list[Decimal]] = {}
         for key, acct, dollars, shares, pnl, status, outcome, mid in db.execute(
                 "SELECT key, account, dollars, shares, pnl, status, outcome, market_id FROM results "
-                "WHERE end_ts >= ? AND end_ts < ?", (c, c + P)).fetchall():
+                "WHERE end_ts >= ? AND end_ts < ?", (c, E)).fetchall():
             if mid not in ends or status != "ok" or outcome == "VOID":
                 continue
             start = parse_market_id(mid)[2]
@@ -1411,7 +1601,7 @@ def settle_cycles(db: sqlite3.Connection, ch: CachedChain, base: str, cache_dir:
                 "AND NOT EXISTS (SELECT 1 FROM burns e WHERE e.block = b.block AND e.ext_index = b.ext_index "
                 "AND (e.w < b.w OR (e.w = b.w AND (e.t_recv_us < b.t_recv_us OR (e.t_recv_us = b.t_recv_us "
                 "AND e.key < b.key)))))",
-                ((c + G) * 1_000_000, (c + P + G) * 1_000_000)).fetchall():
+                ((c + G) * 1_000_000, (E + G) * 1_000_000)).fetchall():
             bt_ = ch.block_time(int(blk))
             if not (c - 86400 <= bt_ <= int(t_us) // 1_000_000):
                 continue                               # a burn after its own claim, or a stale one
@@ -1450,28 +1640,34 @@ def settle_cycles(db: sqlite3.Connection, ch: CachedChain, base: str, cache_dir:
                 rcum, hwm, net_r = Z, Z, max(Z, won_r - lost_r)
             breach = lock.get(ent) or 0
             payable = Z if breach else won - deducted + net_r       # V2d: short at a checkpoint -> nothing
+            # V6 hold: below the high-water mark with less stake (net of debt) than the gap at the close
+            # -> claims nothing this cycle, keeps its owed. (payable > 0 means a new high, so lock 0.)
+            held = 0
+            if config.markets_hold_as_of(c) and config.markets_carry_as_of(c) and hwm - rcum > 0:
+                if ch.entity_stake(ent, b1) - max(debt, Z) < hwm - rcum:
+                    held = 1
             db.execute("INSERT OR REPLACE INTO settle (cycle, entity, won, lost, burned, deducted, debt, payable, "
                        "lcum, bcum, dcum, won_ret, lost_ret, rcum, hwm, lock_breach) "
                        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                        (c, ent, str(won), str(lost), str(burned.get(ent, Z)), str(deducted), str(debt),
                         str(payable), str(lcum), str(bcum), str(dcum), str(won_r), str(lost_r),
                         str(rcum), str(hwm), int(breach)))
-        share = Decimal(str(config.comp_weights_as_of(c).get("markets", 0)))
-        emission = CTX.multiply(CTX.multiply(CTX.multiply(CTX.multiply(
-            Decimal(b1 - b0), ch.alpha_out_per_block(b0)), config.MARKETS_MINER_FRACTION),
-            ch.mecid0_fraction(b0)), share)
+            if held:
+                db.execute("UPDATE settle SET held=1 WHERE cycle=? AND entity=?", (c, ent))
+        emission = cycle_emission(ch, b0, b1, c)
         if config.markets_owed_as_of(c):
             if c == config.MARKETS_OWED_FROM_UNIX:
                 prev = owed_seed(db, c)
             else:
-                prev = {e: Decimal(o) for e, o in db.execute("SELECT entity, owed FROM settle WHERE cycle=?", (c - P,))}
-            rows = {e: (Decimal(p), prev.get(e, Z), bool(br)) for e, p, br in db.execute(
-                "SELECT entity, payable, lock_breach FROM settle WHERE cycle=?", (c,))}
+                prev = {e: Decimal(o) for e, o in db.execute("SELECT entity, owed FROM settle WHERE cycle=?",
+                                                             (_prev_cycle(c),))}
+            rows = {e: (Decimal(p), prev.get(e, Z), bool(br) or bool(hd)) for e, p, br, hd in db.execute(
+                "SELECT entity, payable, lock_breach, held FROM settle WHERE cycle=?", (c,))}
             for e, (cl, pd, ow) in owed_step(rows, emission).items():
                 db.execute("UPDATE settle SET claim=?, paid=?, owed=? WHERE cycle=? AND entity=?",
                            (str(cl), str(pd), str(ow), c, e))
         db.execute("INSERT OR REPLACE INTO settle_meta VALUES (?,?)", (c, str(emission)))
-        c += P
+        c = E
         closed += 1
     return closed
 
@@ -1688,7 +1884,7 @@ def sync_and_grade(base: str, cache_dir: str, now: float, chain_view: ChainView 
         if ch is not None and v2_live:
             # bets two windows behind what is published are final (windows seal in order)
             frontier = (published_through - 2 * hf_grade.WINDOW_MS // 1000) * 1_000_000
-            moved += collateral_pass(db, ch, base, cache_dir, frontier)
+            moved += collateral_pass(db, ch, base, cache_dir, frontier, now_s)
         graded = {r[0] for r in db.execute("SELECT market_id FROM outcomes")}
         for (mid,) in db.execute("SELECT DISTINCT market_id FROM bets").fetchall():
             if mid in graded:

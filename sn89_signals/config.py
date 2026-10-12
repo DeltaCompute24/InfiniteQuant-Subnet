@@ -1519,6 +1519,49 @@ def markets_owed_as_of(cycle: int) -> bool:
     return bool(MARKETS_OWED_FROM_UNIX and cycle >= MARKETS_OWED_FROM_UNIX)
 
 
+# V6 PAYOUT CHECK + EMISSION CREDIT (Whit, 2026-10-12). The collateral check counted a bet's STAKE,
+# so a $100 longshot that could pay ~$1,168 needed ~119 alpha posted, and an entity could turn a
+# 185 alpha bankroll into a 1,031 alpha emission claim and unstake. From this receipt time on, a bet
+# is accepted when the MAXIMUM PAYOUT of the entity's open bets plus this one (shares, $1 each, in
+# alpha at the market's day rate) fits inside its collateral (stake - debt at the hour) plus an
+# EMISSION CREDIT: one day of Markets emission (the 24 h ending at the hour snapshot, computed from
+# the chain like a cycle's emission) split across the entities active in MARKETS_ENTITY_ACTIVE_S
+# before the hour, pro rata to their posted collateral. The payout is the bet's own fill, replayed
+# from everything before it in its market (exactly what the grader will pay); a bet whose fill
+# cannot be computed yet waits. The same payout measure replaces stake in the V2d lock checkpoints.
+# Keyed on the bet's receipt time (and the checkpoint time for the lock). 0 = off.
+MARKETS_PAYOUT_CHECK_FROM_UNIX = int(os.getenv("SN89_MARKETS_PAYOUT_CHECK_FROM", "0"))
+MARKETS_CREDIT_SPAN_S = int(os.getenv("SN89_MARKETS_CREDIT_SPAN_S", "86400"))
+
+
+def markets_payout_check_as_of(t_unix: float) -> bool:
+    return bool(MARKETS_PAYOUT_CHECK_FROM_UNIX and t_unix >= MARKETS_PAYOUT_CHECK_FROM_UNIX)
+
+
+# V6 DAILY SETTLEMENT (Whit, 2026-10-12). Settlement cycles were one tempo (4,320 s), 20 a day, and
+# every cycle a self-dealer's book closed positive was a fresh draw. From this instant (must be
+# 00:00 UTC) a cycle is one UTC day. The tempo cycle that contains the arm is cut short at it, so the
+# grid is: T0 + k x PERIOD up to the arm, then [arm + j x 86400, arm + (j+1) x 86400). Carry (V2c),
+# lock (V2d) and owed (V2e) run unchanged on the new cycles; weights still commit every tempo from the
+# latest CLOSED cycle's paid / emission, so one day's claims are paid across the next day. 0 = off.
+MARKETS_DAILY_FROM_UNIX = int(os.getenv("SN89_MARKETS_DAILY_FROM", "0"))
+
+
+def markets_daily_as_of(t_unix: float) -> bool:
+    return bool(MARKETS_DAILY_FROM_UNIX and t_unix >= MARKETS_DAILY_FROM_UNIX)
+
+
+# V6 HOLD (Whit, 2026-10-12). An entity below its high-water mark (lock = hwm - rcum > 0) whose
+# owner-coldkey stake at the cycle's closing block, less debt, is under that lock claims nothing for
+# the cycle and keeps its owed balance (the V2d breach shape); it is paid again from the first cycle
+# it is covered. Pulling the bankroll stops the emission, and cancels nothing. Must be a cycle start. 0 = off.
+MARKETS_HOLD_FROM_UNIX = int(os.getenv("SN89_MARKETS_HOLD_FROM", "0"))
+
+
+def markets_hold_as_of(cycle: int) -> bool:
+    return bool(MARKETS_HOLD_FROM_UNIX and cycle >= MARKETS_HOLD_FROM_UNIX)
+
+
 MARKETS_V2_MIN_BET = _Decimal(os.getenv("SN89_MARKETS_V2_MIN_BET", "1"))
 MARKETS_V2_MAX_BET = _Decimal(os.getenv("SN89_MARKETS_V2_MAX_BET", "10000"))
 MARKETS_V2_MAX_PER_MARKET = _Decimal(os.getenv("SN89_MARKETS_V2_MAX_PER_MARKET", "25000"))
