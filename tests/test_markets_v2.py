@@ -12,7 +12,10 @@ from sn89_signals import config, hf, markets
 
 ENTITY = "5DPGU1Lw8zVHs6mCC6Q1MHr4cXEwwBf8mBXc2xNAxLn6EbV1"
 W = 180_000
-DAY = (int(time.time()) // 86400 - 2) * 86400          # a recent UTC day, fully in the past
+# A FIXED past UTC day (2026-10-10 00:00), before the retain (10-10 03:00) and oracle (10-10 17:00) arms.
+# It was today - 2 days, so each midnight moved the fixtures past another real arm and the expected
+# results changed under the tests (20 failures at 2026-10-13 00:00).
+DAY = 1791590400
 S1 = DAY + 1800                                          # 00:30 UTC, 15m markets
 PRICE_TAO = Decimal("0.003")                             # TAO per alpha
 TAOUSD = 400.0                                           # -> 1.2 USD per alpha
