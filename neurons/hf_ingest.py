@@ -612,13 +612,13 @@ class Ingest:
         # its own rate ledger is per ACCOUNT, because an entity bets for many subaccounts.
         # `mk.burn` (V2): an entity's claim that it burned alpha on chain; validators credit it only
         # after reading the extrinsic's event. It rides the same anchored window, no rate ledger.
+        # `mk.deposit/withdraw/exit/release/sweep` (V5): collateral vault frames (markets_vault.py), same path.
         kind = str((payload or {}).get("kind", ""))
         is_market = kind in markets.MARKETS_KINDS
-        is_burn = kind == markets.KIND_BURN
         try:
             if is_market:
                 markets.validate_entry(payload, hk, t0)
-                if not is_burn:
+                if kind == markets.KIND:                 # bets only: burns and vault frames carry no account
                     markets.check_rate(self.markets_sent_ms.get(str(payload.get("account")), []), t_recv_ms)
             elif is_closers:
                 # Closers retired on finney at 2026-10-09 00:00 UTC (its share went to Markets).
@@ -666,7 +666,7 @@ class Ingest:
         if is_market:
             # Markets bookkeeping only: the per-account rate ledger. markets.py prices and grades
             # the bet off the same anchored window log the entry below lands in.
-            if not is_burn:
+            if kind == markets.KIND:
                 self.markets_sent_ms.setdefault(str(payload.get("account")), []).append(t_recv_ms)
             w = hf.window_start_ms(t_recv_ms)
             self.windows.setdefault(w, []).append({"submit": frame, "receipt": rcpt})

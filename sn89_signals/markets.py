@@ -143,10 +143,11 @@ import time
 from decimal import ROUND_DOWN, ROUND_HALF_EVEN, Context, Decimal, InvalidOperation
 
 from . import config, hf, oracle, sessions
+from . import markets_vault as vault
 
 KIND = "mk.bet"
 KIND_BURN = "mk.burn"
-MARKETS_KINDS = (KIND, KIND_BURN)
+MARKETS_KINDS = (KIND, KIND_BURN) + vault.VAULT_KINDS
 GRADER_VERSION = 2
 SIDES = ("UP", "DOWN")
 _ID_RE = re.compile(r"^UD:([A-Z0-9]+):(15m|1h|1d|1w):(\d+)$")
@@ -437,8 +438,11 @@ def validate_burn(payload: dict, signer_hk: str, t_unix: float) -> None:
 
 def validate_entry(payload: dict, signer_hk: str, t_unix: float) -> None:
     """Ingest dispatch for every Markets kind."""
-    if str(payload.get("kind", "")) == KIND_BURN:
+    kind = str(payload.get("kind", ""))
+    if kind == KIND_BURN:
         validate_burn(payload, signer_hk, t_unix)
+    elif kind in vault.VAULT_KINDS:
+        vault.validate(payload, signer_hk, t_unix)
     else:
         validate_bet(payload, signer_hk, t_unix)
 
@@ -981,10 +985,13 @@ def _db(cache_dir: str) -> sqlite3.Connection:
               "PRIMARY KEY (asset, start))")
     c.execute("CREATE TABLE IF NOT EXISTS v3_sigma (asset TEXT, day INTEGER, sigma TEXT, measured INTEGER, "
               "PRIMARY KEY (asset, day))")
+    if "reserve_paid" not in cols:                             # V5: claims the reserve paid before emission
+        c.execute("ALTER TABLE settle ADD COLUMN reserve_paid TEXT DEFAULT '0'")
+    vault.schema(c)
     row = c.execute("SELECT v FROM meta WHERE k='grader_version'").fetchone()
     if (int(row[0]) if row else 0) != GRADER_VERSION:
         for t in ("windows_seen", "bets", "outcomes", "results", "burns", "coll", "settle", "settle_meta",
-                  "coll_pay", "coll_credit"):
+                  "coll_pay", "coll_credit") + vault.VAULT_TABLES:
             c.execute(f"DELETE FROM {t}")
         c.execute("INSERT OR REPLACE INTO meta VALUES ('grader_version', ?)", (str(GRADER_VERSION),))
         c.commit()
@@ -1009,7 +1016,9 @@ def ingest_entries(db: sqlite3.Connection, w: int, entries: list[dict]) -> int:
             validate_entry(p, hk, int(t_us) / 1e6)
         except hf.HFRejected:
             continue
-        if kind == KIND_BURN:
+        if kind in vault.VAULT_KINDS:
+            vault.ingest(db, w, hk, int(seq), int(t_us), p)
+        elif kind == KIND_BURN:
             db.execute("INSERT OR IGNORE INTO burns VALUES (?,?,?,?,?,?,?)",
                        (f"{hk}:{seq}", hk, str(parse_alpha(p["amount_alpha"])), int(p["block"]),
                         int(p["ext_index"]), int(w), int(t_us)))
@@ -1113,6 +1122,24 @@ class ChainView:
         """[{event, coldkey, hotkey, amount (alpha Decimal), netuid}] for that extrinsic."""
         raise NotImplementedError
 
+    # V5 vault (markets_vault.py)
+    def transfer_events(self, block: int, ext_index: int) -> list[dict]:
+        """That extrinsic's stake legs: {event: "StakeTransferred", origin_coldkey, destination_coldkey,
+        hotkey, origin_netuid, destination_netuid} and {event: "StakeAdded", coldkey, hotkey, netuid,
+        alpha (Decimal)}. A transfer_stake emits both; only StakeAdded carries the alpha."""
+        raise NotImplementedError
+
+    def hotkey_owner(self, hotkey: str, block: int) -> str:
+        raise NotImplementedError
+
+    def share_price(self, hotkey: str, block: int) -> Decimal | None:
+        """Alpha per stake share on (hotkey, netuid): TotalHotkeyAlpha / TotalHotkeySharesV2. Rises
+        with the dividends the hotkey's stakers earn. None when the hotkey has no shares."""
+        raise NotImplementedError
+
+    def stake_of(self, coldkey: str, hotkey: str, block: int) -> Decimal:
+        raise NotImplementedError
+
 
 class CachedChain:
     """Memoises a ChainView in the grade DB so a rebuild reads the chain once per value."""
@@ -1154,6 +1181,21 @@ class CachedChain:
         v = self._get(f"burnev:{b}:{i}", lambda: [
             {**e, "amount": str(e["amount"])} for e in self.view.burn_events(b, i)])
         return [{**e, "amount": Decimal(e["amount"])} for e in (v or [])]
+
+    def transfer_events(self, b: int, i: int) -> list[dict]:
+        v = self._get(f"xferev:{b}:{i}", lambda: [
+            {**e, **({"alpha": str(e["alpha"])} if "alpha" in e else {})} for e in self.view.transfer_events(b, i)])
+        return [{**e, **({"alpha": Decimal(e["alpha"])} if "alpha" in e else {})} for e in (v or [])]
+
+    def hotkey_owner(self, hk: str, b: int) -> str:
+        return str(self._get(f"owner:{hk}:{b}", lambda: self.view.hotkey_owner(hk, b)))
+
+    def share_price(self, hk: str, b: int) -> Decimal | None:
+        v = self._get(f"shareprice:{hk}:{b}", lambda: self.view.share_price(hk, b))
+        return Decimal(v) if v is not None else None
+
+    def stake_of(self, ck: str, hk: str, b: int) -> Decimal:
+        return Decimal(self._get(f"stakeof:{ck}:{hk}:{b}", lambda: self.view.stake_of(ck, hk, b)))
 
 
 class RpcChainView(ChainView):
@@ -1253,6 +1295,61 @@ class RpcChainView(ChainView):
             out.append({"event": name, "coldkey": str(vals[0]), "hotkey": str(vals[1]),
                         "amount": Decimal(int(vals[2])) / Decimal(10**9), "netuid": int(vals[3])})
         return out
+
+    def _events(self, block: int) -> list:
+        for st in self._nodes(block):
+            try:
+                return st.substrate.get_events(block_hash=st.get_block_hash(block)) or []
+            except Exception:  # noqa: BLE001
+                continue
+        raise RuntimeError(f"unreadable events at {block}")
+
+    def transfer_events(self, block: int, ext_index: int) -> list[dict]:
+        # Shapes on finney (bittensor 10.3, 2026-10-09; sn89-markets payouts.py):
+        #   StakeTransferred(origin_ck, dest_ck, hotkey, origin_netuid, dest_netuid, tao_rao)
+        #   StakeAdded(coldkey, hotkey, tao_rao, alpha_rao, netuid, fee)
+        #   StakeMoved(coldkey, origin_hk, origin_netuid, dest_hk, dest_netuid, tao_rao)  (move_stake, finney
+        #   block 9268482 ext 19, 2026-10-12; it also emits StakeRemoved/StakeAdded for the coldkey)
+        out = []
+        for ev in self._events(block):
+            v = getattr(ev, "value", ev)
+            if v.get("extrinsic_idx") != ext_index or v.get("module_id") != "SubtensorModule":
+                continue
+            a = v.get("attributes")
+            vals = list(a.values()) if isinstance(a, dict) else list(a) if isinstance(a, (list, tuple)) else []
+            name = v.get("event_id")
+            if name == "StakeTransferred" and len(vals) >= 5:
+                out.append({"event": name, "origin_coldkey": str(vals[0]), "destination_coldkey": str(vals[1]),
+                            "hotkey": str(vals[2]), "origin_netuid": int(vals[3]), "destination_netuid": int(vals[4])})
+            elif name == "StakeMoved" and len(vals) >= 5:
+                out.append({"event": name, "coldkey": str(vals[0]), "origin_hotkey": str(vals[1]),
+                            "origin_netuid": int(vals[2]), "destination_hotkey": str(vals[3]),
+                            "destination_netuid": int(vals[4])})
+            elif name == "StakeAdded" and len(vals) >= 5:
+                out.append({"event": name, "coldkey": str(vals[0]), "hotkey": str(vals[1]),
+                            "alpha": Decimal(int(vals[3])) / Decimal(10**9), "netuid": int(vals[4])})
+        return out
+
+    def hotkey_owner(self, hotkey: str, block: int) -> str:
+        return str(self._q("SubtensorModule", "Owner", [hotkey], block))
+
+    def share_price(self, hotkey: str, block: int) -> Decimal | None:
+        alpha = Decimal(int(self._q("SubtensorModule", "TotalHotkeyAlpha", [hotkey, self.netuid], block) or 0))
+        sh = self._q("SubtensorModule", "TotalHotkeySharesV2", [hotkey, self.netuid], block) or {}
+        shares = Decimal(int(sh.get("mantissa", 0))).scaleb(int(sh.get("exponent", 0))) if isinstance(sh, dict) else Decimal(0)
+        if shares <= 0:
+            return None
+        return CTX.divide(alpha / Decimal(10**9), shares)
+
+    def stake_of(self, coldkey: str, hotkey: str, block: int) -> Decimal:
+        err = None
+        for st in self._nodes(block):
+            try:
+                bal = st.get_stake(coldkey_ss58=coldkey, hotkey_ss58=hotkey, netuid=self.netuid, block=block)
+                return Decimal(str(getattr(bal, "tao", bal)))
+            except Exception as e:  # noqa: BLE001
+                err = e
+        raise RuntimeError(f"unreadable stake {coldkey[:8]}/{hotkey[:8]} at {block}: {err}")
 
 
 def _day(t: int) -> int:
@@ -1385,7 +1482,12 @@ def emission_credit(db: sqlite3.Connection, ch: CachedChain, hour: int) -> dict[
     pool = cycle_emission(ch, b0, b1, int(hour))
     posted = {}
     for e in active_entities_at(db, int(hour)):
-        v = ch.entity_stake(e, b1) - debt_as_of(db, e, int(hour))
+        if config.markets_vault_as_of(int(hour)):
+            v = vault.collateral_at(db, ch, e, int(hour) * 1_000_000, b1)   # V5: posted = vault balance - lock
+            if v is None:
+                return None
+        else:
+            v = ch.entity_stake(e, b1) - debt_as_of(db, e, int(hour))
         if v > 0:
             posted[e] = v
     tot = sum(posted.values(), Decimal(0))
@@ -1465,7 +1567,14 @@ def lock_breach(db: sqlite3.Connection, ch: CachedChain, entity: str, cycle: int
             blk = ch.block_at(t)
             if blk is None:
                 return None
-            limit = ch.entity_stake(entity, blk) - debt_as_of(db, entity, t)
+            if config.markets_vault_as_of(t):
+                limit = vault.collateral_at(db, ch, entity, t * 1_000_000, blk)
+                if limit is None:
+                    return None
+                if vault.short_at(db, t):
+                    return t
+            else:
+                limit = ch.entity_stake(entity, blk) - debt_as_of(db, entity, t)
             if pay:
                 hour = t // config.MARKETS_COLLATERAL_SNAPSHOT_S * config.MARKETS_COLLATERAL_SNAPSHOT_S
                 cr = emission_credit(db, ch, hour)
@@ -1508,8 +1617,25 @@ def collateral_pass(db: sqlite3.Connection, ch: CachedChain, base: str, cache_di
         if blk is None or rate is None:
             blocked.add(entity)
             continue
-        collateral = ch.entity_stake(entity, blk) - debt_as_of(db, entity, hour)
         alpha = CTX.divide(Decimal(dollars), rate)
+        if config.markets_vault_as_of(t):
+            # V5: the vault ledger must have applied every claim before this bet, and the cycle closed by
+            # it must be settled for every entity (a reserve credit can land on any claimant).
+            st = db.execute("SELECT MAX(cycle) FROM settle_meta").fetchone()[0]
+            if not vault.ready_for(db, t) or (_closed_by(t) >= config.MARKETS_COLLATERAL_FROM_UNIX
+                                              and (st is None or st < _closed_by(t))):
+                blocked.add(entity)
+                continue
+            collateral = vault.collateral_at(db, ch, entity, int(t_us), blk)
+            if collateral is None:
+                blocked.add(entity)
+                continue
+            if vault.short_at(db, t):
+                db.execute("INSERT INTO coll VALUES (?,?,?,?,?)", (key, entity, "ignored:vault_short", str(alpha), int(t_us)))
+                decided += 1
+                continue
+        else:
+            collateral = ch.entity_stake(entity, blk) - debt_as_of(db, entity, hour)
         if config.markets_payout_check_as_of(t):
             credit = emission_credit(db, ch, hour)
             end = parse_market_id(mid)[3]
@@ -1576,6 +1702,8 @@ def settle_cycles(db: sqlite3.Connection, ch: CachedChain, base: str, cache_dir:
         b0, b1 = ch.block_at(c), ch.block_at(E)
         if b0 is None or b1 is None:
             break
+        if not vault.checkpoints_done_before(db, E + G):
+            break                                      # V5: exits and withdrawals before the close first
         # entity -> [won, lost] for pre-stamp (burn) markets, [won_ret, lost_ret] for retained ones
         per: dict[str, list[Decimal]] = {}
         for key, acct, dollars, shares, pnl, status, outcome, mid in db.execute(
@@ -1633,8 +1761,9 @@ def settle_cycles(db: sqlite3.Connection, ch: CachedChain, base: str, cache_dir:
             # V2b: retained markets pay on the entity's NET; a net loss is simply kept, never owed.
             # V2c: and from the carry arm that net is cumulative, paid only above its high-water mark.
             if config.markets_carry_as_of(c):
+                floor = max(config.MARKETS_CARRY_FROM_UNIX, vault.carry_floor(db, ent, c) or 0)  # V5: exit restarts carry
                 pc = db.execute("SELECT rcum, hwm FROM settle WHERE entity=? AND cycle < ? AND cycle >= ? "
-                                "ORDER BY cycle DESC LIMIT 1", (ent, c, config.MARKETS_CARRY_FROM_UNIX)).fetchone()
+                                "ORDER BY cycle DESC LIMIT 1", (ent, c, floor)).fetchone()
                 rcum, hwm, net_r = carry_step(*((Decimal(x) for x in pc) if pc else (Z, Z)), won_r - lost_r)
             else:
                 rcum, hwm, net_r = Z, Z, max(Z, won_r - lost_r)
@@ -1643,7 +1772,8 @@ def settle_cycles(db: sqlite3.Connection, ch: CachedChain, base: str, cache_dir:
             # V6 hold: below the high-water mark with less stake (net of debt) than the gap at the close
             # -> claims nothing this cycle, keeps its owed. (payable > 0 means a new high, so lock 0.)
             held = 0
-            if config.markets_hold_as_of(c) and config.markets_carry_as_of(c) and hwm - rcum > 0:
+            if (config.markets_hold_as_of(c) and not config.markets_vault_as_of(c) and config.markets_carry_as_of(c)
+                    and hwm - rcum > 0):
                 if ch.entity_stake(ent, b1) - max(debt, Z) < hwm - rcum:
                     held = 1
             db.execute("INSERT OR REPLACE INTO settle (cycle, entity, won, lost, burned, deducted, debt, payable, "
@@ -1663,9 +1793,17 @@ def settle_cycles(db: sqlite3.Connection, ch: CachedChain, base: str, cache_dir:
                                                              (_prev_cycle(c),))}
             rows = {e: (Decimal(p), prev.get(e, Z), bool(br) or bool(hd)) for e, p, br, hd in db.execute(
                 "SELECT entity, payable, lock_breach, held FROM settle WHERE cycle=?", (c,))}
+            # V5: the reserve pays the claims first (credits to the vault); the emission pays what is left
+            rsv = vault.reserve_pay(db, ch, c, {e: p + o for e, (p, o, br) in rows.items() if not br})
+            if rsv:
+                rows = {e: ((p + o - rsv.get(e, Z), Z, br) if not br else (p, o, br)) for e, (p, o, br) in rows.items()}
+                for e, a in rsv.items():
+                    db.execute("UPDATE settle SET reserve_paid=? WHERE cycle=? AND entity=?", (str(a), c, e))
             for e, (cl, pd, ow) in owed_step(rows, emission).items():
                 db.execute("UPDATE settle SET claim=?, paid=?, owed=? WHERE cycle=? AND entity=?",
                            (str(cl), str(pd), str(ow), c, e))
+        # V5b: the vault is the float: players' net winnings this cycle are debited and sent from the vault
+        vault.payout_debit(db, ch, c, {e: w - l for e, (_w0, _l0, w, l) in per.items()})
         db.execute("INSERT OR REPLACE INTO settle_meta VALUES (?,?)", (c, str(emission)))
         c = E
         closed += 1
@@ -1728,7 +1866,17 @@ def pnl_vector(db: sqlite3.Connection, uid_by_hk: dict, now: int) -> dict[int, f
     row = db.execute("SELECT cycle, emission FROM settle_meta WHERE cycle <= ? ORDER BY cycle DESC LIMIT 1",
                      (_closed_by(now),)).fetchone()
     weights: dict[int, float] = {}
-    if row is not None and Decimal(row[1]) > 0:
+    if row is not None and Decimal(row[1]) > 0 and config.markets_vault_as_of(row[0]):
+        # V5b: the whole paid share goes to the vault's UID; the ledger splits what arrives (markets_vault)
+        c, emission = row[0], Decimal(row[1])
+        tot = sum((Decimal(p) for (p,) in db.execute("SELECT paid FROM settle WHERE cycle=? AND paid IS NOT NULL",
+                                                     (c,))), Decimal(0))
+        vu = uid_by_hk.get(config.MARKETS_VAULT_UID_HOTKEY) if config.MARKETS_VAULT_UID_HOTKEY else None
+        if vu is None:
+            print(f"  !! MARKETS VAULT UID not registered: cycle {c} share ({tot}) goes to the burn UID")
+        elif tot > 0:
+            weights[vu] = float(min(Decimal(1), CTX.divide(tot, emission)))
+    elif row is not None and Decimal(row[1]) > 0:
         c, emission = row[0], Decimal(row[1])
         x = {}
         col = "paid" if config.markets_owed_as_of(c) else "payable"     # V2e: paid already fits the emission
@@ -1884,6 +2032,7 @@ def sync_and_grade(base: str, cache_dir: str, now: float, chain_view: ChainView 
         if ch is not None and v2_live:
             # bets two windows behind what is published are final (windows seal in order)
             frontier = (published_through - 2 * hf_grade.WINDOW_MS // 1000) * 1_000_000
+            moved += vault.vault_pass(db, ch, frontier // 1_000_000)
             moved += collateral_pass(db, ch, base, cache_dir, frontier, now_s)
         graded = {r[0] for r in db.execute("SELECT market_id FROM outcomes")}
         for (mid,) in db.execute("SELECT DISTINCT market_id FROM bets").fetchall():
@@ -1994,8 +2143,8 @@ def active_entities(db: sqlite3.Connection, now: float) -> list[str]:
 def entity_dust_uids(db: sqlite3.Connection, uid_by_hk: dict, now: float,
                      chain_view: ChainView | None = None) -> set[int]:
     """UIDs of active entities whose owner coldkey holds >= markets_dust_min_collateral_as_of(now)
-    on their hotkey at the first block of the cycle's UTC hour. A chain read failure gives no dust
-    this cycle (logged), never a crash."""
+    on their hotkey at the first block of the cycle's UTC hour (from the vault arm: whose vault
+    balance minus lock does). A chain read failure gives no dust this cycle (logged), never a crash."""
     ents = [h for h in active_entities(db, now) if h in uid_by_hk and uid_by_hk[h] != config.BURN_UID]
     if not ents:
         return set()
@@ -2007,8 +2156,15 @@ def entity_dust_uids(db: sqlite3.Connection, uid_by_hk: dict, now: float,
         if blk is None:
             raise RuntimeError(f"no block at {hour}")
         out = set()
+        in_vault = config.markets_vault_as_of(hour)
         for h in ents:
-            if ch.entity_stake(h, blk) >= minimum:
+            if in_vault:
+                # V5: the entity's collateral lives in the vault, not on its hotkey: qualify on what it
+                # holds there minus its lock (vault.collateral_at). Unknown yet (None) = no dust.
+                c = vault.collateral_at(db, ch, h, hour * 1_000_000, blk)
+                if c is not None and c >= minimum:
+                    out.add(uid_by_hk[h])
+            elif ch.entity_stake(h, blk) >= minimum:
                 out.add(uid_by_hk[h])
         db.commit()
         return out
