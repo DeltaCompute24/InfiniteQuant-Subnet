@@ -501,6 +501,16 @@ nothing up to it can be bet against or withdrawn. Check the balance with
 - **Emission.** Markets emission goes to the vault UID and is credited to entities pro rata to the emission they
   are owed.
 - **Yield.** Balances are held as shares of the vault hotkey, so staking yield accrues to each entity pro rata.
+- **Depth by tier** (15m and 1h markets starting from 2026-10-14 00:00 UTC). In-window bets fill at the model
+  price up to a flat allowance of same-side stake per window and start; past it they pay a premium. The allowance
+  follows the entity's vault collateral at the start of the hour (balance minus locked):
+
+  | Vault collateral | Per account | Per entity |
+  |---|---|---|
+  | 10,000 alpha and up | no limit | no limit |
+  | 6,000 to 10,000 | $625 | $2,500 |
+  | 3,000 to 6,000 | $250 | $1,000 |
+  | below 3,000 | $100 | $400 |
 - **Withdraw.** `python scripts/markets_vault.py withdraw --amount A ...` is approved at the next checkpoint for
   what is free and sent to the owner coldkey. A release not sent within 24 hours is a published default.
 - **Exit.** `python scripts/markets_vault.py exit ...` approves everything free. The locked net loss goes to the
