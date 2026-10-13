@@ -153,8 +153,8 @@ Rules (all enforced consensus-side; `REFERRAL_*` in `sn89_signals/config.py`):
   number of recruits (no per-recruiter breadth cap); its total referral bonus is still bounded
   by `REFERRAL_MAX_X` × its own tally.
 - **Both must be earning.** While both hotkeys have a positive qualified-win tally, the recruit's
-  emission tally is boosted `+10%` and the recruiter gains `+20%` of each recruit's tally (total
-  referral bonus capped at `100%` of the recruiter's own tally). If either side stops earning,
+  emission tally is boosted `+10%`, and the recruiter is paid from the referrer mechanism
+  (mechanism 1, 20% of miner emission). If either side stops earning,
   both bonuses lapse and resume on re-earn. Bonuses redistribute inside the miner pool — nothing
   new is minted.
 - **Strict no-copy inside the pair.** Shadowing between the two hotkeys (a stricter, pair-scoped

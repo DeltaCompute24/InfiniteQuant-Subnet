@@ -2,6 +2,10 @@
 
 Bittensor subnet 89. Miners commit encrypted directional trade calls. Validators grade them against real market data. Emissions go to miners with statistically proven edge.
 
+> **2026-10-14 00:00 UTC: Markets doubles.** Markets moves from 10% to 20% of miner emission; LF and HF move
+> from 35% to 30% each; referrers stay at 20%. The Markets collateral vault arms at the same time (see Markets
+> below).
+
 > **2026-10-09 00:00 UTC: Closers retires and Markets goes live.** Closers' share of miner
 > emission (10%) moves to Markets, the on-chain Up/Down prediction markets described below. Closers
 > votes graded before that time keep their results. LF (35%), HF (35%) and referrers (20%) are
@@ -60,7 +64,7 @@ your weight ∝ (your qualified wins × tier, each decaying linearly to 0 over 7
 ## Referral
 
 - An existing miner can claim a **new** hotkey before it registers: `python neurons/miner.py refer <new_hotkey_ss58>` — commit the claim, wait for it to appear in the public checkpoint (~5 min), **then** register the recruit.
-- While both hotkeys are earning: recruit +10% emissions, recruiter +20% of each recruit's score (capped at 100% of own score).
+- While both hotkeys are earning, the recruit gets +10% emissions and the recruiter is paid from the referrer mechanism (mechanism 1, 20% of miner emission).
 - A hotkey that registered before the claim can never be claimed. Adding a second miner? Claim it first.
 - Strict pair no-copy: shadowing inside the pair suspends the bonus 30 days.
 
