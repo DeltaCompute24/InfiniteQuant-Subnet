@@ -395,3 +395,19 @@ def test_v6_daily_cycles_pay_players_from_the_vault_at_the_days_close(v5b, tmp_p
     assert set(rows) == {ENTITY, ENTITY_B}
     for e, (cp, ok, st) in rows.items():
         assert cp == tc and st == "approved" and ok == won[e].quantize(markets.RAO, rounding="ROUND_DOWN")
+
+
+def test_the_vault_uid_keeps_a_floor_weight_from_the_open_with_no_claims(v5b, tmp_path):
+    chain = VaultChain()
+    db, _ = _run(tmp_path, [], chain, DAY + 2 * 3600)
+    vec = markets.pnl_vector(db, {ENTITY: 10, VUID_HK: 99}, DAY + 2 * 3600)
+    fl = float(config.MARKETS_VAULT_UID_FLOOR)
+    assert vec[99] == pytest.approx(fl) and vec[config.BURN_UID] == pytest.approx(1 - fl)
+    assert markets.pnl_vector(db, {ENTITY: 10}, DAY + 2 * 3600) == {config.BURN_UID: 1.0}   # not registered
+
+
+def test_the_floor_is_not_applied_before_the_vault_opens(v5b, tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "MARKETS_VAULT_OPEN_UNIX", DAY + 10 * 86400)
+    monkeypatch.setattr(config, "MARKETS_VAULT_FROM_UNIX", DAY + 10 * 86400)
+    db, _ = _run(tmp_path, [], VaultChain(), DAY + 2 * 3600)
+    assert markets.pnl_vector(db, {VUID_HK: 99}, DAY + 2 * 3600) == {config.BURN_UID: 1.0}

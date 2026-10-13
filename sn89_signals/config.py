@@ -1574,18 +1574,21 @@ def markets_hold_as_of(cycle: int) -> bool:
 # MARKETS_VAULT_OPEN_UNIX: deposits and withdrawals are accepted from here (the migration window).
 # MARKETS_VAULT_FROM_UNIX: bets are checked against the vault from here; must be a settlement-cycle
 # boundary. 0 = off (both). Testnet arms first.
-MARKETS_VAULT_OPEN_UNIX = int(os.getenv("SN89_MARKETS_VAULT_OPEN", "0"))
-MARKETS_VAULT_FROM_UNIX = int(os.getenv("SN89_MARKETS_VAULT_FROM", "0"))
-MARKETS_VAULT_COLDKEY = os.getenv("SN89_MARKETS_VAULT_COLDKEY", "")
+# ⚑ MAINNET: deposits open 2026-10-13 03:00 UTC; the vault arms at the daily cycle start 2026-10-14 00:00 UTC.
+MARKETS_VAULT_OPEN_UNIX = int(os.getenv("SN89_MARKETS_VAULT_OPEN", "1791860400"))
+MARKETS_VAULT_FROM_UNIX = int(os.getenv("SN89_MARKETS_VAULT_FROM", "1791936000"))
+MARKETS_VAULT_COLDKEY = os.getenv("SN89_MARKETS_VAULT_COLDKEY", "5ESF6YFteFKRWvUV2Z6dp1ibdmBWVtwKTbDLJ4cGX7qmtHTT")
 # the hotkey vault alpha is staked on (it must hold a validator permit to earn dividends)
-MARKETS_VAULT_HOTKEY = os.getenv("SN89_MARKETS_VAULT_HOTKEY", "")
+MARKETS_VAULT_HOTKEY = os.getenv("SN89_MARKETS_VAULT_HOTKEY", "5HBg742kVS1KXhKQGJhEMsyNcxatQzpyttipazfqGJSBS98o")
 # V5b: the vault's own UID. A hotkey owned by the vault coldkey, registered on this subnet. From the vault
 # arm the Markets share of the weight vector goes to this UID instead of the entity UIDs, so the emission
 # lands in the vault on chain; the custodian sweeps it onto MARKETS_VAULT_HOTKEY (move_stake, mk.sweep) and
 # the ledger credits it to the entities pro rata to the emission they are owed.
-MARKETS_VAULT_UID_HOTKEY = os.getenv("SN89_MARKETS_VAULT_UID_HOTKEY", "")
+MARKETS_VAULT_UID_HOTKEY = os.getenv("SN89_MARKETS_VAULT_UID_HOTKEY", "5DvmNNqCmfymDYc7jy9gog9eAmPHTGwCNfBMD7qVN4tWy6py")
+# share of the Markets vector the vault UID always carries from the vault OPEN (never zero emission)
+MARKETS_VAULT_UID_FLOOR = _Decimal(os.getenv("SN89_MARKETS_VAULT_UID_FLOOR", "0.002"))
 # hotkeys allowed to sign mk.release / mk.sweep (the custodian's operators)
-MARKETS_VAULT_OPERATORS = tuple(h for h in os.getenv("SN89_MARKETS_VAULT_OPERATORS", "").split(",") if h)
+MARKETS_VAULT_OPERATORS = tuple(h for h in os.getenv("SN89_MARKETS_VAULT_OPERATORS", "5DvmNNqCmfymDYc7jy9gog9eAmPHTGwCNfBMD7qVN4tWy6py").split(",") if h)
 # an approved withdrawal not released within this is a published custodian default
 MARKETS_VAULT_RELEASE_DEADLINE_S = int(os.getenv("SN89_MARKETS_VAULT_RELEASE_DEADLINE_S", "86400"))
 # a deposit claim must name an extrinsic no older than this before its receipt

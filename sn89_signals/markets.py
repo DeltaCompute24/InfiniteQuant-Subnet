@@ -1889,7 +1889,25 @@ def pnl_vector(db: sqlite3.Connection, uid_by_hk: dict, now: int) -> dict[int, f
         weights = {u: float(CTX.multiply(v, scale)) for u, v in x.items()}
     weights[config.BURN_UID] = weights.get(config.BURN_UID, 0.0) + max(0.0, 1.0 - sum(weights.values()))
     total = sum(weights.values())
-    return {u: w / total for u, w in weights.items()}
+    weights = {u: w / total for u, w in weights.items()}
+    # V5b floor: from the vault OPEN the vault UID always carries at least MARKETS_VAULT_UID_FLOOR of the Markets
+    # vector, so a day with no claims never leaves it at zero emission (the first UID pruned on a full subnet).
+    # Taken from the burn share first, then pro rata from the rest.
+    vu = uid_by_hk.get(config.MARKETS_VAULT_UID_HOTKEY) if config.MARKETS_VAULT_UID_HOTKEY else None
+    fl = float(config.MARKETS_VAULT_UID_FLOOR)
+    if vu is not None and fl > 0 and config.markets_vault_open_as_of(now) and weights.get(vu, 0.0) < fl:
+        need = fl - weights.get(vu, 0.0)
+        take = min(need, weights.get(config.BURN_UID, 0.0))
+        if take > 0:
+            weights[config.BURN_UID] -= take
+            need -= take
+        if need > 0:
+            rest = sum(w for u, w in weights.items() if u != vu)
+            k = (rest - need) / rest if rest > 0 else 0.0
+            weights = {u: (w if u == vu else w * k) for u, w in weights.items()}
+        weights[vu] = fl
+        weights = {u: w for u, w in weights.items() if w > 0}
+    return weights
 
 
 def day_ticks(base: str, tick_dir: str, pairs: set, day_unix: int) -> tuple[dict, list]:
