@@ -483,7 +483,8 @@ python scripts/markets_vault.py deposit --amount 1000 --wallet.name <coldkey wal
 3. It files a signed `mk.deposit` claim naming the extrinsic.
 
 Your coldkey signs the transfers and your entity hotkey signs the claim. Validators read the transfer on chain and
-credit it at the next 15-minute checkpoint. Check the balance with
+credit it at the next 15-minute checkpoint. Deposit more than your locked amount (your net loss below your high-water mark):
+nothing up to it can be bet against or withdrawn. Check the balance with
 `python scripts/markets_vault.py status --wallet.name <coldkey wallet> --wallet.hotkey <entity hotkey>`
 (it reads a local grade cache).
 
@@ -499,7 +500,8 @@ credit it at the next 15-minute checkpoint. Check the balance with
   and sent to the entity's owner coldkey, which pays its players.
 - **Emission.** Markets emission goes to the vault UID and is credited to entities pro rata to the emission they
   are owed.
-- **Yield.** Balances are held as shares of the vault hotkey, so staking yield accrues to each entity pro rata.
+- **Yield.** Balances are held as shares of the vault hotkey (validator UID 42), so its dividends accrue to each
+  entity pro rata, after the validator's 18% take.
 - **Withdraw.** `python scripts/markets_vault.py withdraw --amount A ...` is approved at the next checkpoint for
   what is free and sent to the owner coldkey. A release not sent within 24 hours is a published default.
 - **Exit.** `python scripts/markets_vault.py exit ...` approves everything free. The locked net loss goes to the
