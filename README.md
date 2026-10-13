@@ -500,8 +500,7 @@ nothing up to it can be bet against or withdrawn. Check the balance with
   and sent to the entity's owner coldkey, which pays its players.
 - **Emission.** Markets emission goes to the vault UID and is credited to entities pro rata to the emission they
   are owed.
-- **Yield.** Balances are held as shares of the vault hotkey (validator UID 42), so its dividends accrue to each
-  entity pro rata, after the validator's 18% take.
+- **Yield.** Balances are held as shares of the vault hotkey, so staking yield accrues to each entity pro rata.
 - **Withdraw.** `python scripts/markets_vault.py withdraw --amount A ...` is approved at the next checkpoint for
   what is free and sent to the owner coldkey. A release not sent within 24 hours is a published default.
 - **Exit.** `python scripts/markets_vault.py exit ...` approves everything free. The locked net loss goes to the
