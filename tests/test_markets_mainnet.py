@@ -40,7 +40,14 @@ pytestmark = pytest.mark.skipif(not _source_defaults(),
 
 def test_history_before_t_is_untouched():
     assert config.COMP_WEIGHTS_HISTORY[:len(PRE_T_HISTORY)] == PRE_T_HISTORY
-    assert config.COMP_WEIGHTS_HISTORY[len(PRE_T_HISTORY):] == ((T, "lf:0.4375,hf:0.4375,markets:0.125"),)
+    assert config.COMP_WEIGHTS_HISTORY[len(PRE_T_HISTORY):] == ((T, "lf:0.4375,hf:0.4375,markets:0.125"),
+                                                                (1791936000, "lf:0.375,hf:0.375,markets:0.25"))
+
+
+def test_markets_doubles_from_the_vault_arm():
+    assert config.comp_weights_as_of(1791936000 - 1) == {"lf": 0.4375, "hf": 0.4375, "markets": 0.125}
+    assert config.comp_weights_as_of(1791936000) == {"lf": 0.375, "hf": 0.375, "markets": 0.25}
+    assert sum(config.comp_weights_as_of(1791936000).values()) == pytest.approx(1.0)
 
 
 @pytest.mark.parametrize("t", [1786327200, 1791000000, T - 1])
@@ -48,7 +55,7 @@ def test_shares_before_t_are_todays(t):
     assert config.comp_weights_as_of(t) == pytest.approx(OLD)
 
 
-@pytest.mark.parametrize("t", [T, T + 1, T + 86400 * 30])
+@pytest.mark.parametrize("t", [T, T + 1, 1791936000 - 1])
 def test_markets_takes_closers_share_from_t(t):
     s = config.comp_weights_as_of(t)
     assert s == pytest.approx(NEW) and "closers" not in s

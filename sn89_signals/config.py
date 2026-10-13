@@ -1329,6 +1329,12 @@ COMP_WEIGHTS_HISTORY: tuple = (
     #   LF 35 / HF 35 / Markets 10 / Referrers 20 (mecid-1, unchanged).
     # MARKETS_FROM_UNIX below is the same instant, so the Markets vector is computed from here.
     (1791504000, "lf:0.4375,hf:0.4375,markets:0.125"),
+    # ⚑ 2026-10-14 00:00:00 UTC (Whit, 2026-10-13): Markets doubles, 5 points each from LF and HF, armed with the
+    # collateral vault. mecid-0-RELATIVE, chain split still [52428, 13107]. Of the TOTAL:
+    #   LF 30 / HF 30 / Markets 20 / Referrers 20 (mecid-1, unchanged).
+    # Markets claims stood at 5,874 alpha owed against ~296 alpha/day of Markets emission. A Markets share that
+    # no entity claims burns (it does not return to LF/HF).
+    (1791936000, "lf:0.375,hf:0.375,markets:0.25"),
 )
 _COMP_ENV = os.getenv("SN89_COMP_WEIGHTS", "")
 if _COMP_ENV:

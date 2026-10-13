@@ -356,7 +356,8 @@ an estimate. Bets placed before the start work as before.
 **For miners and developers:** the mechanism below.
 
 Bet play dollars on whether an asset ends a 15-minute or 1-hour window above where it started.
-Live on mainnet from 2026-10-09 00:00 UTC with 10% of miner emission (0.125 of mechanism 0);
+Live on mainnet from 2026-10-09 00:00 UTC with 10% of miner emission (0.125 of mechanism 0), and 20% (0.25)
+from 2026-10-14 00:00 UTC, when LF and HF go to 30% each;
 on testnet 496 since 2026-10-08.
 
 - **Markets.** `UD:<ASSET>:<15m|1h>:<start_unix>`, one per HF-board asset per window, aligned
