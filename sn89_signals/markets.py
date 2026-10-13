@@ -719,9 +719,11 @@ def quote_context(mid: str, rows: list[dict], target: float | None, sigma: Decim
 
 
 def uses_depth(mid: str) -> bool:
-    """V3.2: this market's in-window bets are priced with finite house depth (depth_shares)."""
+    """V3.2: this market's in-window bets are priced with finite house depth (depth_shares); markets
+    starting at/after MARKETS_DEPTH_UNTIL_UNIX (the vault) fill flat again."""
     _a, window, start, _e = parse_market_id(mid)
     return bool(config.MARKETS_DEPTH_FROM_UNIX and start >= config.MARKETS_DEPTH_FROM_UNIX
+                and not (config.MARKETS_DEPTH_UNTIL_UNIX and start >= config.MARKETS_DEPTH_UNTIL_UNIX)
                 and window in config.MARKETS_DEPTH_WINDOWS)
 
 

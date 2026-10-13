@@ -1767,6 +1767,10 @@ MARKETS_SIGMA_TRAILING_WINDOWS = ("15m", "1h")
 # +$3,383 -> -$656, IQ users +$327 -> +$233, every other entity unchanged.
 # ⚑ MAINNET ARM: 15m/1h markets starting at/after 2026-10-12 05:00:00 UTC. 0 = off.
 MARKETS_DEPTH_FROM_UNIX = int(os.getenv("SN89_MARKETS_DEPTH_FROM", "1791781200"))
+# V3.2 ENDS with the collateral vault (Whit, 2026-10-13): from markets starting at/after this instant every bet
+# fills at the model price again; the vault's payout check bounds what an entity can lose instead.
+# ⚑ MAINNET: markets starting at/after 2026-10-14 00:00:00 UTC. 0 = depth never ends.
+MARKETS_DEPTH_UNTIL_UNIX = int(os.getenv("SN89_MARKETS_DEPTH_UNTIL", "1791936000"))
 MARKETS_DEPTH_B = _Decimal(os.getenv("SN89_MARKETS_DEPTH_B", "300"))
 MARKETS_DEPTH_ACCOUNT = _Decimal(os.getenv("SN89_MARKETS_DEPTH_ACCOUNT", "100"))
 MARKETS_DEPTH_ENTITY = _Decimal(os.getenv("SN89_MARKETS_DEPTH_ENTITY", "400"))

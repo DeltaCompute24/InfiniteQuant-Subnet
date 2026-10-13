@@ -98,3 +98,14 @@ def test_a_second_market_of_the_same_start_walks_the_price(depth, tmp_path, monk
     assert on["b1"] == off["b1"]                            # first $80 of the group: inside the $100
     assert on["e1"] < off["e1"]                             # $60 of the second market past the allowance
     assert on["e2"] == off["e2"]                            # the other side has its own allowance
+
+
+def test_depth_ends_for_markets_starting_at_the_until_arm(monkeypatch):
+    monkeypatch.setattr(config, "MARKETS_DEPTH_FROM_UNIX", 1)
+    s = 1_800_000_000 // 900 * 900
+    monkeypatch.setattr(config, "MARKETS_DEPTH_UNTIL_UNIX", s)
+    assert markets.uses_depth(markets.market_id("BTCUSD", "15m", s - 900))
+    assert not markets.uses_depth(markets.market_id("BTCUSD", "15m", s))
+    assert not markets.uses_depth(markets.market_id("BTCUSD", "1h", s // 3600 * 3600 + 3600))
+    monkeypatch.setattr(config, "MARKETS_DEPTH_UNTIL_UNIX", 0)
+    assert markets.uses_depth(markets.market_id("BTCUSD", "15m", s))
