@@ -1767,10 +1767,27 @@ MARKETS_SIGMA_TRAILING_WINDOWS = ("15m", "1h")
 # +$3,383 -> -$656, IQ users +$327 -> +$233, every other entity unchanged.
 # ⚑ MAINNET ARM: 15m/1h markets starting at/after 2026-10-12 05:00:00 UTC. 0 = off.
 MARKETS_DEPTH_FROM_UNIX = int(os.getenv("SN89_MARKETS_DEPTH_FROM", "1791781200"))
-# V3.2 ENDS with the collateral vault (Whit, 2026-10-13): from markets starting at/after this instant every bet
-# fills at the model price again; the vault's payout check bounds what an entity can lose instead.
-# ⚑ MAINNET: markets starting at/after 2026-10-14 00:00:00 UTC. 0 = depth never ends.
-MARKETS_DEPTH_UNTIL_UNIX = int(os.getenv("SN89_MARKETS_DEPTH_UNTIL", "1791936000"))
+# Depth that ends outright (0 = never). Superseded before it armed by the collateral tiers below.
+MARKETS_DEPTH_UNTIL_UNIX = int(os.getenv("SN89_MARKETS_DEPTH_UNTIL", "0"))
+# V3.3 DEPTH BY COLLATERAL TIER (Whit, 2026-10-13). From markets starting at/after this instant the flat
+# allowances scale with the entity's vault collateral (ledger balance - locked net loss, as of the bet's hour):
+# (min alpha, per-account $, per-entity $), first match wins; None = no depth limit (every bet fills flat).
+# ⚑ MAINNET: markets starting at/after 2026-10-14 00:00:00 UTC (the vault arm). 0 = off.
+MARKETS_DEPTH_TIERS_FROM_UNIX = int(os.getenv("SN89_MARKETS_DEPTH_TIERS_FROM", "1791936000"))
+MARKETS_DEPTH_TIERS = ((_Decimal(10000), None, None), (_Decimal(6000), _Decimal(625), _Decimal(2500)),
+                       (_Decimal(3000), _Decimal(250), _Decimal(1000)), (_Decimal(0), _Decimal(100), _Decimal(400)))
+
+
+def markets_depth_tiers_as_of(start: int) -> bool:
+    return bool(MARKETS_DEPTH_TIERS_FROM_UNIX and int(start) >= MARKETS_DEPTH_TIERS_FROM_UNIX)
+
+
+# V3.4 SIGMA CALIBRATION (Whit, 2026-10-13). Measured on 969 oracle markets x 6 checkpoints (10-10..10-13): the
+# trailing sigma is too LOW, so the model is overconfident on favourites (0.80-0.90 priced 0.851, won 0.777);
+# best-fit multiplier 1.25 (95% CI 1.15-1.40): 15m 1.30, 1h 1.20. Applied where the model price is computed
+# (make_pricer, quote_context) for markets starting at/after the arm. 0 = off.
+MARKETS_SIGMA_SCALE_FROM_UNIX = int(os.getenv("SN89_MARKETS_SIGMA_SCALE_FROM", "1791936000"))
+MARKETS_SIGMA_SCALE = {"15m": _Decimal("1.30"), "1h": _Decimal("1.20")}
 # GRADE FROM THE RECORD (2026-10-13). A market's verdict depended on WHEN a validator looked: a window it
 # could not fetch on its first pass after end + GRADE_ABANDON_S voided the market for good (ADA 15m 10-12
 # 14:45: VOID live, DOWN on any rebuild; the validator grades once per weight cycle, ~80 min apart). For

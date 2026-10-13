@@ -684,12 +684,22 @@ def sigma_day(start: int) -> int:
     return (int(start) // 86400 - 1) * 86400
 
 
+def scaled_sigma(mid: str, sigma: Decimal) -> Decimal:
+    """V3.4: the calibrated sigma a market is priced with (config.MARKETS_SIGMA_SCALE by window, from the arm)."""
+    _a, window, start, _e = parse_market_id(mid)
+    k = config.MARKETS_SIGMA_SCALE.get(window)
+    if k is None or not (config.MARKETS_SIGMA_SCALE_FROM_UNIX and start >= config.MARKETS_SIGMA_SCALE_FROM_UNIX):
+        return sigma
+    return CTX.multiply(Decimal(sigma), k)
+
+
 def make_pricer(mid: str, rows: list[dict], target: float | None, sigma: Decimal):
     """The per-bet pricing context for a V3 market: bet -> None (pre-start: crowd only),
     {"ignore": why} (no usable fill tick) or {"p", "tick_t", "tick_mark", "tau", "spread"}. `rows`
     are the asset's sealed ticks covering the window; the fill is the first tick at or after the
     bet's receipt time + MARKETS_V3_FILL_DELAY_S (the latency guard)."""
     _a, _w, start, end = parse_market_id(mid)
+    sigma = scaled_sigma(mid, sigma)
     max_wait_ms = config.MARKETS_V3_MAX_TICK_AGE_S * 1000
     delay_ms = config.MARKETS_V3_FILL_DELAY_S * 1000
     half_avg = Decimal(config.MARKETS_AVG_S) / Decimal(2)
@@ -719,6 +729,7 @@ def quote_context(mid: str, rows: list[dict], target: float | None, sigma: Decim
     _a, _w, start, end = parse_market_id(mid)
     if target is None or now < start:
         return None
+    sigma = scaled_sigma(mid, sigma)
     tk = market_spot(mid, rows, int(now * 1000))
     if tk is None:
         return None
@@ -795,7 +806,7 @@ def depth_shares(d: Decimal, side: str, p_flat: Decimal, ctx: dict) -> Decimal:
     price on an LMSR of MARKETS_DEPTH_B, anchored at the model probability of the side and already
     loaded by the holder's dollars past its allowance, sits above that probability."""
     a0, e0 = ctx["depth"]
-    lim_a, lim_e = config.MARKETS_DEPTH_ACCOUNT, config.MARKETS_DEPTH_ENTITY
+    lim_a, lim_e = ctx.get("limits") or (config.MARKETS_DEPTH_ACCOUNT, config.MARKETS_DEPTH_ENTITY)
     over0 = max(a0 - lim_a, e0 - lim_e, Decimal(0))
     over1 = max(a0 + d - lim_a, e0 + d - lim_e, Decimal(0))
     flat_d = max(d - over1, Decimal(0))
@@ -1071,13 +1082,31 @@ def _with_depth(db: sqlite3.Connection, mid: str, v2: bool, pricer):
         return pricer
     prior = depth_prior(depth_group_rows(db, mid, v2))
     base_pricer = pricer
+    tiered = config.markets_depth_tiers_as_of(parse_market_id(mid)[2])
 
     def wrapped(bet: dict):
         ctx = base_pricer(bet)
         if ctx and not ctx.get("ignore"):
+            if tiered:
+                lim = depth_limits(db, account_owner(bet["account"]), int(bet["order"][1]))
+                if lim is None:
+                    return ctx                      # top tier: no depth limit, the bet fills flat
+                ctx = {**ctx, "limits": lim}
             ctx = {**ctx, "depth": prior.get(bet["key"], (Decimal(0), Decimal(0)))}
         return ctx
     return wrapped
+
+
+def depth_limits(db: sqlite3.Connection, entity: str, t_us: int) -> tuple[Decimal, Decimal] | None:
+    """V3.3: (per-account $, per-entity $) flat allowances for a bet received at t_us, by the entity's vault
+    collateral as of the start of that hour (ledger alpha - locked net loss); None = no limit (top tier)."""
+    snap = config.MARKETS_COLLATERAL_SNAPSHOT_S
+    hour = int(t_us) // 1_000_000 // snap * snap
+    coll = vault.ledger_alpha_before(db, entity, hour * 1_000_000) - vault.locked(db, entity, hour)
+    for floor, lim_a, lim_e in config.MARKETS_DEPTH_TIERS:
+        if coll >= floor:
+            return None if lim_a is None else (lim_a, lim_e)
+    return config.MARKETS_DEPTH_ACCOUNT, config.MARKETS_DEPTH_ENTITY
 
 
 def grade_market(db: sqlite3.Connection, mid: str, rows: list[dict], sigma: Decimal | None = None) -> str:

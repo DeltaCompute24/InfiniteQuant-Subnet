@@ -131,6 +131,13 @@ def units_before(db: sqlite3.Connection, entity: str, t_us: int) -> Decimal:
                                                     (entity, int(t_us)))), Z)
 
 
+def ledger_alpha_before(db: sqlite3.Connection, entity: str, t_us: int) -> Decimal:
+    """Alpha posted to `entity` by ledger rows strictly before t_us, at the values they were posted at (no chain
+    read, so anything priced from it replays from the ledger alone)."""
+    return sum((Decimal(a) for (a,) in db.execute("SELECT alpha FROM vault_ledger WHERE entity=? AND t_us < ?",
+                                                    (entity, int(t_us)))), Z)
+
+
 def price_at(ch, block: int) -> Decimal | None:
     return ch.share_price(config.MARKETS_VAULT_HOTKEY, block)
 
