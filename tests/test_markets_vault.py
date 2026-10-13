@@ -411,3 +411,17 @@ def test_the_floor_is_not_applied_before_the_vault_opens(v5b, tmp_path, monkeypa
     monkeypatch.setattr(config, "MARKETS_VAULT_FROM_UNIX", DAY + 10 * 86400)
     db, _ = _run(tmp_path, [], VaultChain(), DAY + 2 * 3600)
     assert markets.pnl_vector(db, {VUID_HK: 99}, DAY + 2 * 3600) == {config.BURN_UID: 1.0}
+
+
+def test_from_the_vault_arm_a_withdrawal_keeps_open_payouts_covered(v5, tmp_path, monkeypatch):
+    # A has 60 alpha; its player's $30 bet at 50/50 stakes 25 alpha but can pay ~50. A asks to withdraw 30.
+    monkeypatch.setattr(config, "MARKETS_PAYOUT_CHECK_FROM_UNIX", DAY)
+    ba = (DAY + 240) // 12
+    chain = VaultChain(xfers={(ba, 1): _xfer("5OwnerA", VCK, 60)})
+    entries = [_dep(ENTITY, DAY + 300, 1, ba, 60), _bet(ENTITY, S1 - 600, 2, S1, dollars="30.00"),
+               _entry_for(ENTITY, S1 - 300, 3, _vf(vault.KIND_WITHDRAW, amount_alpha="30"))]
+    db, _ = _run(tmp_path, entries, chain, S1 + 600)
+    assert _status(db) == ["ok"]
+    pay = D(db.execute("SELECT payout FROM coll_pay").fetchone()[0])
+    ok = D(db.execute("SELECT approved FROM vault_requests WHERE kind=?", (vault.KIND_WITHDRAW,)).fetchone()[0])
+    assert ok == (60 - pay).quantize(markets.RAO, rounding="ROUND_DOWN") and ok < 30    # stake rule would give 30

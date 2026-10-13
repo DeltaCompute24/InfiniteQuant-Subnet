@@ -427,12 +427,17 @@ def _phase_b(db, ch, cp: int, blk: int) -> None:
             "SELECT units FROM vault_ledger WHERE entity=? AND t_us <= ?", (ent, hi_us))), Z)
         bal = m.CTX.multiply(units, price)
         lk = min(locked(db, ent, cp), max(bal, Z))
-        # open bets: received at or before cp (all decided by now), market not ended before cp
-        opn = Z
-        for a, mid in db.execute("SELECT c.alpha, b.market_id FROM coll c JOIN bets b ON b.key = c.key "
-                                 "WHERE c.entity=? AND c.status='ok' AND c.t_recv_us <= ?", (ent, hi_us)):
-            if m.parse_market_id(mid)[3] >= cp:
-                opn += Decimal(a)
+        # open bets: received at or before cp (all decided by now), market not ended before cp. From the payout
+        # arm and the vault arm they count their MAXIMUM PAYOUT, the measure the bet check holds them to, so a
+        # withdrawal can never leave open payouts uncovered.
+        if config.markets_payout_check_as_of(cp) and config.markets_vault_as_of(cp):
+            opn = m.open_payout_at(db, ent, hi_us + 1, at_or_after=cp)
+        else:
+            opn = Z
+            for a, mid in db.execute("SELECT c.alpha, b.market_id FROM coll c JOIN bets b ON b.key = c.key "
+                                     "WHERE c.entity=? AND c.status='ok' AND c.t_recv_us <= ?", (ent, hi_us)):
+                if m.parse_market_id(mid)[3] >= cp:
+                    opn += Decimal(a)
         avail = max(Z, bal - lk - opn)
         want = avail if c["kind"] == KIND_EXIT else Decimal(c["amount"])
         ok = min(want, avail).quantize(m.RAO, rounding="ROUND_DOWN")
