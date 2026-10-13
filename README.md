@@ -459,6 +459,55 @@ From the V2 arm (`config.MARKETS_COLLATERAL_FROM_UNIX`) Markets settles on real 
   the minute before 00:00 UTC.
 - The play-money skill reward ended at the V2 arm.
 
+#### Collateral vault for Markets entities (deposits open 2026-10-13 03:00 UTC, required from 2026-10-14 00:00 UTC)
+
+For Markets entities: hotkeys whose subaccounts take bets.
+
+From 2026-10-14 00:00 UTC (`config.MARKETS_VAULT_FROM_UNIX`), an entity's bets are covered by the alpha it holds
+in the Markets collateral vault, not by the stake on its own hotkey. An entity with nothing in the vault has every
+bet ignored from that time. Deposit before then.
+
+**Vault addresses (netuid 89)**
+- Vault coldkey: `5ESF6YFteFKRWvUV2Z6dp1ibdmBWVtwKTbDLJ4cGX7qmtHTT`
+- Collateral is staked on hotkey `5HBg742kVS1KXhKQGJhEMsyNcxatQzpyttipazfqGJSBS98o` (UID 42).
+- Vault UID 76, hotkey `5DvmNNqCmfymDYc7jy9gog9eAmPHTGwCNfBMD7qVN4tWy6py`, receives the Markets emission.
+
+**Deposit.** Run from the repo root with the requirements installed. Finney and the public ingest are the defaults.
+
+```
+python scripts/markets_vault.py deposit --amount 1000 --wallet.name <coldkey wallet> --wallet.hotkey <entity hotkey>
+```
+
+1. The script moves that much of the entity's own stake onto the vault hotkey.
+2. It transfers it to the vault coldkey with `transfer_stake` on netuid 89.
+3. It files a signed `mk.deposit` claim naming the extrinsic.
+
+Your coldkey signs the transfers and your entity hotkey signs the claim. Validators read the transfer on chain and
+credit it at the next 15-minute checkpoint. Check the balance with
+`python scripts/markets_vault.py status --wallet.name <coldkey wallet> --wallet.hotkey <entity hotkey>`
+(it reads a local grade cache).
+
+**Rules**
+- **Bet check** (since 2026-10-13 00:00 UTC): the maximum payout of the entity's open bets plus the new bet must fit
+  inside its collateral plus an emission credit. Shares pay $1 each, converted at the market's day rate. From the
+  vault arm, collateral is the vault balance minus the locked amount; locked is the entity's net loss below its
+  high-water mark. The emission credit is one day of Markets emission split across active entities pro rata to
+  their collateral.
+- **Daily settlement** (since 2026-10-13 00:00 UTC): each UTC day is one cycle. Weights for a day's claims are
+  committed through the next day.
+- **Player payouts.** Each closed day, the net winnings of the entity's players are debited from its vault balance
+  and sent to the entity's owner coldkey, which pays its players.
+- **Emission.** Markets emission goes to the vault UID and is credited to entities pro rata to the emission they
+  are owed.
+- **Yield.** Balances are held as shares of the vault hotkey, so staking yield accrues to each entity pro rata.
+- **Withdraw.** `python scripts/markets_vault.py withdraw --amount A ...` is approved at the next checkpoint for
+  what is free and sent to the owner coldkey. A release not sent within 24 hours is a published default.
+- **Exit.** `python scripts/markets_vault.py exit ...` approves everything free. The locked net loss goes to the
+  network reserve, which pays claims before emission.
+- **Solvency.** At every checkpoint validators compare the vault's on-chain stake with the ledger. While it is
+  short, no bets are accepted.
+- Code: `sn89_signals/markets_vault.py`, `sn89_signals/markets.py`.
+
 ### Timelock version compatibility — READ THIS IF VTRUST IS FALLING
 
 Two mutually-unreadable drand-tlock ciphertext formats exist:
