@@ -1771,6 +1771,18 @@ MARKETS_DEPTH_FROM_UNIX = int(os.getenv("SN89_MARKETS_DEPTH_FROM", "1791781200")
 # fills at the model price again; the vault's payout check bounds what an entity can lose instead.
 # ⚑ MAINNET: markets starting at/after 2026-10-14 00:00:00 UTC. 0 = depth never ends.
 MARKETS_DEPTH_UNTIL_UNIX = int(os.getenv("SN89_MARKETS_DEPTH_UNTIL", "1791936000"))
+# GRADE FROM THE RECORD (2026-10-13). A market's verdict depended on WHEN a validator looked: a window it
+# could not fetch on its first pass after end + GRADE_ABANDON_S voided the market for good (ADA 15m 10-12
+# 14:45: VOID live, DOWN on any rebuild; the validator grades once per weight cycle, ~80 min apart). For
+# markets starting at/after this instant: a missing ORACLE window always waits (the anchor publishes every
+# window, empty if nothing was recorded, so missing means unfetched, never absent), and a missing HF tick
+# window counts as absent (VOID, or the sigma fallback) only once the published index has passed it without
+# it. Wall clock no longer decides anything. 0 = off.
+MARKETS_SEALED_FROM_UNIX = int(os.getenv("SN89_MARKETS_SEALED_FROM", "1791936000"))
+
+
+def markets_sealed_as_of(start: int) -> bool:
+    return bool(MARKETS_SEALED_FROM_UNIX and int(start) >= MARKETS_SEALED_FROM_UNIX)
 MARKETS_DEPTH_B = _Decimal(os.getenv("SN89_MARKETS_DEPTH_B", "300"))
 MARKETS_DEPTH_ACCOUNT = _Decimal(os.getenv("SN89_MARKETS_DEPTH_ACCOUNT", "100"))
 MARKETS_DEPTH_ENTITY = _Decimal(os.getenv("SN89_MARKETS_DEPTH_ENTITY", "400"))

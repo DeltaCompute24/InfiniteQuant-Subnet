@@ -304,6 +304,16 @@ def round_px(x: float) -> float:
     return round(x, 5 - int(math.floor(math.log10(abs(x)))))
 
 
+def fsum_l2r(xs) -> float:
+    """Left-to-right float addition: exactly what sum() returns on Python <= 3.11. Python 3.12 made sum() of
+    floats compensated (Neumaier), which moves the last bit and flips round_px at half-ticks, so the service
+    (3.12) and the validator (3.10) disagreed on sigma, p_model and shares. Every consensus float sum uses this."""
+    acc = 0.0
+    for x in xs:
+        acc += x
+    return acc
+
+
 def tick_mark(row: dict) -> float | None:
     b, k, p = row.get("b"), row.get("k"), row.get("p")
     if b and k and b > 0 and k > 0:
@@ -327,7 +337,7 @@ def average_marks(rows: list[dict], t_from_ms: int, t_to_ms: int,
     marks: list[float] = []
     for w in sorted(by_w):
         marks.extend(m for _, m in sorted(by_w[w]))
-    return round_px(sum(marks) / len(marks)) if marks else None
+    return round_px(fsum_l2r(marks) / len(marks)) if marks else None
 
 
 def uses_oracle(mid: str) -> bool:
@@ -619,7 +629,7 @@ def minute_marks(rows: list[dict], lo_ms: int, hi_ms: int) -> list[tuple[int, fl
     out = []
     for k in sorted(by_m):
         marks = [m for _, m in sorted(by_m[k])]
-        out.append((k, round_px(sum(marks) / len(marks))))
+        out.append((k, round_px(fsum_l2r(marks) / len(marks))))
     return out
 
 
@@ -918,8 +928,8 @@ def score_accounts(results: list[dict]) -> dict[str, float]:
         if n < config.MARKETS_MIN_RESOLVED or n < 2:
             continue
         rs = [float(p / d) for p, d in rows]
-        mean = sum(rs) / n
-        sd = math.sqrt(sum((x - mean) ** 2 for x in rs) / (n - 1))
+        mean = fsum_l2r(rs) / n
+        sd = math.sqrt(fsum_l2r((x - mean) ** 2 for x in rs) / (n - 1))
         lb = mean - config.MARKETS_GATE_Z * sd / math.sqrt(n)
         total = float(sum(p for p, _ in rows))
         if lb <= 0 or total <= 0:
@@ -932,13 +942,13 @@ def score_accounts(results: list[dict]) -> dict[str, float]:
 def weights_from_scores(scores: dict[str, float], uid_by_hk: dict, now: float) -> dict[int, float]:
     weights: dict[int, float] = {}
     s = {uid_by_hk[h]: v for h, v in scores.items() if h in uid_by_hk and v > 0}
-    pool = sum(s.values())
+    pool = fsum_l2r(s.values())
     cap = config.miner_emission_cap_as_of(now)
     if pool > 0:
         for uid, v in s.items():
             weights[uid] = cap * (v / pool)
-    weights[config.BURN_UID] = weights.get(config.BURN_UID, 0.0) + max(0.0, 1.0 - sum(weights.values()))
-    total = sum(weights.values())
+    weights[config.BURN_UID] = weights.get(config.BURN_UID, 0.0) + max(0.0, 1.0 - fsum_l2r(weights.values()))
+    total = fsum_l2r(weights.values())
     return {u: w / total for u, w in weights.items()}
 
 
@@ -1523,7 +1533,7 @@ def _rows_upto(base: str, cache_dir: str, db: sqlite3.Connection, mid: str, t_us
 
 
 def prefix_shares(db: sqlite3.Connection, base: str, cache_dir: str, key: str, mid: str, order: tuple,
-                  final: bool = False) -> Decimal | None:
+                  final=False) -> Decimal | None:
     """V6: the shares a bet will be paid if its side wins: its market replayed in canonical order up to
     and including it, with every earlier bet's collateral decision applied. Later bets cannot change
     it, so this is exactly what the grader computes. None (wait) while an earlier bet of the market
@@ -1590,7 +1600,7 @@ def lock_breach(db: sqlite3.Connection, ch: CachedChain, entity: str, cycle: int
 
 
 def collateral_pass(db: sqlite3.Connection, ch: CachedChain, base: str, cache_dir: str, frontier_us: int,
-                    now: int | None = None) -> int:
+                    now: int | None = None, record_final=None) -> int:
     """Decide ok / ignored:collateral for every undecided V2 bet received before `frontier_us`,
     entity by entity in canonical order. A bet waits (and so does every later bet of the same
     entity) until its hour snapshot, its market's rate and the debt it depends on are known.
@@ -1641,7 +1651,10 @@ def collateral_pass(db: sqlite3.Connection, ch: CachedChain, base: str, cache_di
         if config.markets_payout_check_as_of(t):
             credit = emission_credit(db, ch, hour)
             end = parse_market_id(mid)[3]
-            final = now is not None and now >= end + config.MARKETS_GRADE_ABANDON_S
+            if config.markets_sealed_as_of(start):
+                final = record_final if record_final is not None else False
+            else:
+                final = now is not None and now >= end + config.MARKETS_GRADE_ABANDON_S
             sh = prefix_shares(db, base, cache_dir, key, mid, (_w, t_us, _hk, _seq), final) if credit is not None else None
             if sh is None:
                 blocked.add(entity)
@@ -1889,8 +1902,8 @@ def pnl_vector(db: sqlite3.Connection, uid_by_hk: dict, now: int) -> dict[int, f
         tot = sum(x.values(), Decimal(0))
         scale = CTX.divide(Decimal(1), tot) if tot > 1 else Decimal(1)
         weights = {u: float(CTX.multiply(v, scale)) for u, v in x.items()}
-    weights[config.BURN_UID] = weights.get(config.BURN_UID, 0.0) + max(0.0, 1.0 - sum(weights.values()))
-    total = sum(weights.values())
+    weights[config.BURN_UID] = weights.get(config.BURN_UID, 0.0) + max(0.0, 1.0 - fsum_l2r(weights.values()))
+    total = fsum_l2r(weights.values())
     weights = {u: w / total for u, w in weights.items()}
     # V5b floor: from the vault OPEN the vault UID always carries at least MARKETS_VAULT_UID_FLOOR of the Markets
     # vector, so a day with no claims never leaves it at zero emission (the first UID pruned on a full subnet).
@@ -1904,7 +1917,7 @@ def pnl_vector(db: sqlite3.Connection, uid_by_hk: dict, now: int) -> dict[int, f
             weights[config.BURN_UID] -= take
             need -= take
         if need > 0:
-            rest = sum(w for u, w in weights.items() if u != vu)
+            rest = fsum_l2r(w for u, w in weights.items() if u != vu)
             k = (rest - need) / rest if rest > 0 else 0.0
             weights = {u: (w if u == vu else w * k) for u, w in weights.items()}
         weights[vu] = fl
@@ -1957,11 +1970,11 @@ def day_ticks(base: str, tick_dir: str, pairs: set, day_unix: int) -> tuple[dict
 
 
 def sigma_for_market(db: sqlite3.Connection, base: str, tick_dir: str, asset: str, start: int,
-                     final: bool = False, window: str | None = None) -> Decimal | None:
+                     final=False, window: str | None = None) -> Decimal | None:
     """The V3 sigma for a market starting at `start`: measured from the previous UTC day's sealed
     ticks (every board asset of that day computed and cached in one pass), else the class
     fallback. None while a window of that day is still unfetchable and `final` is False (wait);
-    with `final` the fallback is used, and remembered. V3.1: a 15m/1h market from the trailing arm is
+    with `final` the fallback is used, and remembered (`final` may be a predicate over the missing windows). V3.1: a 15m/1h market from the trailing arm is
     sized from the sealed ticks of the span before its start; too few returns -> the day rule."""
     if window in config.MARKETS_SIGMA_TRAILING_WINDOWS and uses_trailing_sigma(market_id(asset, window, start)):
         row = db.execute("SELECT sigma FROM v3_sigma_trail WHERE asset=? AND start=?", (asset, start)).fetchone()
@@ -1970,7 +1983,7 @@ def sigma_for_market(db: sqlite3.Connection, base: str, tick_dir: str, asset: st
         from . import hf_grade
         lo, hi = trailing_sigma_span(start)
         rows, missing = hf_grade._ticks_for(base, tick_dir, asset, lo, hi - 1)
-        if missing and not final:
+        if missing and not (final(missing) if callable(final) else final):
             return None
         s = trailing_sigma(rows, start) if not missing else None
         if s is None:
@@ -1987,7 +2000,7 @@ def sigma_for_market(db: sqlite3.Connection, base: str, tick_dir: str, asset: st
     board = hf.hf_bands_as_of(start) or {}
     pairs = set(board) | {asset}
     rows_by, missing = day_ticks(base, tick_dir, pairs, day)
-    if missing and not final:
+    if missing and not (final(missing) if callable(final) else final):
         return None
     for p in sorted(pairs):
         s = sigma_per_s(rows_by.get(p, []), day) if not missing else None
@@ -2043,6 +2056,11 @@ def sync_and_grade(base: str, cache_dir: str, now: float, chain_view: ChainView 
         db.execute("INSERT OR IGNORE INTO windows_seen VALUES (?)", (w,))
     db.commit()
     published_through = (max(index) + hf_grade.WINDOW_MS) // 1000 if index else 0
+    published = set(index)
+
+    def record_final(missing) -> bool:
+        """Sealed markets: missing HF windows are absent for good once the index has passed them."""
+        return all(int(w) not in published and int(w) < published_through * 1000 for w in missing)
     now_s = int(now)
     ch = CachedChain(db, chain_view) if chain_view is not None else None
     v2_live = bool(config.MARKETS_COLLATERAL_FROM_UNIX)
@@ -2053,7 +2071,7 @@ def sync_and_grade(base: str, cache_dir: str, now: float, chain_view: ChainView 
             # bets two windows behind what is published are final (windows seal in order)
             frontier = (published_through - 2 * hf_grade.WINDOW_MS // 1000) * 1_000_000
             moved += vault.vault_pass(db, ch, frontier // 1_000_000)
-            moved += collateral_pass(db, ch, base, cache_dir, frontier, now_s)
+            moved += collateral_pass(db, ch, base, cache_dir, frontier, now_s, record_final)
         graded = {r[0] for r in db.execute("SELECT market_id FROM outcomes")}
         for (mid,) in db.execute("SELECT DISTINCT market_id FROM bets").fetchall():
             if mid in graded:
@@ -2086,12 +2104,19 @@ def sync_and_grade(base: str, cache_dir: str, now: float, chain_view: ChainView 
             else:
                 rows, missing = hf_grade._ticks_for(base, tick_dir, asset,
                                                     (start - config.MARKETS_AVG_S) * 1000, end * 1000)
-            if missing and now_s < end + config.MARKETS_GRADE_ABANDON_S:
-                continue                       # never grade a hole: wait, then void
+            sealed = config.markets_sealed_as_of(start)
+            if missing:
+                if sealed:
+                    done = not uses_oracle(mid) and record_final(missing)   # an oracle window always waits
+                else:
+                    done = now_s >= end + config.MARKETS_GRADE_ABANDON_S
+                if not done:
+                    continue                   # never grade a hole: wait (then, before the seal arm, void)
             sigma = None
             if is_v3(start):
                 sigma = sigma_for_market(db, base, tick_dir, asset, start, window=_w,
-                                         final=now_s >= end + config.MARKETS_GRADE_ABANDON_S)
+                                         final=(record_final if sealed
+                                                else now_s >= end + config.MARKETS_GRADE_ABANDON_S))
                 if sigma is None:
                     continue                   # previous day's ticks not all in hand yet: wait
             grade_market(db, mid, rows, sigma)
@@ -2206,7 +2231,7 @@ def apply_entity_dust(vec: dict[int, float], uids: set[int]) -> dict[int, float]
         if out.get(u, 0.0) < config.DUST_WEIGHT:
             out[u] = config.DUST_WEIGHT
             raised.add(u)
-    excess = sum(out.values()) - 1.0
+    excess = fsum_l2r(out.values()) - 1.0
     if excess <= 0:
         return out
     take = min(excess, out.get(config.BURN_UID, 0.0))
@@ -2215,7 +2240,7 @@ def apply_entity_dust(vec: dict[int, float], uids: set[int]) -> dict[int, float]
         excess -= take
     if excess > 1e-15:
         rest = {u: w for u, w in out.items() if u not in raised and u != config.BURN_UID and w > 0}
-        tot = sum(rest.values())
+        tot = fsum_l2r(rest.values())
         if tot > 0:
             k = (tot - excess) / tot
             for u in rest:
