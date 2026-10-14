@@ -171,3 +171,15 @@ def test_windows_before_the_arm_are_never_fetched(monkeypatch, tmp_path):
     markets.sync_and_grade("http://x", str(tmp_path), arm + 60)
     assert not any(str(old) in u for u in fetched)
     assert any(str(new) in u for u in fetched)
+
+
+def test_entity_dust_size_as_of():
+    """2026-10-14: entity dust rises from DUST_WEIGHT to MARKETS_VAULT_UID_FLOOR at the arm, never before."""
+    arm = config.MARKETS_ENTITY_DUST_FLOOR_FROM_UNIX
+    assert config.markets_entity_dust_weight_as_of(arm - 1) == config.DUST_WEIGHT
+    assert config.markets_entity_dust_weight_as_of(arm) == float(config.MARKETS_VAULT_UID_FLOOR)
+    vec = {config.BURN_UID: 1.0}
+    out = markets.apply_entity_dust(vec, {7}, config.markets_entity_dust_weight_as_of(arm))
+    assert abs(out[7] - float(config.MARKETS_VAULT_UID_FLOOR)) < 1e-15
+    assert abs(sum(out.values()) - 1.0) < 1e-12
+    assert markets.apply_entity_dust(vec, {7})[7] == config.DUST_WEIGHT

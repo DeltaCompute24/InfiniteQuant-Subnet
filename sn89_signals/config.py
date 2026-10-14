@@ -1679,6 +1679,21 @@ def markets_entity_dust_as_of(t_unix: float) -> bool:
     return bool(MARKETS_ENTITY_DUST_FROM_UNIX and t_unix >= MARKETS_ENTITY_DUST_FROM_UNIX)
 
 
+# Entity dust SIZE (Whit, 2026-10-14). DUST_WEIGHT inside the Markets vector is 1e-4 x the Markets share
+# (2.5e-5 of mecid-0 at 0.25), below an immune LF/HF miner's 1e-4 x 0.375, so a collateral-holding entity
+# with no claim was the lowest-weighted UID on 89 and the first pruned (5Hdvy1Ms off UID 199, 2026-10-14
+# ~04:36 UTC). From this instant the entity dust is MARKETS_VAULT_UID_FLOOR inside the Markets vector, the
+# same floor the vault UID keeps. Earlier cycles keep DUST_WEIGHT, so a replay reproduces them.
+MARKETS_ENTITY_DUST_FLOOR_FROM_UNIX = int(os.getenv("SN89_MARKETS_ENTITY_DUST_FLOOR_FROM", "1791982800"))
+
+
+def markets_entity_dust_weight_as_of(t_unix: float) -> float:
+    """Normalized floor an entity-dust UID keeps inside the Markets vector, as of the cycle's clock."""
+    if MARKETS_ENTITY_DUST_FLOOR_FROM_UNIX and t_unix >= MARKETS_ENTITY_DUST_FLOOR_FROM_UNIX:
+        return float(MARKETS_VAULT_UID_FLOOR)
+    return DUST_WEIGHT
+
+
 # ── Markets V3: live in-window pricing (Whit, 2026-10-09: "Build this on mainnet") ──
 # Markets STARTING at/after this instant take bets WHILE THE WINDOW RUNS (markets.py "V3"), the way
 # Kalshi's 15-minute markets do: the chance is driven by the live price, bets still nudge it, and

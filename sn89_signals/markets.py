@@ -2198,7 +2198,8 @@ def markets_weights(uid_by_hk: dict, now: float | None = None, base: str | None 
     if config.markets_entity_dust_as_of(now):
         db = _db(cache_dir)
         try:
-            vec = apply_entity_dust(vec, entity_dust_uids(db, uid_by_hk, now, chain_view))
+            vec = apply_entity_dust(vec, entity_dust_uids(db, uid_by_hk, now, chain_view),
+                                   config.markets_entity_dust_weight_as_of(now))
         finally:
             db.close()
     return vec
@@ -2247,8 +2248,9 @@ def entity_dust_uids(db: sqlite3.Connection, uid_by_hk: dict, now: float,
         return set()
 
 
-def apply_entity_dust(vec: dict[int, float], uids: set[int]) -> dict[int, float]:
-    """Raise each uid to at least DUST_WEIGHT inside the (already normalized) markets vector.
+def apply_entity_dust(vec: dict[int, float], uids: set[int], dust: float | None = None) -> dict[int, float]:
+    """Raise each uid to at least `dust` (default DUST_WEIGHT; markets_entity_dust_weight_as_of) inside
+    the (already normalized) markets vector.
     max(earned, dust), never the sum. The difference comes from the burn UID first; only if the
     burn cannot cover it (every unit already paid out) are the other weights scaled down pro rata.
     A dust-only vector is never renormalized up to the whole share."""
@@ -2256,9 +2258,10 @@ def apply_entity_dust(vec: dict[int, float], uids: set[int]) -> dict[int, float]
         return vec
     out = dict(vec)
     raised = set()
+    dust = config.DUST_WEIGHT if dust is None else dust
     for u in sorted(uids):
-        if out.get(u, 0.0) < config.DUST_WEIGHT:
-            out[u] = config.DUST_WEIGHT
+        if out.get(u, 0.0) < dust:
+            out[u] = dust
             raised.add(u)
     excess = fsum_l2r(out.values()) - 1.0
     if excess <= 0:
