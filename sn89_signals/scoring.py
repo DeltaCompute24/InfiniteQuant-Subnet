@@ -933,7 +933,8 @@ def compute_weights(states: list[MinerState], now_unix: float,
                     referral_pairs: list[tuple[str, str]] | None = None,
                     referral_suspended: set[str] | None = None,
                     use_points: bool | None = None,
-                    probation_only: list[MinerState] | None = None) -> dict[int, float]:
+                    probation_only: list[MinerState] | None = None,
+                    warmup_uids: set[int] | None = None) -> dict[int, float]:
     """{uid: normalized_weight}. Immune miners get the dust floor; the pool is
     split across miners by a time-decayed, tier-weighted tally of their QUALIFIED
     wins (a relative competition of recent qualified wins); a probation dust floor
@@ -990,6 +991,11 @@ def compute_weights(states: list[MinerState], now_unix: float,
               and s.uid not in excluded_uids]
     for s in immune:
         weights[s.uid] = config.DUST_WEIGHT
+    # warmup_uids: a caller whose competition has its own warmup (HF eligibility)
+    # names the miners still inside it. Same floor as immune, out of the same pool.
+    for uid in warmup_uids or ():
+        if uid not in excluded_uids:
+            weights[uid] = config.DUST_WEIGHT
 
     # ── emission = a time-decayed, tier-weighted tally of QUALIFIED wins ─────────
     # Each miner's earning size is decayed_qwin_tally(qwins): the sum of its

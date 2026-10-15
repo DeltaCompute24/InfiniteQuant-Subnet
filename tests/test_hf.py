@@ -1402,7 +1402,9 @@ class TestHFEligibilityGateEndToEnd:
                       for d in range(3) for k in range(20)]}
         w = hf.hf_compute_weights({'A': self._winning_decisive()},
                                   {'A': self.NOW - 3 * 86400}, {'A': 10}, self.NOW, subs)
-        assert w.get(10, 0.0) == 0.0
+        # inside its first 8 days it holds the warmup dust floor and nothing more
+        from sn89_signals import config
+        assert w.get(10, 0.0) <= config.DUST_WEIGHT * 1.0001
         assert w.get(0, 0.0) > 0.0
 
     def test_ineligible_too_few_submissions_earns_nothing(self):
@@ -1411,7 +1413,8 @@ class TestHFEligibilityGateEndToEnd:
         assert hf.hf_eligible_from(subs['A']) is None
         w = hf.hf_compute_weights({'A': self._winning_decisive()},
                                   {'A': self.NOW - 20 * 86400}, {'A': 10}, self.NOW, subs)
-        assert w.get(10, 0.0) == 0.0
+        from sn89_signals import config
+        assert w.get(10, 0.0) <= config.DUST_WEIGHT * 1.0001
 
     def test_eligible_earns(self):
         subs = {'A': _eligible_subs(self.NOW)}                          # 80 over 8 days
@@ -2238,3 +2241,49 @@ class TestEntryProbe:
         assert ing.handle(self._frame(miner))["kind"] == "hf.reject"
         assert self._rows(tmp_path) == []
         assert not ing._entry_probe
+
+
+class TestHFWarmupDust:
+    """A registered HF miner that is not yet eligible holds DUST_WEIGHT for
+    HF_WARMUP_DUST_S after its first accepted submission, so it is not the first
+    UID pruned when chain immunity ends. As-of HF_WARMUP_DUST_FROM."""
+    NOW = 1_800_000_000.0
+
+    def _subs(self, first_age_s, n=5):
+        return [int((self.NOW - first_age_s + k * 600) * 1000) for k in range(n)]
+
+    def test_new_miner_gets_dust(self):
+        from sn89_signals import config
+        w = hf.hf_compute_weights({}, {}, {'N': 7}, self.NOW, {'N': self._subs(3600)})
+        assert abs(w.get(7, 0.0) - config.DUST_WEIGHT) < 1e-9
+
+    def test_dust_with_pending_only_and_with_decisive(self):
+        from sn89_signals import config
+        dec = {'N': [(self.NOW - 1800, True, False)]}
+        w = hf.hf_compute_weights(dec, {}, {'N': 7}, self.NOW, {'N': self._subs(7200)})
+        assert abs(w.get(7, 0.0) - config.DUST_WEIGHT) < 1e-9
+
+    def test_window_expires(self):
+        from sn89_signals import config
+        w = hf.hf_compute_weights({}, {}, {'N': 7}, self.NOW,
+                                  {'N': self._subs(config.HF_WARMUP_DUST_S + 3600)})
+        assert w.get(7, 0.0) == 0.0
+
+    def test_no_submissions_no_dust(self):
+        w = hf.hf_compute_weights({}, {}, {'N': 7}, self.NOW, {'N': []})
+        assert w.get(7, 0.0) == 0.0
+
+    def test_unregistered_no_dust(self):
+        w = hf.hf_compute_weights({}, {}, {}, self.NOW, {'N': self._subs(3600)})
+        assert 7 not in w
+
+    def test_before_stamp_unchanged(self, monkeypatch):
+        from sn89_signals import config
+        monkeypatch.setattr(config, "HF_WARMUP_DUST_FROM", int(self.NOW) + 1)
+        w = hf.hf_compute_weights({}, {}, {'N': 7}, self.NOW, {'N': self._subs(3600)})
+        assert w.get(7, 0.0) == 0.0
+
+    def test_lf_untouched(self):
+        from sn89_signals import scoring
+        assert scoring.compute_weights([], self.NOW) == scoring.compute_weights(
+            [], self.NOW, warmup_uids=None)

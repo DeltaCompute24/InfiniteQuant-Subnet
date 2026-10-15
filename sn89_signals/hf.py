@@ -1847,6 +1847,18 @@ def hf_compute_weights(decisive_by_hk: dict, first_seen_by_hk: dict,
         states = []
         blocked = []                             # diversity-held: probation floor only
         gated_probation = config.hf_gated_probation_as_of(now)
+        warmup: set[int] = set()                 # not yet eligible: warmup dust only
+        if config.hf_warmup_dust_as_of(now):
+            for hk, subs in (subs_by_hk or {}).items():
+                uid = uid_by_hk.get(hk)
+                if uid is None or not subs or hf_eligible_from(subs) is not None:
+                    continue
+                first_ms = min(_sub_ts(x) for x in subs)
+                if not (0.0 <= now - first_ms / 1000.0 < config.HF_WARMUP_DUST_S):
+                    continue
+                if not integrity_ok(hk, now):
+                    continue
+                warmup.add(uid)
         for hk, decisive in decisive_by_hk.items():
             uid = uid_by_hk.get(hk)
             if uid is None:
@@ -1886,7 +1898,8 @@ def hf_compute_weights(decisive_by_hk: dict, first_seen_by_hk: dict,
                 qwins=qwins, qcalls=qcalls,
                 wash_hist=_wash_hist((washes_by_hk or {}).get(hk)),
                 wash_resolved=_wash_resolved((washes_by_hk or {}).get(hk), now)))
-        return scoring.compute_weights(states, now, probation_only=blocked)
+        return scoring.compute_weights(states, now, probation_only=blocked,
+                                       warmup_uids=warmup)
 
 
 def _board_sigma_for(pair: str, t0_unix: float) -> float:

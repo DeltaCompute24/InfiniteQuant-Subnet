@@ -697,6 +697,24 @@ HF_GATED_PROBATION_FROM = int(os.getenv("SN89_HF_GATED_PROBATION_FROM", "1790956
 def hf_gated_probation_as_of(now_unix: float) -> bool:
     """Whether a diversity-blocked HF miner keeps the probation dust floor."""
     return bool(HF_GATED_PROBATION_FROM and now_unix >= HF_GATED_PROBATION_FROM)
+
+
+# HF warmup dust. An LF miner holds DUST_WEIGHT for IMMUNITY_S from its first commit;
+# HF had no equivalent, because hf_scoring_config zeroes IMMUNITY_S and a miner that
+# is not yet HF-eligible (< 50 submissions or < 8 trading days) was skipped outright.
+# So an HF-only newcomer sat at zero incentive and was the first UID pruned the moment
+# its 5000-block chain immunity (~16.7 h) ran out, long before it could qualify. From
+# this stamp, a registered hotkey with at least one accepted HF submission that is not
+# yet eligible keeps DUST_WEIGHT for HF_WARMUP_DUST_S after its first submission.
+# Integrity failures still get nothing. As-of by the weight cycle's clock, so a replay
+# before the stamp reproduces the old vectors byte for byte.
+HF_WARMUP_DUST_FROM = int(os.getenv("SN89_HF_WARMUP_DUST_FROM", "1792051200"))  # 2026-10-15T08:00:00Z
+HF_WARMUP_DUST_S = int(os.getenv("SN89_HF_WARMUP_DUST_S", str(8 * 24 * 3600)))
+
+
+def hf_warmup_dust_as_of(now_unix: float) -> bool:
+    """Whether a not-yet-eligible HF miner holds the warmup dust floor."""
+    return bool(HF_WARMUP_DUST_FROM and now_unix >= HF_WARMUP_DUST_FROM)
 BURN_UID = 0                        # absorbs weight when nobody qualifies
 # Miner emission cap (Mantis-sn123-style). The field of real miners collectively
 # receives at most this fraction of the total incentive weight; the remainder
