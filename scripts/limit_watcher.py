@@ -382,9 +382,39 @@ def fire_lf(hk: str, signers: dict, payload: dict, feed_tokens: dict,
     return {"kind": "lf.commit", "submission_id": sub_id, **res}
 
 
+REG_CACHE = os.getenv("SN89_REG_CACHE",
+                      "/opt/iq-platform/data/live/sn89-registered-hotkeys.json")
+REG_CACHE_MAX_AGE_S = int(os.getenv("SN89_REG_CACHE_MAX_AGE_S", "3600"))
+
+
+def registered_hotkeys() -> set | None:
+    """Hotkeys on this watcher's netuid, or None when the cache is missing, stale or
+    for another netuid. None means DON'T GATE: a dead cache sidecar must not reject
+    every order."""
+    try:
+        d = json.loads(open(REG_CACHE, encoding="utf-8").read())
+        if int(d.get("netuid", -1)) != int(os.getenv("SN89_NETUID", "89")):
+            return None
+        from datetime import datetime
+        upd = str(d.get("updated_at") or "").replace("Z", "+00:00")
+        if time.time() - datetime.fromisoformat(upd).timestamp() > REG_CACHE_MAX_AGE_S:
+            return None
+        return set(d.get("hotkeys") or [])
+    except (OSError, ValueError, TypeError):
+        return None
+
+
 def fire(row: sqlite3.Row, signers: dict, feed_tokens: dict,
          con: sqlite3.Connection) -> dict:
     payload = json.loads(row["payload"])
+    # The validator ignores commits from a hotkey that is not on the subnet, so a
+    # call fired for a pruned hotkey is committed, shown "live" and never graded.
+    # A resting limit can outlive the registration, so this is checked at fire as
+    # well as at placement. Mainnet only; fails open on a missing/stale cache.
+    if NETWORK_SCOPE == "finney":
+        reg = registered_hotkeys()
+        if reg is not None and row["hotkey"] not in reg:
+            return {"kind": "error", "reason": "hotkey_not_registered"}
     if row["kind"] == "lf":
         return fire_lf(row["hotkey"], signers, payload, feed_tokens, con)
     kp = keypair_for(row["hotkey"], signers)
