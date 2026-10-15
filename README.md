@@ -352,10 +352,13 @@ an estimate. Bets placed before the start work as before.
   immediately. A losing bet's stake is lost.
 - Withdraw from the Markets page once your withdrawable balance is $100 or more. Choose USDC on
   Arbitrum or SN89 alpha and enter your address. USDC withdrawals are sent within about 10 minutes.
-- A $200 betting credit is added after identity verification at
-  terminal.infinitequant.app/profile. Credit is spent before your own money. The credit cannot be
-  withdrawn. Winnings from credit bets can be withdrawn up to $500 per account; amounts beyond
-  that return as credit. A credit bet fills at $0.90 a share or less and pays up to $2,000.
+- A $200 betting credit is earned by inviting one new trader with your invite link, shown in the
+  wallet panel on the Markets page. The credit is added once the invited trader creates an account
+  through your link and passes identity verification at terminal.infinitequant.app/profile, and you
+  have passed yours. The limit is one per person, and anyone who already holds a $200 credit keeps
+  it but cannot earn a second. Credit is spent before your own money and cannot be withdrawn.
+  Winnings from credit bets can be withdrawn up to $500 per account; amounts beyond that return as
+  credit. A credit bet fills at $0.90 a share or less and pays up to $2,000.
 
 **For miners and developers:** the mechanism below.
 
