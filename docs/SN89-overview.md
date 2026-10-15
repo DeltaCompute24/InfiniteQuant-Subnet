@@ -18,10 +18,10 @@ Miners publish **encrypted directional trade calls**; validators grade them on r
 data and pay emissions to miners who prove **consistent, statistically-real edge**.
 
 1. **Commit.** A miner picks a pair + direction, encrypts the call under a [drand](https://drand.love)
-   2-hour timelock, and writes `SHA256(signal)` on-chain via `set_commitment`. The block it
-   lands in **is** the timestamp; entry is anchored to the first 1-second bar at/after that
+   15-minute timelock, and writes `SHA256(signal)` on-chain via `set_commitment`. The block it
+   lands in **is** the timestamp; entry is the last anchored tick at or before that
    block time, so every validator derives the identical entry price.
-2. **Reveal.** After 2 h the timelock opens; validators verify the plaintext matches the
+2. **Reveal.** After 15 minutes the timelock opens; validators verify the plaintext matches the
    on-chain hash, then grade on candles — first touch of TP wins, first touch of SL loses, no
    touch by the horizon is a wash.
 3. **Earn.** Emissions go to qualified miners, sized by recent wins × a hit-rate tier.
@@ -49,7 +49,7 @@ function of public inputs that anyone can recompute. Here is exactly what that m
   Each validator independently re-grades from the on-chain entry block, the public price feed,
   and the on-chain bands-in-force — and independently computes weights. The owner's opinion of
   who won is worth nothing.
-- **Cannot read your signal early.** The call is sealed under a 2-hour drand timelock and
+- **Cannot read your signal early.** The call is sealed under a 15-minute drand timelock and
   AEAD-bound to your hotkey. The owner relay (default blob transport) is **untrusted transport
   only** — it cannot decrypt or forge a blob, and a relay-hosted blob is **pinned at submit**,
   so a hosting outage can never cost you a forfeit.

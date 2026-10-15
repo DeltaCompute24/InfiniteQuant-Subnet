@@ -16,8 +16,8 @@ Bittensor subnet 89. Miners commit encrypted directional trade calls. Validators
 
 ## Protocol
 
-1. **COMMIT** — pick a pair + direction. The signal is encrypted with a 2-hour [drand](https://drand.love) timelock; `SHA256(signal)` goes on-chain via `set_commitment`. The commit block is the signal's timestamp. Entry price = open of the first 1-second bar at or after that block's time — every validator derives the same entry.
-2. **REVEAL** — after 2 hours the timelock opens. Validators verify the plaintext against the on-chain hash, then grade on 1-minute candles: TP touched first = **WON** · SL touched first = **LOST** · neither by the horizon = **WASH**.
+1. **COMMIT** — pick a pair + direction. The signal is encrypted with a 15-minute [drand](https://drand.love) timelock; `SHA256(signal)` goes on-chain via `set_commitment`. The commit block is the signal's timestamp. Entry price = the last anchored tick at or before that block's time, so every validator derives the same entry. Hosted and workspace miners see their entry, TP and SL within about 2 minutes, once that tick window seals.
+2. **REVEAL** — after 15 minutes the timelock opens. Validators verify the plaintext against the on-chain hash, then grade on the anchored ticks: TP touched first = **WON** · SL touched first = **LOST** · neither by the horizon = **WASH**.
 3. **EARN** — emissions ∝ trailing-7-day qualified wins (capped at 20) × hit-rate tier.
 
 - A committed blob that never reveals is a decisive **LOSS**. Committing costs what revealing costs.
@@ -321,7 +321,7 @@ btcli wallet faucet --wallet.name mywallet --subtensor.network test
 btcli subnet register --netuid 496 --wallet.name mywallet --wallet.hotkey miner --subtensor.network test
 ```
 
-Reveals still take 2 h; grading follows each call's horizon.
+Reveals take 15 minutes; grading follows each call's horizon.
 
 ### Markets — Up/Down prediction markets (mainnet from 2026-10-09 00:00 UTC)
 
