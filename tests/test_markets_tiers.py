@@ -36,6 +36,7 @@ def test_the_lock_comes_off_the_tier_and_only_deposits_before_the_hour_count(tmp
 
 def test_sigma_is_scaled_from_the_arm_by_window(monkeypatch):
     monkeypatch.setattr(config, "MARKETS_SIGMA_SCALE_FROM_UNIX", 1_800_000_000)
+    monkeypatch.setattr(config, "MARKETS_SIGMA_SCALE_V2_FROM_UNIX", 0)
     s = D("0.0001")
     after, before = 1_800_000_000 // 3600 * 3600 + 3600, 1_800_000_000 // 3600 * 3600 - 3600
     assert markets.scaled_sigma(markets.market_id("BTCUSD", "15m", after), s) == D("0.000130")
@@ -43,3 +44,14 @@ def test_sigma_is_scaled_from_the_arm_by_window(monkeypatch):
     assert markets.scaled_sigma(markets.market_id("BTCUSD", "15m", before), s) == s
     monkeypatch.setattr(config, "MARKETS_SIGMA_SCALE_FROM_UNIX", 0)
     assert markets.scaled_sigma(markets.market_id("BTCUSD", "15m", after), s) == s
+
+
+def test_sigma_v2_arm_rescales_1h_only_from_its_start(monkeypatch):
+    monkeypatch.setattr(config, "MARKETS_SIGMA_SCALE_FROM_UNIX", 1_700_000_000)
+    monkeypatch.setattr(config, "MARKETS_SIGMA_SCALE_V2_FROM_UNIX", 1_800_000_000)
+    s = D("0.0001")
+    after, before = 1_800_000_000 // 3600 * 3600 + 3600, 1_800_000_000 // 3600 * 3600 - 3600
+    assert markets.scaled_sigma(markets.market_id("XAUUSD", "1h", after), s) == D("0.000170")
+    assert markets.scaled_sigma(markets.market_id("XAUUSD", "15m", after), s) == D("0.000130")
+    assert markets.scaled_sigma(markets.market_id("XAUUSD", "1d", markets.window_start("1d", 1_800_000_000 + 2 * 86400)), s) == s
+    assert markets.scaled_sigma(markets.market_id("XAUUSD", "1h", before), s) == D("0.000120")   # replays as priced

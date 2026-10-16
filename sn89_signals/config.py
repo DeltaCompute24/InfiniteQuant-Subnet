@@ -1827,6 +1827,12 @@ def markets_depth_tiers_as_of(start: int) -> bool:
 # (make_pricer, quote_context) for markets starting at/after the arm. 0 = off.
 MARKETS_SIGMA_SCALE_FROM_UNIX = int(os.getenv("SN89_MARKETS_SIGMA_SCALE_FROM", "1791936000"))
 MARKETS_SIGMA_SCALE = {"15m": _Decimal("1.30"), "1h": _Decimal("1.20")}
+# V3.5 1h SIGMA (Whit, 2026-10-16). Re-fit on 1,168 graded in-window bets (10-10..10-16), one bet per market and
+# side: 1h markets were still overconfident on the leader under 1.20 (cheap side won more than priced; best extra
+# multiplier 1.40, 95% CI 1.05-2.05 on non-gold 1h, 1.90 on XAUUSD 1h); 15m unchanged (extra fit <= 1.0 off gold).
+# Markets starting at/after this arm use MARKETS_SIGMA_SCALE_V2; earlier ones keep MARKETS_SIGMA_SCALE. 0 = off.
+MARKETS_SIGMA_SCALE_V2_FROM_UNIX = int(os.getenv("SN89_MARKETS_SIGMA_SCALE_V2_FROM", "1792184400"))  # 2026-10-16 21:00 UTC
+MARKETS_SIGMA_SCALE_V2 = {"15m": _Decimal("1.30"), "1h": _Decimal("1.70")}
 # GRADE FROM THE RECORD (2026-10-13). A market's verdict depended on WHEN a validator looked: a window it
 # could not fetch on its first pass after end + GRADE_ABANDON_S voided the market for good (ADA 15m 10-12
 # 14:45: VOID live, DOWN on any rebuild; the validator grades once per weight cycle, ~80 min apart). For
