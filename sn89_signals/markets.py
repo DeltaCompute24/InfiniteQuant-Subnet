@@ -174,6 +174,11 @@ CAL_HOUR = 17
 CAL_WEEKDAY = 4                       # Friday (time.gmtime tm_wday, Monday = 0)
 
 
+def _ny_weekday(t: int) -> int:
+    """New York weekday (Monday = 0) at unix time t."""
+    return time.gmtime((int(t) + _ny_offset_s(int(t))) // 86400 * 86400).tm_wday
+
+
 def _ny_offset_s(t: int) -> int:
     y = time.gmtime(int(t)).tm_year
 
@@ -239,16 +244,20 @@ def market_exists(mid: str) -> bool:
     if window in config.MARKETS_CAL_WINDOWS:
         if not config.MARKETS_CAL_FROM_UNIX or start < config.MARKETS_CAL_FROM_UNIX:
             return False
-        if asset not in config.MARKETS_CAL_ASSETS.get(window, ()):
+        if asset not in config.markets_cal_assets(window, start):
             return False
         if config.markets_oracle_coin(asset, start) is None:
             return False                                       # oracle-settled only
+        days = config.MARKETS_CAL_START_WEEKDAYS.get((asset, window))
+        if days is not None and _ny_weekday(start) not in days:
+            return False
     board = hf.hf_bands_as_of(start) or {}
     row = board.get(asset)
     if row is None:
         return False
     cls = row[3]
-    if cls in sessions.SESSION_BOUND_CLASSES:
+    # an oracle-settled day or week is not session-checked: the start-weekday rule keeps it on a session
+    if cls in sessions.SESSION_BOUND_CLASSES and window not in config.MARKETS_CAL_WINDOWS:
         secs = end - start
         if sessions.open_seconds(start, secs / 3600.0) < secs:
             return False
@@ -679,9 +688,17 @@ def sigma_fallback(asset: str, start: int) -> Decimal:
     return config.MARKETS_V3_SIGMA_FALLBACK.get(cls, config.MARKETS_V3_SIGMA_DEFAULT)
 
 
-def sigma_day(start: int) -> int:
-    """The UTC day whose ticks size a market starting at `start`: the previous one."""
-    return (int(start) // 86400 - 1) * 86400
+def sigma_day(start: int, asset: str | None = None, window: str | None = None) -> int:
+    """The UTC day whose ticks size a market starting at `start`: the previous one. A calendar market on a
+    session-bound asset (gold) steps back past Saturday and Sunday to the last weekday, so a Sunday or
+    Monday start is not sized off a closed market."""
+    day = (int(start) // 86400 - 1) * 86400
+    if asset is not None and window in config.MARKETS_CAL_WINDOWS:
+        row = (hf.hf_bands_as_of(start) or {}).get(asset)
+        if row is not None and row[3] in sessions.SESSION_BOUND_CLASSES:
+            while time.gmtime(day).tm_wday >= 5:
+                day -= 86400
+    return day
 
 
 def scaled_sigma(mid: str, sigma: Decimal) -> Decimal:
@@ -2025,7 +2042,7 @@ def sigma_for_market(db: sqlite3.Connection, base: str, tick_dir: str, asset: st
         db.execute("INSERT OR REPLACE INTO v3_sigma_trail VALUES (?,?,?,?)", (asset, start, str(s), int(not missing)))
         db.commit()
         return s
-    day = sigma_day(start)
+    day = sigma_day(start, asset, window)
     row = db.execute("SELECT sigma FROM v3_sigma WHERE asset=? AND day=?", (asset, day)).fetchone()
     if row:
         return Decimal(row[0])

@@ -1422,6 +1422,25 @@ MARKETS_WINDOWS = {"15m": 900, "1h": 3600, "1d": 86400, "1w": 604800}
 MARKETS_CAL_WINDOWS = ("1d", "1w")
 MARKETS_CAL_FROM_UNIX = int(os.getenv("SN89_MARKETS_CAL_FROM", "1791666000"))   # 2026-10-10 17:00 EDT
 MARKETS_CAL_ASSETS = {"1d": ("BTCUSD",), "1w": ("BTCUSD",)}
+# GOLD DAY AND WEEK (Whit, 2026-10-17, asked for in the group chat). From the arm XAUUSD has daily and
+# weekly windows too, settled on the xyz:GOLD oracle. A gold day is listed only when it STARTS Sunday to
+# Thursday (New York date of the 5 pm start), so it ends at the 5 pm close of a gold session; Friday and
+# Saturday starts would span the weekend, when the oracle barely moves. A week is Friday close to Friday
+# close. An oracle-settled calendar window skips the FX-session check (which would bar any window that
+# crosses the 5-6 pm break or the weekend); the weekday rule above is what keeps a gold day on a session.
+MARKETS_CAL_GOLD_FROM_UNIX = int(os.getenv("SN89_MARKETS_CAL_GOLD_FROM", "1792357200"))  # 2026-10-18 17:00 EDT
+MARKETS_CAL_ASSETS_FROM_GOLD = {"1d": ("BTCUSD", "XAUUSD"), "1w": ("BTCUSD", "XAUUSD")}
+# New York weekday of the start (Mon=0 .. Sun=6) a calendar window may start on, by asset and window.
+MARKETS_CAL_START_WEEKDAYS = {("XAUUSD", "1d"): (6, 0, 1, 2, 3)}
+
+
+def markets_cal_assets(window: str, start: float) -> tuple:
+    """The assets with a `window` calendar market starting at `start`."""
+    if MARKETS_CAL_GOLD_FROM_UNIX and start >= MARKETS_CAL_GOLD_FROM_UNIX:
+        return MARKETS_CAL_ASSETS_FROM_GOLD.get(window, ())
+    return MARKETS_CAL_ASSETS.get(window, ())
+
+
 MARKETS_AVG_S = int(os.getenv("SN89_MARKETS_AVG_S", "60"))
 # ENTRY WINDOW — every bet is a pure forecast. A market accepts bets only in
 # [start - MARKETS_OPEN_LEAD_S, start - MARKETS_ENTRY_CLOSE_LEAD_S): it opens one window before
