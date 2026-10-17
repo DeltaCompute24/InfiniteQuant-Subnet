@@ -350,7 +350,7 @@ an estimate. Bets placed before the start work as before.
   $0.35 in fees.
 - A winning bet's stake and winnings are added to your balance at settlement and can be bet
   immediately. A losing bet's stake is lost.
-- Withdraw from the Markets page once your withdrawable balance is $100 or more. Choose USDC on
+- Withdraw from the Markets page once your withdrawable balance is $50 or more. Choose USDC on
   Arbitrum or SN89 alpha and enter your address. USDC withdrawals are sent within about 10 minutes.
 - A $200 betting credit is earned by inviting one new trader with your invite link, shown in the
   wallet panel on the Markets page. The credit is added once the invited trader creates an account
