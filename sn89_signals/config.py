@@ -230,10 +230,12 @@ SCORE_WINDOW_S = 30 * 24 * 3600     # ELIMINATION / reporting window: the traili
 
 # EMISSION decay window. A qualified win decays LINEARLY to zero over this span:
 # full tier weight at the moment it lands, zero once it is EMISSION_DECAY_S old.
-# One week — a win pays for a week and then it is gone, so a miner's share tracks
-# what it did THIS week, not what it did a month ago. Recency is the whole point:
-# emissions must follow current trading, and a stale book cannot coast.
-EMISSION_DECAY_S = int(os.getenv("SN89_EMISSION_DECAY_S", str(7 * 24 * 3600)))
+# 30 days since 2026-10-19 (Whit; was 7 days from 2026-07-22). At one week a miner
+# with a good record lost all emission after a quiet week and was pruned off the
+# subnet (Jeremiah, 2026-10-18); a month gives a longer tail. Not as-of gated, the
+# same as the 07-22 change: decay is evaluated against `now`, so no grade or banked
+# win changes, only what today's vector computes from them.
+EMISSION_DECAY_S = int(os.getenv("SN89_EMISSION_DECAY_S", str(30 * 24 * 3600)))
 
 # CAUSAL qualified-win window. A win banks only if the miner passed the gate "as
 # of" that win -- but the as-of window was built from every decisive call with an

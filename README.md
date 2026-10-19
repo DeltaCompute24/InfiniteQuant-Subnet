@@ -18,7 +18,7 @@ Bittensor subnet 89. Miners commit encrypted directional trade calls. Validators
 
 1. **COMMIT** — pick a pair + direction. The signal is encrypted with a 15-minute [drand](https://drand.love) timelock; `SHA256(signal)` goes on-chain via `set_commitment`. The commit block is the signal's timestamp. Entry price = the last anchored tick at or before that block's time, so every validator derives the same entry. Hosted and workspace miners see their entry, TP and SL within about 2 minutes, once that tick window seals.
 2. **REVEAL** — after 15 minutes the timelock opens. Validators verify the plaintext against the on-chain hash, then grade on the anchored ticks: TP touched first = **WON** · SL touched first = **LOST** · neither by the horizon = **WASH**.
-3. **EARN** — emissions ∝ trailing-7-day qualified wins (capped at 20) × hit-rate tier.
+3. **EARN** — emissions ∝ trailing-30-day qualified wins (capped at 20) × hit-rate tier.
 
 - A committed blob that never reveals is a decisive **LOSS**. Committing costs what revealing costs.
 - Candles are bad-tick sanitized (uncorroborated wicks clamped; crypto cross-checked against Hyperliquid). Forex/metals rollover bars [20:55–21:20 UTC] are dropped from grading.
@@ -46,11 +46,11 @@ QUALIFIED   = window decisive ≥ 8  AND  Wilson lower bound on true hit-rate �
               (~90% confidence you beat a coin flip — luck does not qualify)
 tier        = on a SHRUNK hit-rate (thin samples pulled toward 50%):
               QUALIFIED ≥ 55% → 1.0×  |  SHARP ≥ 60% → 1.2×  |  WOLF ≥ 70% → 2.0×
-your weight ∝ (your qualified wins × tier, each decaying linearly to 0 over 7 d, count-capped 20) / Σ same over all qualified
+your weight ∝ (your qualified wins × tier, each decaying linearly to 0 over 30 d, count-capped 20) / Σ same over all qualified
 ```
 
 - Reputation decays (~60 d / ~100 trades): old wins can't mask bad recent trading, and a bad early stretch ages out.
-- Wins decay linearly over 7 days and are capped at 20 — conviction outweighs volume.
+- Wins decay linearly over 30 days (7 days until 2026-10-19) and are capped at 20 — conviction outweighs volume.
 - **Warmup:** first 8 days = dust weight. Warmup trades build the record; warmup wins never pay. Post fresh wins after warmup to earn.
 - If no qualified miner has recent wins, emissions burn.
 
@@ -545,7 +545,7 @@ python tools/check_timelock.py
 
 LF is the only competition gated on opening a reveal, and a validator that
 cannot open the consensus format **fails silently**: reveals never open, no
-miner reaches `QUALIFY_MIN_DECISIVE` inside the 7-day `EMISSION_DECAY_S`
+miner reaches `QUALIFY_MIN_DECISIVE` inside the 30-day `EMISSION_DECAY_S`
 window, the LF earner set empties, and `combine()`'s dead-share rule burns
 LF's entire share. The only symptom is falling vtrust. If yours is falling,
 run the command above first.

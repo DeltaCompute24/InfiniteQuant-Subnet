@@ -493,7 +493,8 @@ class TestScoringScope:
         # is too slow where trades resolve in 30 min. In practice it just made the
         # fall-back 3.5x harsher than LF for the category most able to have one bad
         # session. Both mechanisms now decay at the same rate.
-        assert hf.HF_EMISSION_DECAY_S == config.EMISSION_DECAY_S == 7 * 24 * 3600
+        # 2026-10-19: both 30 days.
+        assert hf.HF_EMISSION_DECAY_S == config.EMISSION_DECAY_S == 30 * 24 * 3600
 
     def test_win_cap_does_not_bind_at_thirty_a_day(self):
         cap, _, _ = hf.hf_rules_as_of(0)
@@ -1375,7 +1376,7 @@ class TestHFEarningGate:
         assert hf.hf_compute_weights(*args).get(10, 0.0) <= config.DUST_WEIGHT
 
         # and LF's own constant was never touched by either call
-        assert config.EMISSION_DECAY_S == 7 * 24 * 3600
+        assert config.EMISSION_DECAY_S == 30 * 24 * 3600
 
     def test_config_never_leaks_after_the_call(self):
         from sn89_signals import config

@@ -1638,7 +1638,7 @@ def decayed_points_tally(calls: list[tuple[float, float]], now_unix: float) -> f
 
 def decayed_qwin_tally(qwins: list[tuple[float, float]], now_unix: float) -> float:
     """Time-decayed, tier-weighted tally of a miner's qualified wins — the emission
-    size. Each win decays LINEARLY to zero over EMISSION_DECAY_S (1 week): a win
+    size. Each win decays LINEARLY to zero over EMISSION_DECAY_S (30 days): a win
     posted now is worth its full tier weight, one EMISSION_DECAY_S old is worth 0. Only the most
     recent WIN_CAP live wins count (conviction over grind — beyond the cap, edge/
     tier differentiates, not raw volume). Relative quantity — compute_weights

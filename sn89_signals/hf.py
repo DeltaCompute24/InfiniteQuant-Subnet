@@ -1381,7 +1381,9 @@ def check_pair_open(prior_open_until_ms: list, t_ms: int, t0_unix: float) -> Non
 # what today's vector computes from them. A replay of a PAST block will not
 # reproduce the weights we committed before this change; that is inherent to any
 # decay-constant change and is why it belongs in one commit on master.
-HF_EMISSION_DECAY_S = int(os.getenv("SN89_HF_EMISSION_DECAY_S", str(7 * 24 * 3600)))
+# 30 days since 2026-10-19 (Whit), matching mech 0; the HF index retains 45 days
+# (SN89_HF_INDEX_RETAIN_DAYS), so a validator rebuilding from the feed still sees every live win.
+HF_EMISSION_DECAY_S = int(os.getenv("SN89_HF_EMISSION_DECAY_S", str(30 * 24 * 3600)))
 HF_WIN_CAP = int(os.getenv("SN89_HF_WIN_CAP", "200"))
 HF_QUALIFY_MIN_DECISIVE = config.QUALIFY_MIN_DECISIVE     # identical to mech 0
 HF_QUALIFY_LB_FLOOR = config.QUALIFY_LB_FLOOR             # identical to mech 0
