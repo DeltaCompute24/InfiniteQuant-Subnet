@@ -704,6 +704,9 @@ def sigma_day(start: int, asset: str | None = None, window: str | None = None) -
 def scaled_sigma(mid: str, sigma: Decimal) -> Decimal:
     """V3.4: the calibrated sigma a market is priced with (config.MARKETS_SIGMA_SCALE by window, from the arm)."""
     _a, window, start, _e = parse_market_id(mid)
+    if config.MARKETS_SIGMA_SCALE_V3_FROM_UNIX and start >= config.MARKETS_SIGMA_SCALE_V3_FROM_UNIX:
+        k = config.MARKETS_SIGMA_SCALE_V3_ASSET.get((_a, window), config.MARKETS_SIGMA_SCALE_V3.get(window))  # V3.6
+        return CTX.multiply(Decimal(sigma), k) if k is not None else sigma
     if config.MARKETS_SIGMA_SCALE_V2_FROM_UNIX and start >= config.MARKETS_SIGMA_SCALE_V2_FROM_UNIX:
         k = config.MARKETS_SIGMA_SCALE_V2.get(window)            # V3.5: the 1h re-fit
         return CTX.multiply(Decimal(sigma), k) if k is not None else sigma

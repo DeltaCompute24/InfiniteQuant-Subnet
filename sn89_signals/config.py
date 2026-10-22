@@ -1854,6 +1854,21 @@ MARKETS_SIGMA_SCALE = {"15m": _Decimal("1.30"), "1h": _Decimal("1.20")}
 # Markets starting at/after this arm use MARKETS_SIGMA_SCALE_V2; earlier ones keep MARKETS_SIGMA_SCALE. 0 = off.
 MARKETS_SIGMA_SCALE_V2_FROM_UNIX = int(os.getenv("SN89_MARKETS_SIGMA_SCALE_V2_FROM", "1792184400"))  # 2026-10-16 21:00 UTC
 MARKETS_SIGMA_SCALE_V2 = {"15m": _Decimal("1.30"), "1h": _Decimal("1.70")}
+# V3.6 DAY/WEEK SIGMA (Whit, 2026-10-19). 1d/1w markets were priced with the previous UTC day's 1-minute sigma
+# and NO scale. Smoothed 1-minute marks understate a day's move, so the model was overconfident: BTC 1d 10-12 priced
+# UP at 1% with 20 h left and those bets paid 27-28x; players +105% on 1d from 10-10 until 1d/1w were paused 10-13.
+# Fit on the sealed ticks 2026-07-24..10-10 (78 day starts, spot every 30 min / 4 h, p_model as deployed):
+#   BTC 1d: log-loss best at k=2.0 (1.5-2.5 flat); at k=1 the 0.8-0.9 bin won 0.77 vs priced 0.85, the 0.9+ bin
+#           0.89 vs 0.97; at k=2.0 0.84/0.85 and 0.97/0.97. rms(z) 1.87 (halves 2.04 / 1.68).
+#   BTC 1w: log-loss best at k=1.5 (2.0 within 0.005); only ~11 independent weeks and the halves disagree.
+# Out of sample 2026-10-10..10-21 (re-checked 10-22 before arming): BTC 1d unscaled 0.7-0.8 bin won 0.47 vs
+# priced 0.75, 0.8-0.9 won 0.60 vs 0.85; best k=2 again (11 day starts). BTC 1w 5 weeks only, best k=1. Gold 1d OOS
+# also best k=2 on 8 starts, against k=1 in sample; gold left at 1.0 until more days settle.
+# Markets starting at/after this arm use MARKETS_SIGMA_SCALE_V3 (asset overrides in MARKETS_SIGMA_SCALE_V3_ASSET);
+# earlier markets replay exactly as priced. 0 = off.
+MARKETS_SIGMA_SCALE_V3_FROM_UNIX = int(os.getenv("SN89_MARKETS_SIGMA_SCALE_V3_FROM", "1792702800"))  # 2026-10-22 21:00 UTC
+MARKETS_SIGMA_SCALE_V3 = {"15m": _Decimal("1.30"), "1h": _Decimal("1.70"), "1d": _Decimal("2.0"), "1w": _Decimal("1.5")}
+MARKETS_SIGMA_SCALE_V3_ASSET = {("XAUUSD", "1d"): _Decimal("1.0"), ("XAUUSD", "1w"): _Decimal("1.0")}
 # GRADE FROM THE RECORD (2026-10-13). A market's verdict depended on WHEN a validator looked: a window it
 # could not fetch on its first pass after end + GRADE_ABANDON_S voided the market for good (ADA 15m 10-12
 # 14:45: VOID live, DOWN on any rebuild; the validator grades once per weight cycle, ~80 min apart). For
