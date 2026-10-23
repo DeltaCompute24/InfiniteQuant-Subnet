@@ -673,6 +673,30 @@ EFFICIENCY_PRIOR_K = int(os.getenv("SN89_EFFICIENCY_PRIOR_K", "40"))
 
 IMMUNITY_S = int(os.getenv("SN89_IMMUNITY_S", str(8 * 24 * 3600)))  # from first commit observed for the hotkey
 DUST_WEIGHT = 1e-4                  # normalized floor during immunity
+# KEEP-ALIVE FLOOR (Whit, 2026-10-23). The chain protects a new UID for 5,000 blocks
+# (~16.7 h) and then, the subnet being full, prunes a low-weight UID at every new
+# registration. Two holes left a live miner at exactly zero inside that system:
+#   1. the warmup dust above runs from the hotkey's FIRST commit ever, so a hotkey
+#      that re-registers gets no warmup at all and, unless it is qualified that
+#      instant, is pruned once the 16.7 h are up (Mahmoud, deregistered twice);
+#   2. after warmup a miner keeps a floor only if it has qualified at some point, so
+#      an active miner still short of the qualify gate goes to zero and is pruned.
+# From the arm, the LF vector also gives DUST_WEIGHT to any registered miner that is
+# not otherwise earning and EITHER registered its current UID within
+# KEEPALIVE_REG_BLOCKS (IMMUNITY_S of 12 s blocks) OR made a non-void LF call or an
+# accepted HF call within KEEPALIVE_ACTIVE_S. Eliminated, struck and copy-zeroed
+# miners get nothing, as before. Pruning then falls on inactive UIDs. A miner's record
+# is untouched: it is keyed by hotkey, so a returning hotkey keeps every win.
+# Cost: at most DUST_WEIGHT of the LF pool per kept UID; farming it costs a
+# registration burn per UID for ~1e-4 of a share. Inputs are on chain (registration
+# block at the commit block) or in the public journal / HF receipts, so it replays.
+KEEPALIVE_FROM_UNIX = int(os.getenv("SN89_KEEPALIVE_FROM", "1792771200"))  # 2026-10-23 16:00 UTC; 0 = off
+KEEPALIVE_ACTIVE_S = int(os.getenv("SN89_KEEPALIVE_ACTIVE_S", str(3 * 24 * 3600)))
+KEEPALIVE_REG_BLOCKS = IMMUNITY_S // 12
+
+
+def keepalive_active(now_unix: float) -> bool:
+    return bool(KEEPALIVE_FROM_UNIX) and now_unix >= KEEPALIVE_FROM_UNIX
 # Probation grace: a QUALIFIED miner that currently earns zero emission keeps the
 # dust floor for this long instead of dropping straight to nothing. Covers (a) a
 # miner whose earning wins have aged out of the decay window (was earning, now 0)

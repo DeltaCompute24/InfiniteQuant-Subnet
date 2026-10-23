@@ -934,7 +934,8 @@ def compute_weights(states: list[MinerState], now_unix: float,
                     referral_suspended: set[str] | None = None,
                     use_points: bool | None = None,
                     probation_only: list[MinerState] | None = None,
-                    warmup_uids: set[int] | None = None) -> dict[int, float]:
+                    warmup_uids: set[int] | None = None,
+                    keepalive_uids: set[int] | None = None) -> dict[int, float]:
     """{uid: normalized_weight}. Immune miners get the dust floor; the pool is
     split across miners by a time-decayed, tier-weighted tally of their QUALIFIED
     wins (a relative competition of recent qualified wins); a probation dust floor
@@ -1136,6 +1137,16 @@ def compute_weights(states: list[MinerState], now_unix: float,
             _base = base
             base = {hk: (v * keep if (hk in cut and v > 0) else v)
                     for hk, v in _base.items()}
+
+    # ── keep-alive floor (config.KEEPALIVE_*) ───────────────────────────────────
+    # Freshly (re)registered or recently active miners that would otherwise get
+    # nothing. The caller has already dropped eliminated and struck hotkeys; a
+    # miner earning a share is skipped because that share keeps it registered.
+    earning_uids = {s.uid for s in states if s.uid not in excluded_uids and eff(s) > 0}
+    for uid in sorted(keepalive_uids or ()):
+        if uid in excluded_uids or uid in weights or uid in earning_uids or uid == burn_uid:
+            continue
+        weights[uid] = config.DUST_WEIGHT
 
     # ── distribute the pool by decayed qualified-win tally (relative share) ──────
     earners = [s for s in states if s.uid not in excluded_uids and eff(s) > 0]

@@ -808,8 +808,28 @@ class Validator:
             for r, c, cb, rb in self.db.execute(
                 "SELECT recruiter_hk, recruit_hk, commit_block, recruit_reg_block "
                 "FROM referrals")]
+        keepalive = None
+        if config.keepalive_active(now):
+            calls: dict = {}
+            for r in sig_rows:
+                if r["status"] != "void":
+                    calls.setdefault(r["hotkey"], []).append(r["t0_unix"])
+            try:
+                for hk, ts in hf_grade.mecid1_call_times(now).items():
+                    calls.setdefault(hk, []).extend(ts)
+            except Exception as e:  # noqa: BLE001 — LF activity still counts
+                print(f"  ! keep-alive: HF call times unavailable, LF only: {e}")
+            try:
+                reg = {i: int(b) for i, b in enumerate(mg.block_at_registration)}
+            except (AttributeError, TypeError, ValueError) as e:
+                print(f"  ! keep-alive: no registration blocks, activity only: {e}")
+                reg = {}
+            keepalive = replay.keepalive_uids(uid_by_hotkey, now, block, reg, calls)
         w = replay.weights_from_journal(sig_rows, meta, uid_by_hotkey, now,
-                                        referrals=referral_rows)
+                                        referrals=referral_rows, keepalive=keepalive)
+        if keepalive is not None:
+            print(f"  ♥ keep-alive: {len(keepalive)} uids eligible "
+                  f"(floor goes to those not otherwise earning)")
 
         # ── unified multi-competition path (competitions.py) ────────────────
         # LF/HF/Closers each produce their own normalized vector; the blend is

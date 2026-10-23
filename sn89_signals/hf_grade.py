@@ -753,6 +753,20 @@ def mecid1_weights(uid_by_hk: dict, now: float | None = None,
                                  prior_sigma_for=beta_carry.carry_sigma_for)
 
 
+def mecid1_call_times(now: float | None = None, base: str | None = None,
+                      cache_dir: str | None = None) -> dict:
+    """{hotkey: [t0_unix]} of every ACCEPTED HF submission known at `now`, from
+    the public logs (config.KEEPALIVE_*). Wash and void included: the question
+    is whether the miner is active, not whether the call scored."""
+    now = time.time() if now is None else now
+    base = base or hf.HF_PUBLIC_BASE
+    cache_dir = cache_dir or os.path.expanduser(
+        os.getenv("SN89_HF_GRADE_CACHE", "~/.sn89/hf-grade"))
+    sync_and_grade(base, cache_dir, now)
+    _dec, _fs, subs, _graded, _washes = _history(cache_dir, as_of=now)
+    return {hk: [t0_ms / 1000.0 for t0_ms, *_ in rows] for hk, rows in subs.items()}
+
+
 def mecid1_tallies(uid_by_hk: dict, now: float | None = None,
                    base: str | None = None, cache_dir: str | None = None) -> dict:
     """{hotkey: raw HF tally} — the same pipeline as mecid1_weights, stopping

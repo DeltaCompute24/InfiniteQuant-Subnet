@@ -26,9 +26,14 @@ def weights_from_journal(
     uid_by_hotkey: dict[str, int],
     now: float,
     referrals: list[dict] | None = None,
+    keepalive: set[int] | None = None,
 ) -> dict[int, float]:
     """Re-derive {uid: weight} from a published journal, identically to the
     validator. PURE.
+
+    keepalive: uids from keepalive_uids() (config.KEEPALIVE_*). Eliminated and
+             struck hotkeys are removed from it here. None → byte-identical to
+             the pre-keep-alive output.
 
     signals: each {commit_hex, hotkey, t0_unix, status, plaintext}. `status` is the
              grade (won|lost|washed|void|pending|...); `plaintext` is the revealed
@@ -144,9 +149,16 @@ def weights_from_journal(
             referral_suspended |= set(scoring.referral_pair_followers(
                 ref_rows, recruiter, recruit, now))
 
+    if keepalive:
+        struck = {hk for hk, m in meta.items()
+                  if int(m.get("strikes") or 0) >= config.STRIKE_LIMIT}
+        keepalive = set(keepalive) - {uid_by_hotkey[hk] for hk in eliminated_hk | struck
+                                      if hk in uid_by_hotkey}
+
     return scoring.compute_weights(states, now, excluded_uids=excluded_uids,
                                    referral_pairs=referral_pairs,
                                    referral_suspended=referral_suspended,
+                                   keepalive_uids=keepalive,
                                    # LF folds into the points scheme later; until it
                                    # does, arming points must not zero its field.
                                    use_points=False)
@@ -431,3 +443,28 @@ def combined_weights_from_journal(
     detail.update({"hf": vectors["hf"], "closers": vectors["closers"],
                    "shares": shares, "combined": True, "qualified_n": len(qual)})
     return _competitions.combine(vectors, shares), detail
+
+
+def keepalive_uids(uid_by_hotkey: dict[str, int], now: float, block: int,
+                   reg_block_by_uid: dict[int, int],
+                   call_times_by_hk: dict[str, list[float]]) -> set[int]:
+    """UIDs owed the keep-alive floor at (now, block). PURE.
+
+    reg_block_by_uid: the chain's BlockAtRegistration per uid, read at `block`.
+    call_times_by_hk: unix t0 of each non-void LF call and each accepted HF call.
+    Empty before config.KEEPALIVE_FROM_UNIX.
+    """
+    if not config.keepalive_active(now):
+        return set()
+    lo = now - config.KEEPALIVE_ACTIVE_S
+    out: set[int] = set()
+    for hk, uid in uid_by_hotkey.items():
+        if uid == config.BURN_UID:
+            continue
+        rb = reg_block_by_uid.get(uid)
+        if rb is not None and 0 <= block - int(rb) < config.KEEPALIVE_REG_BLOCKS:
+            out.add(uid)
+            continue
+        if any(lo <= t <= now for t in call_times_by_hk.get(hk, ())):
+            out.add(uid)
+    return out
