@@ -144,15 +144,22 @@ COMMIT_LOCK = "/run/lock/sn89-entity-commit.lock"
 COMMIT_MIN_GAP_S = 2 * config.POLL_INTERVAL_S
 
 
+def _last_commit(path: str) -> float:
+    """Wall-clock time of the last commit by any writer, written INTO the `.last` file.
+    Not its mtime: Linux stamps mtime from a coarse clock that can trail time.time() by a
+    few ms, which made the enforced gap come up short (caught by the iq-main test run)."""
+    try:
+        with open(path + ".last") as f:
+            return float(f.read().strip() or 0.0)
+    except (OSError, ValueError):
+        return 0.0
+
+
 def slot_ready(path: str = COMMIT_LOCK, min_gap_s: float = COMMIT_MIN_GAP_S) -> bool:
     """Non-blocking check for a caller that must not stall (the multiplexer's loop also
     carries HF latency): True when commit_slot() would not have to wait for the gap."""
-    import os
     import time
-    try:
-        return time.time() - os.path.getmtime(path + ".last") >= min_gap_s
-    except OSError:
-        return True
+    return time.time() - _last_commit(path) >= min_gap_s
 
 
 class commit_slot:
@@ -168,20 +175,19 @@ class commit_slot:
         import time
         self.fh = open(self.path, "a+")
         fcntl.flock(self.fh, fcntl.LOCK_EX)
-        try:
-            last = os.path.getmtime(self.path + ".last")
-        except OSError:
-            last = 0.0
-        wait = last + self.min_gap_s - time.time()
-        if wait > 0:
+        while True:                                   # sleep can return early; re-check
+            wait = _last_commit(self.path) + self.min_gap_s - time.time()
+            if wait <= 0:
+                break
             time.sleep(wait)
         return self
 
     def __exit__(self, *exc):
         import fcntl
+        import time
         try:
             with open(self.path + ".last", "w") as f:
-                f.write("1")
+                f.write(repr(time.time()))
         finally:
             fcntl.flock(self.fh, fcntl.LOCK_UN)
             self.fh.close()
