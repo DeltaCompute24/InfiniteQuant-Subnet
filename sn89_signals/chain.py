@@ -33,7 +33,8 @@ _RE = re.compile(rf"^{_PREFIX}:(\d+):([0-9a-f]{{64}}):(\d+):([0-9a-f]{{16}})$")
 # commit_block + REFERRAL_MIN_LEAD_BLOCKS <= recruit registration block.
 _REF_PREFIX = "sn89ref"
 _REF_V = 1
-_REF_RE = re.compile(rf"^{_REF_PREFIX}:(\d+):(5[1-9A-HJ-NP-Za-km-z]{{46,50}})$")
+# The recruit may be an entity account `<hk>_<n>` (config.SIGNALS_ENTITY_*): ~68 bytes.
+_REF_RE = re.compile(rf"^{_REF_PREFIX}:(\d+):(5[1-9A-HJ-NP-Za-km-z]{{46,50}}(?:_\d{{1,9}})?)$")
 
 # Referral-base TRANSFER (§ referrer mechanism): the ORIGINAL recruiter hotkey
 # commits "sn89refx:1:<new_recruiter_ss58>" to hand its whole referral base to
@@ -55,6 +56,33 @@ _REFS_PREFIX = "sn89refs"
 _REFS_V = 1
 _REFS_RE = re.compile(rf"^{_REFS_PREFIX}:(\d+):(5[1-9A-HJ-NP-Za-km-z]{{46,50}})"
                       rf":(5[1-9A-HJ-NP-Za-km-z]{{46,50}})$")
+
+# Entity BATCH (config.SIGNALS_ENTITY_*): an allow-listed entity hotkey commits
+# "sn89b:1:<root>:<round>:<url_tag>" where root is the Merkle root (hf.merkle_root)
+# over sha256(plaintext) of every account call in the batch, in blob order. One
+# commitment carries many accounts' LF calls, because CommitmentOf is one slot per
+# hotkey and MaxSpace (3100 B per tempo) allows ~28 commitments per hotkey per tempo.
+# Every call in the batch takes the batch's inclusion block as T0. ~98 raw bytes.
+# Validators that predate this decode nothing from it and ignore it.
+_BATCH_PREFIX = "sn89b"
+_BATCH_V = 1
+_BATCH_RE = re.compile(rf"^{_BATCH_PREFIX}:(\d+):([0-9a-f]{{64}}):(\d+):([0-9a-f]{{16}})$")
+
+# Entity ACCOUNT OPEN: an allow-listed entity commits "sn89acct:1:<n>" when it opens
+# account `<entity_hk>_<n>`. Its inclusion block is the account's registration block
+# for the referral lead check (an account has no UID, so it has no BlockAtRegistration).
+# Journaled once, first sighting kept, so re-committing cannot move it.
+_ACCT_PREFIX = "sn89acct"
+_ACCT_V = 1
+_ACCT_RE = re.compile(rf"^{_ACCT_PREFIX}:(\d+):(\d{{1,9}})$")
+
+# Entity ACCOUNT RECRUITER: "sn89refa:1:<n>:<recruit>" from an allow-listed entity is
+# a referral claim whose recruiter is the account `<entity_hk>_<n>`. Same journal and
+# same validity rules as sn89ref; the entity signs because an account holds no key.
+_REFA_PREFIX = "sn89refa"
+_REFA_V = 1
+_REFA_RE = re.compile(rf"^{_REFA_PREFIX}:(\d+):(\d{{1,9}}):"
+                      rf"(5[1-9A-HJ-NP-Za-km-z]{{46,50}}(?:_\d{{1,9}})?)$")
 
 
 def url_tag(url: str) -> str:
@@ -85,6 +113,51 @@ def decode_commitment(data: str) -> dict | None:
     return {"commit": commit_hex, "round": rnd, "url_tag": tag}
 
 
+def encode_batch(root_hex: str, rnd: int, blob_url: str) -> str:
+    return f"{_BATCH_PREFIX}:{_BATCH_V}:{root_hex}:{rnd}:{url_tag(blob_url)}"
+
+
+def decode_batch(data: str) -> dict | None:
+    m = _BATCH_RE.match(data.strip())
+    if not m:
+        return None
+    v, root, rnd, tag = m.groups()
+    rnd = int(rnd)
+    if int(v) != _BATCH_V or not 0 < rnd < 2**63:
+        return None
+    # `commit` is the batch root: it keys the journal row exactly like a signal's
+    # commit hash, so ingest, blob fetch and dedup need no special case.
+    return {"commit": root, "round": rnd, "url_tag": tag}
+
+
+def encode_account_open(n: int) -> str:
+    return f"{_ACCT_PREFIX}:{_ACCT_V}:{int(n)}"
+
+
+def decode_account_open(data: str) -> dict | None:
+    m = _ACCT_RE.match(data.strip())
+    if not m or int(m.group(1)) != _ACCT_V:
+        return None
+    return {"n": int(m.group(2))}
+
+
+def encode_account_referral(n: int, recruit: str) -> str:
+    return f"{_REFA_PREFIX}:{_REFA_V}:{int(n)}:{recruit}"
+
+
+def decode_account_referral(data: str) -> dict | None:
+    m = _REFA_RE.match(data.strip())
+    if not m or int(m.group(1)) != _REFA_V:
+        return None
+    recruit = m.group(3)
+    try:
+        from scalecodec.utils.ss58 import ss58_decode
+        ss58_decode(recruit.split("_", 1)[0])
+    except Exception:  # noqa: BLE001
+        return None
+    return {"n": int(m.group(2)), "recruit": recruit}
+
+
 def encode_referral(recruit_ss58: str) -> str:
     return f"{_REF_PREFIX}:{_REF_V}:{recruit_ss58}"
 
@@ -102,7 +175,7 @@ def decode_referral(data: str) -> dict | None:
         return None
     try:
         from scalecodec.utils.ss58 import ss58_decode
-        ss58_decode(recruit)
+        ss58_decode(recruit.split("_", 1)[0])   # an account checksums on its entity hotkey
     except Exception:  # noqa: BLE001 — bad checksum / not an AccountId
         return None
     return {"recruit": recruit}
@@ -161,6 +234,18 @@ def _decode_any(data: str | None) -> dict | None:
     if dec:
         dec["kind"] = "signal"
         return dec
+    bat = decode_batch(data)
+    if bat:
+        bat["kind"] = "batch"
+        return bat
+    acct = decode_account_open(data)
+    if acct:
+        acct["kind"] = "account_open"
+        return acct
+    refa = decode_account_referral(data)
+    if refa:
+        refa["kind"] = "account_referral"
+        return refa
     ref = decode_referral(data)
     if ref:
         ref["kind"] = "referral"
@@ -294,6 +379,28 @@ class Chain:
         # unblocks the per-tenant commit loop, cutting cross-tenant serialization latency.
         return self.st.set_commitment(wallet=wallet, netuid=self.netuid, data=data,
                                       wait_for_finalization=False)
+
+    def commit_batch(self, wallet: "bt.Wallet", root_hex: str, rnd: int, blob_url: str) -> bool:
+        """Entity batch commitment (see _BATCH_PREFIX). Inclusion is T0, as for commit()."""
+        from . import entity
+        with entity.commit_slot():                 # shared with the Markets oracle anchor
+            return self.st.set_commitment(wallet=wallet, netuid=self.netuid,
+                                          data=encode_batch(root_hex, rnd, blob_url),
+                                          wait_for_finalization=False)
+
+    def commit_account_open(self, wallet: "bt.Wallet", n: int) -> bool:
+        from . import entity
+        with entity.commit_slot():
+            return self.st.set_commitment(wallet=wallet, netuid=self.netuid,
+                                          data=encode_account_open(n),
+                                          wait_for_finalization=False)
+
+    def commit_account_referral(self, wallet: "bt.Wallet", n: int, recruit: str) -> bool:
+        from . import entity
+        with entity.commit_slot():
+            return self.st.set_commitment(wallet=wallet, netuid=self.netuid,
+                                          data=encode_account_referral(n, recruit),
+                                          wait_for_finalization=False)
 
     def commit_referral_transfer(self, wallet: "bt.Wallet", to_ss58: str) -> bool:
         """One-time referral-base transfer commitment (sn89refx). IRREVERSIBLE

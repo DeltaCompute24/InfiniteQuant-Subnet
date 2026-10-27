@@ -192,6 +192,49 @@ def submit(wallet: "bt.Wallet", sig: Signal, ch: chain.Chain | None = None) -> d
     }
 
 
+def submit_batch(wallet: "bt.Wallet", sigs: list[Signal],
+                 ch: chain.Chain | None = None) -> dict:
+    """Entity LF batch (config.SIGNALS_ENTITY_*): many accounts' calls under ONE
+    commitment. Each Signal's `hotkey` is an account `<entity_hk>_<n>` of this
+    wallet's hotkey. Every call is timelocked on its own exactly as submit() does it;
+    the commitment is the Merkle root over their commit hashes, and every call takes
+    the batch's inclusion block as T0. The validator opens a batch all or nothing."""
+    from sn89_signals import entity
+    ch = ch or chain.Chain()
+    ent = wallet.hotkey.ss58_address
+    if not sigs or len(sigs) > entity.BATCH_MAX_ITEMS:
+        raise ValueError(f"batch needs 1..{entity.BATCH_MAX_ITEMS} calls, got {len(sigs)}")
+    for s in sigs:
+        parsed = entity.parse(s.hotkey)
+        if parsed is None or parsed[0] != ent:
+            raise ValueError(f"{s.hotkey} is not an account of {ent}")
+    pts = [s.canonical_bytes() for s in sigs]
+    rnd = crypto.target_round(time.time() + config.REVEAL_DELAY_S)
+    items = [crypto.encrypt(pt, s.hotkey, rnd, config.OWNER_PK_HEX) for pt, s in zip(pts, sigs)]
+    root = entity.batch_root(pts)
+    blob = {"v": 1, "kind": entity.BATCH_KIND, "hk": ent, "round": rnd,
+            "owner_pk": config.OWNER_PK_HEX, "items": items}
+    nonce = f"batch-{root[:32]}"
+    size = len(json.dumps(blob, separators=(",", ":")))
+    if size > entity.BATCH_RELAY_MAX_BYTES:
+        raise ValueError(f"batch blob {size} B exceeds the relay cap; send fewer calls per batch")
+    url = bucket.upload(blob, ent, nonce)
+    bucket.update_index(ent, nonce)
+    pushed = bucket.mirror_to_relay(blob, ent, nonce) if (
+        bucket.BLOB_DIR or config.R2_ACCESS_KEY_ID) else True
+    ok = ch.commit_batch(wallet, root, rnd, url)
+    return {
+        "ok": bool(ok),
+        "root": root,
+        "round": rnd,
+        "reveals_at_utc": time.strftime(
+            "%Y-%m-%dT%H:%M:%SZ", time.gmtime(crypto.round_time(rnd))),
+        "blob_url": url,
+        "pushed": bool(pushed),
+        "calls": [{"account": s.hotkey, "commitment": entity.batch_leaf(pt).hex(),
+                   "nonce": s.nonce} for s, pt in zip(sigs, pts)],
+    }
+
 
 def _hf_seq_path(hotkey: str) -> str:
     return os.path.expanduser(f"~/.sn89/hf_seq_{hotkey}.json")
@@ -209,7 +252,7 @@ def _hf_next_seq(hotkey: str) -> int:
     return hf.next_submit_seq(_hf_seq_path(hotkey))
 
 
-def submit_hf(wallet: "bt.Wallet", pair: str, direction: str) -> dict:
+def submit_hf(wallet: "bt.Wallet", pair: str, direction: str, account: str | None = None) -> dict:
     """Submit one HF call to the ingest and return the signed receipt.
 
     Unlike LF (an on-chain commit), HF binds via a countersigned receipt over a
@@ -238,6 +281,9 @@ def submit_hf(wallet: "bt.Wallet", pair: str, direction: str) -> dict:
     ts_ms = int(now * 1000)
     payload = {"trade_pair": pair, "direction": direction, "asset_class": cls,
                "tp_bps": tp, "sl_bps": sl, "horizon_s": horizon_s}
+    if account:
+        # Entity call (config.SIGNALS_ENTITY_*): scored under the account, signed by the entity.
+        payload["account"] = account
     sb = hf.submit_signing_bytes(hk, seq, nonce, payload, ts_ms)
     frame = {"v": 1, "kind": "hf.submit", "hk": hk, "seq": seq, "nonce": nonce,
              "ts_miner": ts_ms, "payload": payload, "sig": wallet.hotkey.sign(sb).hex()}

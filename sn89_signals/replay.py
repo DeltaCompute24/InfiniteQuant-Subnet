@@ -16,7 +16,7 @@ call this directly; until then, mirror any change here).
 """
 from __future__ import annotations
 
-from . import config, scoring
+from . import config, entity, scoring
 from .schema import Signal
 
 
@@ -47,6 +47,12 @@ def weights_from_journal(
              config.REFERRAL_ENABLED. Default None → byte-identical to the
              pre-referral output.
     """
+    # Entity accounts (config.SIGNALS_ENTITY_*) score as their own miners and resolve
+    # to the entity's UID here. Every UID-keyed sanction below must skip them: one
+    # account's sanction applied to the shared UID would zero every other account.
+    uid_by_hotkey = entity.with_accounts(uid_by_hotkey, set(meta))
+    is_account = lambda hk: entity.parse(hk) is not None  # noqa: E731
+
     # ── re-derive eliminations from the decisive history (don't trust the journal) ─
     decisive_by_hk: dict[str, list[tuple[float, bool, bool]]] = {}
     for s in signals:
@@ -88,7 +94,9 @@ def weights_from_journal(
     # sharp 1:1 shadowing signature — now also gates the copied-win strip (§7.5)
     shadow_hk = scoring.flagged_copier_hotkeys(reports)
     flagged_hk = shadow_hk if config.COPY_ZERO_WEIGHT else set()
-    excluded_uids = {uid_by_hotkey[h] for h in flagged_hk if h in uid_by_hotkey}
+    excluded_uids = {uid_by_hotkey[h] for h in flagged_hk
+                     if h in uid_by_hotkey and not is_account(h)}
+    flagged_accounts = {h for h in flagged_hk if is_account(h)}
 
     # ── build MinerStates (skip struck + eliminated) and score ───────────────────
     states = []
@@ -100,6 +108,8 @@ def weights_from_journal(
             continue
         if hk in eliminated_hk:
             continue
+        if hk in flagged_accounts:
+            continue                       # a flagged copier account earns nothing
         # decisive history with the FRESHLY re-derived is_copy (copy-window rows
         # override; outside-window rows keep their journaled is_copy).
         decisive = []
@@ -153,7 +163,7 @@ def weights_from_journal(
         struck = {hk for hk, m in meta.items()
                   if int(m.get("strikes") or 0) >= config.STRIKE_LIMIT}
         keepalive = set(keepalive) - {uid_by_hotkey[hk] for hk in eliminated_hk | struck
-                                      if hk in uid_by_hotkey}
+                                      if hk in uid_by_hotkey and not is_account(hk)}
 
     return scoring.compute_weights(states, now, excluded_uids=excluded_uids,
                                    referral_pairs=referral_pairs,
@@ -315,6 +325,8 @@ def referrer_weights_from_journal(
     pairs = scoring.apply_referral_transfers(orig, referral_transfers or [])
     if not pairs:
         return {config.BURN_UID: 1.0}
+    # A recruiter that is an entity account is paid through its entity's UID.
+    uid_by_hotkey = entity.with_accounts(uid_by_hotkey, {r for r, _ in pairs})
 
     # Pair no-copy gate, recruiter side. mecid-1 is the ONLY referrer bonus that
     # still pays (the in-band 20% retired 2026-08-03), so this is where a
@@ -468,3 +480,48 @@ def keepalive_uids(uid_by_hotkey: dict[str, int], now: float, block: int,
         if any(lo <= t <= now for t in call_times_by_hk.get(hk, ())):
             out.add(uid)
     return out
+
+
+def entity_split(lf_fn, hf_fn, markets_vec: dict | None, shares: dict,
+                 uid_by_hotkey: dict[str, int], accounts) -> dict:
+    """How an entity UID's weight divides between Markets and each signals account.
+    NOT consensus: it decides nothing on chain. It exists so the entity can pay each
+    account its part of what the UID receives.
+
+    lf_fn(uid_map) / hf_fn(uid_map) return the LF / HF vectors for a uid map. They are
+    re-run with every account on its own pseudo-uid (negative ints, never on chain), so
+    each account's part is measured by the same code that pays the entity. Returns
+    {entity_hk: {"uid", "markets", "accounts": {account: part}, "markets_frac"}}.
+    Parts are in combined-vector units before the final normalisation."""
+    out: dict = {}
+    accounts = sorted(accounts)
+    pseudo = {a: -(i + 1) for i, a in enumerate(accounts)}
+    m = dict(uid_by_hotkey)
+    m.update(pseudo)
+    vecs = {"lf": lf_fn(m) if shares.get("lf", 0) > 0 else None,
+            "hf": hf_fn(m) if shares.get("hf", 0) > 0 else None}
+
+    def _norm(v):
+        if not v:
+            return {}
+        t = sum(v.values())
+        return {u: x / t for u, x in v.items()} if t > 0 else {}
+    nv = {k: _norm(v) for k, v in vecs.items()}
+    nm = _norm(markets_vec)
+    for ent in config.SIGNALS_ENTITY_HOTKEYS:
+        uid = uid_by_hotkey.get(ent)
+        if uid is None:
+            continue
+        acc = {}
+        for a in accounts:
+            if entity.parse(a)[0] != ent:
+                continue
+            part = sum(shares.get(k, 0) * nv[k].get(pseudo[a], 0.0) for k in ("lf", "hf"))
+            if part > 0:
+                acc[a] = part
+        mk = shares.get("markets", 0) * nm.get(uid, 0.0)
+        total = mk + sum(acc.values())
+        out[ent] = {"uid": uid, "markets": mk, "accounts": acc,
+                    "markets_frac": (mk / total) if total > 0 else 1.0}
+    return out
+

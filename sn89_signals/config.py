@@ -697,6 +697,36 @@ KEEPALIVE_REG_BLOCKS = IMMUNITY_S // 12
 
 def keepalive_active(now_unix: float) -> bool:
     return bool(KEEPALIVE_FROM_UNIX) and now_unix >= KEEPALIVE_FROM_UNIX
+
+
+# SIGNALS ENTITY ACCOUNTS (Whit, 2026-10-27). The subnet is full at 256 UIDs and every
+# registration prunes the lowest-weighted UID, usually a hosted miner still in warmup.
+# From the arm, an allow-listed ENTITY hotkey may submit an HF call for a subaccount by
+# putting `account: "<entity_hk>_<n>"` in the signed payload. The call is graded and
+# gated exactly as if the account were its own hotkey (records, rate caps, open-position
+# and diversity gates are all per account), and the entity's UID receives the SUM of
+# what its accounts earn. A subaccount holds no slot, so it cannot be deregistered.
+# The allow-list is what stops one UID from minting unlimited free accounts: each extra
+# account would otherwise be a free lottery ticket against the qualify gate, where today
+# every ticket costs a registration. Both values live here and not in an env file, so
+# every validator replaying master computes the same vector.
+# Spec: SN89-SIGNALS-ENTITY-SPEC.md. LF is not covered yet (one commitment slot per hotkey).
+SIGNALS_ENTITY_FROM = int(os.getenv("SN89_SIGNALS_ENTITY_FROM", "1793145600"))  # 2026-10-28T00:00:00Z; 0 = off
+SIGNALS_ENTITY_HOTKEYS: frozenset = frozenset({
+    # IQ Markets entity (UID 39 since ~2026-10-21; was UID 199 until pruned). One
+    # account id per verified web account, shared with Markets: `<hk>_<n>` is the
+    # same person in both competitions.
+    "5Hdvy1Msc9Su6U7kcJQRFnc39NNVumAcPnqFLoHqZ4Uix6g3",
+})
+
+
+# Where OUR validator appends each weight cycle's entity split (replay.entity_split), read
+# by the Markets payout cycle to pay each account its part. Not consensus.
+ENTITY_SPLIT_PATH = os.getenv("SN89_ENTITY_SPLIT_PATH", os.path.expanduser("~/.sn89/entity-split.jsonl"))
+
+
+def signals_entity_active(t_unix: float) -> bool:
+    return bool(SIGNALS_ENTITY_FROM) and t_unix >= SIGNALS_ENTITY_FROM
 # Probation grace: a QUALIFIED miner that currently earns zero emission keeps the
 # dust floor for this long instead of dropping straight to nothing. Covers (a) a
 # miner whose earning wins have aged out of the decay window (was earning, now 0)

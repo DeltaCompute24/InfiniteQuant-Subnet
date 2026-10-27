@@ -23,7 +23,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from sn89_signals import oracle  # noqa: E402
+from sn89_signals import entity, oracle  # noqa: E402
 
 DATA_DIR = Path(os.getenv("SN89_MARKETS_ORACLE_DIR", "/var/lib/sn89-markets-oracle"))
 BATCHES = DATA_DIR / "batches.jsonl"
@@ -119,8 +119,10 @@ class Anchor:
     def commit(self, b: dict) -> None:
         data = oracle.encode_anchor(b["w0"], b["n"], b["link"])
         try:
-            ok = self.sub.set_commitment(wallet=self.wallet, netuid=NETUID, data=data,
-                                         wait_for_inclusion=True, wait_for_finalization=False)
+            # The signals entity commits from this hotkey too (sn89_signals/entity.py).
+            with entity.commit_slot():
+                ok = self.sub.set_commitment(wallet=self.wallet, netuid=NETUID, data=data,
+                                             wait_for_inclusion=True, wait_for_finalization=False)
         except Exception as e:                               # noqa: BLE001
             ok = False
             _log(f"commit raised {type(e).__name__}: {e}")

@@ -32,7 +32,7 @@ import math
 import os
 import time
 
-from . import config
+from . import config, entity
 
 # ── mechanism ────────────────────────────────────────────────────────────────
 MECID = 1                                  # SubtensorModule mechanism id for HF
@@ -1845,6 +1845,8 @@ def hf_compute_weights(decisive_by_hk: dict, first_seen_by_hk: dict,
     """
     from . import scoring
 
+    # Entity accounts resolve to their entity's UID here and nowhere else.
+    uid_by_hk = entity.with_accounts(uid_by_hk, set(decisive_by_hk) | set(subs_by_hk or {}))
     with hf_scoring_config(now):
         states = []
         blocked = []                             # diversity-held: probation floor only
@@ -1948,6 +1950,7 @@ def hf_compute_tallies(decisive_by_hk: dict, first_seen_by_hk: dict,
     """
     from . import scoring
 
+    uid_by_hk = entity.with_accounts(uid_by_hk, set(decisive_by_hk) | set(subs_by_hk or {}))
     with hf_scoring_config(now):
         out: dict[str, float] = {}
         for hk, decisive in decisive_by_hk.items():

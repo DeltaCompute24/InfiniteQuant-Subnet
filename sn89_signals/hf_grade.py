@@ -18,7 +18,7 @@ import sqlite3
 import time
 import urllib.request
 
-from . import config, hf
+from . import config, entity, hf
 
 WINDOW_MS = 180_000
 _UA = {"User-Agent": "sn89-validator/1.0"}
@@ -233,6 +233,8 @@ def load_hf_lock_rows(base: str, since_ms: int) -> list:
                 continue
             pair = payload.get("trade_pair")
             hk, ts = sub.get("hk"), rcpt.get("grid_t0_ms")
+            if hk and ts:
+                hk = entity.scoring_key(hk, payload, int(ts) / 1000.0)
             if hk and pair and ts and int(ts) >= since_ms:
                 rows.append((hk, str(pair).upper(), hf.MECID, int(ts)))
     return rows
@@ -432,6 +434,10 @@ def sync_and_grade(base: str, cache_dir: str, now: float) -> None:
                 continue        # closers / markets — graded by closers.py / markets.py, not HF
             pair = p.get("trade_pair")
             t0_ms = rcpt.get("grid_t0_ms")
+            # Entity accounts: every row below is keyed by the account, not the signer.
+            # `key` stays signer:seq, which is what makes it unique.
+            if t0_ms:
+                hk = entity.scoring_key(hk, p, int(t0_ms) / 1000.0)
             # Record WHAT THE MINER CALLED before deciding whether we can grade it.
             # Everything below this line filters — by board membership, by horizon,
             # by tick availability — and those filters correlate with the pair, which

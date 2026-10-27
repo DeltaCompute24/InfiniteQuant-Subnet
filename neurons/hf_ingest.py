@@ -35,7 +35,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import websockets
 from bittensor_wallet import Keypair
 
-from sn89_signals import closers, config, hf, markets
+from sn89_signals import closers, config, entity, hf, markets
 
 BIND = os.getenv("SN89_HF_BIND", "127.0.0.1")
 PORT = int(os.getenv("SN89_HF_PORT", "8790"))
@@ -634,13 +634,23 @@ class Ingest:
                 closers.check_rate(self.closers_sent_ms.get(hk, []), t_recv_ms)
             else:
                 hf.validate_submission(payload, t0)
-                hf.check_rate(self.sent_ms.get(hk, []), t_recv_ms, t0)
+                # Entity accounts: an allow-listed entity may call for `<hk>_<n>`, and
+                # every per-miner ledger below is keyed by that account.
+                try:
+                    entity.check_claim(hk, payload, t0)
+                except entity.EntityRejected as e:
+                    raise hf.HFRejected(str(e))
+                hf.check_rate(self.sent_ms.get(entity.scoring_key(hk, payload, t0), []),
+                              t_recv_ms, t0)
         except hf.HFRejected as e:
             return reject(str(e))
+        # The per-miner key for the HF ledgers: the account for an entity call, else hk.
+        # Markets and closers keep their own keys above.
+        rk = hk if (is_market or is_closers) else entity.scoring_key(hk, payload, t0)
 
         # 5. the cross-mechanism pair lock (HF only — a closers call holds no pair)
         pair = str(payload["trade_pair"]).upper()  # noqa: E501
-        if not is_closers and not is_market and hf.is_pair_locked(self.lock_index, hk, pair, hf.MECID, t_recv_ms):
+        if not is_closers and not is_market and hf.is_pair_locked(self.lock_index, rk, pair, hf.MECID, t_recv_ms):
             return reject("pair_locked_other_mechanism")
 
         # 5b. the SAME-mechanism open-position gate. Refused here so the trader is
@@ -652,7 +662,7 @@ class Ingest:
         if not is_market and (time.time() - self._tick_ok_at) * 1000 <= TICK_STALE_MS:
             try:
                 hf.check_pair_open(
-                    [c.open_until() for c in self.open_calls.get((hk, pair), [])],
+                    [c.open_until() for c in self.open_calls.get((rk, pair), [])],
                     t_recv_ms, t0)
             except hf.HFRejected as e:
                 return reject(str(e))
@@ -681,8 +691,8 @@ class Ingest:
             self.windows.setdefault(w, []).append({"submit": frame, "receipt": rcpt})
             self.record_live(frame, rcpt)
             return rcpt
-        self.sent_ms.setdefault(hk, []).append(t_recv_ms)
-        self.lock_index[(hk, pair, hf.MECID)] = t_recv_ms
+        self.sent_ms.setdefault(rk, []).append(t_recv_ms)
+        self.lock_index[(rk, pair, hf.MECID)] = t_recv_ms
         # Start tracking the position this call opens. Entry is the last bus price,
         # where the grader uses the last published tick at or before grid_t0_ms —
         # near-identical and, again, only advisory. `grid` (not t_recv_ms) is t0 so
@@ -697,7 +707,7 @@ class Ingest:
             _tp = float(payload.get("tp_bps") or _tp or 0)
             _sl = float(payload.get("sl_bps") or _sl or 0)
             _hor = int(payload.get("horizon_s") or _hor or 0)
-        self.open_calls.setdefault((hk, pair), []).append(
+        self.open_calls.setdefault((rk, pair), []).append(
             hf.OpenCall(pair, str(payload["direction"]), px[1] if px else None,
                         _tp, _sl, grid, _hor))
         w = hf.window_start_ms(t_recv_ms)

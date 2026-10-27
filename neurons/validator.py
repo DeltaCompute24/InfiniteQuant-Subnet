@@ -29,7 +29,7 @@ import bittensor as bt
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from sn89_signals import (bucket, chain, closers, competitions, config, crypto,
+from sn89_signals import (bucket, chain, closers, competitions, config, crypto, entity,
                           markets,
                           hf, hf_grade, replay, scoring)
 from sn89_signals.grader import PENDING, grade
@@ -69,7 +69,9 @@ CREATE TABLE IF NOT EXISTS signals (
   outcome_bps  REAL,
   exit_reason  TEXT,
   exit_at_ms   INTEGER,
-  is_copy      INTEGER NOT NULL DEFAULT 0   -- §7.5: opened a live identical trade after another hotkey
+  is_copy      INTEGER NOT NULL DEFAULT 0,  -- §7.5: opened a live identical trade after another hotkey
+  batch        INTEGER NOT NULL DEFAULT 0   -- 1 = entity batch row (config.SIGNALS_ENTITY_*);
+                                            -- expands into one row per account call at reveal
 );
 CREATE INDEX IF NOT EXISTS idx_signals_hotkey ON signals(hotkey);
 CREATE TABLE IF NOT EXISTS hotkey_meta (
@@ -103,6 +105,12 @@ CREATE TABLE IF NOT EXISTS referrer_successions (
   first_seen_block INTEGER NOT NULL,
   observed_unix    REAL NOT NULL,
   PRIMARY KEY (from_hk, to_hk)
+);
+CREATE TABLE IF NOT EXISTS entity_accounts (
+  account          TEXT PRIMARY KEY,  -- <entity_hk>_<n>
+  commit_block     INTEGER NOT NULL,  -- FIRST observed sn89acct inclusion block; never updated
+  first_seen_block INTEGER NOT NULL,
+  observed_unix    REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS copier_flags (
   follower      TEXT NOT NULL,
@@ -142,7 +150,8 @@ class Validator:
         """Additive column migration for DBs created before commit_block/t0_ms."""
         cols = {r[1] for r in self.db.execute("PRAGMA table_info(signals)")}
         for col, decl in (("commit_block", "INTEGER"), ("t0_ms", "INTEGER"),
-                          ("is_copy", "INTEGER NOT NULL DEFAULT 0")):
+                          ("is_copy", "INTEGER NOT NULL DEFAULT 0"),
+                          ("batch", "INTEGER NOT NULL DEFAULT 0")):
             if col not in cols:
                 self.db.execute(f"ALTER TABLE signals ADD COLUMN {col} {decl}")
         meta_cols = {r[1] for r in self.db.execute("PRAGMA table_info(hotkey_meta)")}
@@ -152,8 +161,9 @@ class Validator:
         self.db.commit()
 
     # ── 1. ingest ────────────────────────────────────────────────────────────
-    def _journal_commit(self, c: dict, block: int, now: float):
-        """Journal one observed commitment (idempotent on commit_hex)."""
+    def _journal_commit(self, c: dict, block: int, now: float, batch: bool = False):
+        """Journal one observed commitment (idempotent on commit_hex). `batch`: an
+        entity batch root, journaled from an allow-listed entity hotkey only."""
         if self.db.execute(
                 "SELECT 1 FROM signals WHERE commit_hex=?", (c["commit"],)).fetchone():
             return
@@ -174,15 +184,19 @@ class Validator:
         status, void_reason = "sealed", None
         if not crypto.expected_round_ok(c["round"], t0_unix):
             status, void_reason = "void", "round_out_of_window"
+        if batch and not (hk in config.SIGNALS_ENTITY_HOTKEYS
+                          and config.signals_entity_active(t0_unix)):
+            return                             # not an armed entity: ignored, by design
         self.db.execute(
             "INSERT OR IGNORE INTO signals (commit_hex,hotkey,round,url_tag,"
-            "first_seen_block,commit_block,t0_unix,t0_ms,status,void_reason) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            "first_seen_block,commit_block,t0_unix,t0_ms,status,void_reason,batch) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             (c["commit"], hk, c["round"], c["url_tag"], block, commit_block,
-             t0_unix, t0_ms, status, void_reason))
-        self.db.execute(
-            "INSERT OR IGNORE INTO hotkey_meta (hotkey, first_seen_unix) VALUES (?,?)",
-            (hk, now))
+             t0_unix, t0_ms, status, void_reason, 1 if batch else 0))
+        if not batch:                          # the entity itself is not a scored miner
+            self.db.execute(
+                "INSERT OR IGNORE INTO hotkey_meta (hotkey, first_seen_unix) VALUES (?,?)",
+                (hk, now))
         print(f"  + {status} {c['commit'][:12]}… {hk[:8]}… round={c['round']}"
               + (f" ({void_reason})" if void_reason else ""))
 
@@ -244,6 +258,38 @@ class Validator:
             (frm, to, cb, block, now))
         print(f"  ⇢ referrer succession {frm[:8]}… → {to[:8]}… commit_block={cb}")
 
+    def _journal_entity_claim(self, c: dict, block: int, now: float):
+        """sn89acct / sn89refa, journaled ONLY from an allow-listed, armed entity.
+        Anyone else committing these payloads is ignored, by design."""
+        hk = c.get("hotkey")
+        if hk not in config.SIGNALS_ENTITY_HOTKEYS:
+            return
+        # The snapshot returns the same latest commitment every poll: dedup BEFORE
+        # the block-time RPC below, as _journal_commit does.
+        account = f"{hk}_{int(c['n'])}"
+        if c["kind"] == "account_open":
+            seen = self.db.execute("SELECT 1 FROM entity_accounts WHERE account=?",
+                                   (account,)).fetchone()
+        else:
+            seen = self.db.execute("SELECT 1 FROM referrals WHERE recruiter_hk=? AND "
+                                   "recruit_hk=?", (account, c["recruit"])).fetchone()
+        if seen:
+            return
+        cb = int(c.get("commit_block") or block)
+        if not config.signals_entity_active(
+                self.ch.block_time_ms(cb) / 1000.0):
+            return
+        if c["kind"] == "account_open":
+            cur = self.db.execute(
+                "INSERT OR IGNORE INTO entity_accounts (account, commit_block, "
+                "first_seen_block, observed_unix) VALUES (?,?,?,?)",
+                (account, cb, block, now))
+            if cur.rowcount:
+                print(f"  ⊕ entity account {account[:8]}…_{c['n']} opened commit_block={cb}")
+            return
+        self._journal_referral({"hotkey": account, "recruit": c["recruit"],
+                                "commit_block": cb}, block, now)
+
     def refresh_referrals(self, mg):
         """Fill recruit_reg_block ONCE at the recruit's first metagraph sighting.
 
@@ -261,6 +307,20 @@ class Validator:
             return
         uid_by_hk = {hk: i for i, hk in enumerate(mg.hotkeys)}
         for recruiter, recruit in pend:
+            if entity.parse(recruit) is not None:
+                # An account's "registration" is its sn89acct open block, journaled
+                # once at first sighting, so the same laundering argument holds.
+                row = self.db.execute(
+                    "SELECT commit_block FROM entity_accounts WHERE account=?",
+                    (recruit,)).fetchone()
+                if row is not None:
+                    self.db.execute(
+                        "UPDATE referrals SET recruit_reg_block=? WHERE recruiter_hk=? "
+                        "AND recruit_hk=? AND recruit_reg_block IS NULL",
+                        (int(row[0]), recruiter, recruit))
+                    print(f"  ⊕ referral recruit account sighted {recruit[:8]}… "
+                          f"reg_block={row[0]}")
+                continue
             uid = uid_by_hk.get(recruit)
             if uid is None:
                 continue                       # not registered yet — keep waiting
@@ -300,6 +360,10 @@ class Validator:
                 self._journal_referral_transfer(c, block, now)
             elif c.get("kind") == "referrer_succession":
                 self._journal_referrer_succession(c, block, now)
+            elif c.get("kind") == "batch":
+                self._journal_commit(c, block, now, batch=True)
+            elif c.get("kind") in ("account_open", "account_referral"):
+                self._journal_entity_claim(c, block, now)
             else:
                 self._journal_commit(c, block, now)
         self.db.commit()
@@ -312,13 +376,14 @@ class Validator:
         # retried next loop — the on-chain commitment is durable. Only the main
         # thread touches the DB; workers just do network I/O.
         pending = self.db.execute(
-            "SELECT commit_hex, hotkey, url_tag FROM signals "
+            "SELECT commit_hex, hotkey, url_tag, batch FROM signals "
             "WHERE blob_json IS NULL AND status='sealed'").fetchall()
         if pending:
             ex = concurrent.futures.ThreadPoolExecutor(
                 max_workers=config.BLOB_FETCH_WORKERS)
-            futs = {ex.submit(self._find_blob, hk, tag): commit_hex
-                    for commit_hex, hk, tag in pending}
+            futs = {ex.submit(self._find_blob, hk, tag,
+                              entity.BATCH_MAX_BYTES if is_batch else None): commit_hex
+                    for commit_hex, hk, tag, is_batch in pending}
             done, _ = concurrent.futures.wait(
                 futs, timeout=config.BLOB_FETCH_BUDGET_S)
             for fut in done:
@@ -335,7 +400,7 @@ class Validator:
             ex.shutdown(wait=False, cancel_futures=True)
         self.db.commit()
 
-    def _find_blob(self, hotkey: str, tag: str) -> dict | None:
+    def _find_blob(self, hotkey: str, tag: str, max_bytes: int | None = None) -> dict | None:
         if not config.R2_PUBLIC_BASE:
             return None
         # bucket listing: {base}/{hotkey}/index.json maintained by the miner
@@ -343,16 +408,19 @@ class Validator:
         for nonce in (idx.get("nonces") or [])[-50:]:
             url = bucket.blob_url(hotkey, nonce)
             if chain.url_tag(url) == tag:
-                return bucket.fetch(url)
+                # An entity batch carries up to BATCH_MAX_ITEMS timelock blobs (~1.8 KB
+                # each), past the 64 KiB single-blob cap.
+                return (bucket.fetch(url, max_bytes=max_bytes) if max_bytes
+                        else bucket.fetch(url))
         return None
 
     # ── 2. reveal ────────────────────────────────────────────────────────────
     def reveal(self):
         now = time.time()
         rows = self.db.execute(
-            "SELECT commit_hex, hotkey, round, t0_unix, blob_json FROM signals "
+            "SELECT commit_hex, hotkey, round, t0_unix, blob_json, batch FROM signals "
             "WHERE status='sealed' AND blob_json IS NOT NULL").fetchall()
-        for commit_hex, hk, rnd, t0, blob_json in rows:
+        for commit_hex, hk, rnd, t0, blob_json, is_batch in rows:
             # Window check BEFORE the maturity gate. A round outside commit+24h
             # is void regardless of whether it has "matured", so a far-future
             # round can't slip past the `round_time(rnd) > now` continue and sit
@@ -373,6 +441,9 @@ class Validator:
                 blob = json.loads(blob_json)
             except (ValueError, TypeError):
                 self._void(commit_hex, "blob_unparseable", strike=False)
+                continue
+            if is_batch:
+                self._reveal_batch(commit_hex, hk, rnd, t0, blob)
                 continue
             if str(blob.get("owner_pk", "")).lower() != config.OWNER_PK_HEX.lower():
                 self._void(commit_hex, "wrong_owner_pk", strike=True)
@@ -408,6 +479,62 @@ class Validator:
             print(f"  ✓ revealed {commit_hex[:12]}… {parsed.direction} {parsed.trade_pair}")
         self.db.commit()
 
+    def _reveal_batch(self, root_hex: str, hk: str, rnd: int, t0: float, blob: dict):
+        """Expand an entity batch into one ordinary signal row per account call.
+        Each row is keyed by its own commit hash with the ACCOUNT as hotkey and the
+        batch's T0, so validity, grading, copy detection and the journal treat it
+        exactly like a call committed by that account's own hotkey."""
+        sig_bytes = self._drand_sig(rnd)
+        if sig_bytes is None:
+            return
+        try:
+            calls = entity.expand_batch(
+                blob, root_hex, hk, t0,
+                lambda it: crypto.decrypt_timelock(it, sig_bytes, self.tlock))
+        except entity.EntityRejected as e:
+            self._void(root_hex, str(e), strike=False)
+            return
+        src = self.db.execute(
+            "SELECT url_tag, first_seen_block, commit_block, t0_ms FROM signals "
+            "WHERE commit_hex=?", (root_hex,)).fetchone()
+        for commit_hex, pt, item in calls:
+            account = Signal.from_bytes(pt).hotkey
+            self.db.execute(
+                "INSERT OR IGNORE INTO signals (commit_hex,hotkey,round,url_tag,"
+                "first_seen_block,commit_block,t0_unix,t0_ms,blob_json,plaintext,status) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,'revealed')",
+                (commit_hex, account, rnd, src[0], src[1], src[2], t0, src[3],
+                 json.dumps(item, separators=(",", ":")), pt.decode()))
+            # first_seen = the batch T0, which every validator agrees on.
+            self.db.execute(
+                "INSERT OR IGNORE INTO hotkey_meta (hotkey, first_seen_unix) VALUES (?,?)",
+                (account, t0))
+        self.db.execute("UPDATE signals SET status='batch' WHERE commit_hex=?", (root_hex,))
+        print(f"  ✓ batch {root_hex[:12]}… {hk[:8]}… → {len(calls)} account call(s)")
+
+    def _write_entity_split(self, sig_rows, meta, uid_by_hotkey, now, referral_rows,
+                            keepalive, markets_vec, shares):
+        """Append this cycle's entity split (replay.entity_split) for the payout side.
+        Never raises: a bookkeeping failure must not stop weight setting."""
+        try:
+            if not config.signals_entity_active(now):
+                return
+            accounts = {hk for hk in meta if entity.parse(hk) is not None}
+            if not accounts:
+                return
+            split = replay.entity_split(
+                lambda m: replay.weights_from_journal(sig_rows, meta, m, now,
+                                                      referrals=referral_rows,
+                                                      keepalive=keepalive),
+                lambda m: hf_grade.mecid1_weights(m, now),
+                markets_vec, shares, uid_by_hotkey, accounts)
+            os.makedirs(os.path.dirname(config.ENTITY_SPLIT_PATH), exist_ok=True)
+            with open(config.ENTITY_SPLIT_PATH, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps({"ts": int(now), "split": split},
+                                    separators=(",", ":")) + "\n")
+        except Exception as e:  # noqa: BLE001
+            print(f"  ! entity split not written: {e}")
+
     def _void(self, commit_hex: str, reason: str, strike: bool):
         self.db.execute(
             "UPDATE signals SET status='void', void_reason=? WHERE commit_hex=?",
@@ -439,8 +566,8 @@ class Validator:
         validator reaches the identical verdict.
         """
         now = time.time()
-        for commit_hex, hk, rnd, t0 in self.db.execute(
-                "SELECT commit_hex, hotkey, round, t0_unix FROM signals "
+        for commit_hex, hk, rnd, t0, is_batch in self.db.execute(
+                "SELECT commit_hex, hotkey, round, t0_unix, batch FROM signals "
                 "WHERE status='sealed' AND blob_json IS NULL").fetchall():
             # A round outside the commit+24h window never matures into a real
             # forfeit deadline — void it instead of re-pulling its blob forever
@@ -449,6 +576,11 @@ class Validator:
                 self._void(commit_hex, "round_out_of_window", strike=False)
                 continue
             if now < crypto.round_time(rnd) + config.REVEAL_GRACE_S:
+                continue
+            if is_batch:
+                # The calls inside an unserved batch are unknowable, so there is no
+                # account to charge a loss to. Void it and strike the entity.
+                self._void(commit_hex, "batch_not_served", strike=True)
                 continue
             self.db.execute(
                 "UPDATE signals SET status='lost', outcome_bps=NULL, "
@@ -875,6 +1007,8 @@ class Validator:
                     print(f"  ! Markets vector failed (share burns): {e}")
                     vectors["markets"] = None
             w = competitions.combine(vectors, shares)
+            self._write_entity_split(sig_rows, meta, uid_by_hotkey, now, referral_rows,
+                                     keepalive, vectors.get("markets"), shares)
             parts = " ".join(
                 f"{k}={'∅' if vectors.get(k) is None else len([u for u, x in (vectors[k] or {}).items() if x > 0 and u != config.BURN_UID])}"
                 for k in shares)
