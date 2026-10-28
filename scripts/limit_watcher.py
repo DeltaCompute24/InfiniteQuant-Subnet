@@ -40,7 +40,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from bittensor_wallet import Keypair
 
-from sn89_signals import config, hf
+from sn89_signals import config, entity, hf
 
 ADMIN_DB = os.getenv("IQ_ADMIN_DB", "/opt/iq-platform/data/live/iq_admin_dash.db")
 TICKBUS = os.getenv("IQ_TICKBUS_URL", "http://127.0.0.1:18774")
@@ -187,7 +187,8 @@ def quota_block(con: sqlite3.Connection, uid: int):
     return None
 
 
-def create_submission(con: sqlite3.Connection, uid: int, sig) -> int:
+def create_submission(con: sqlite3.Connection, uid: int, sig,
+                      raw_input: str = "workspace-lf") -> int:
     """Insert the row this call will be graded and reported against.
 
     Band values come off the SIGNAL, never off a second board read: the signal is
@@ -205,7 +206,7 @@ def create_submission(con: sqlite3.Connection, uid: int, sig) -> int:
         "        strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
         (uid, sig.trade_pair, sig.asset_class, sig.direction,
          int(sig.tp_bps), int(sig.sl_bps), int(sig.horizon_h),
-         "workspace-lf"))
+         raw_input))
     con.commit()
     return int(cur.lastrowid)
 
@@ -404,17 +405,104 @@ def registered_hotkeys() -> set | None:
         return None
 
 
+# ── signals entity accounts (~/IQ/SN89-SIGNALS-ENTITY-SPEC.md) ───────────────
+# A workspace order from an ACCOUNT (<entity_hk>_<n>) has no key of its own: the
+# entity hotkey signs. HF goes straight to the ingest signed by the entity with
+# `account` in the payload, exactly as the multiplexer sends a Telegram HF call.
+# LF does NOT commit here: the entity has ONE commitment slot, shared by the
+# multiplexer's batcher and the Markets oracle anchor, and a second batch writer
+# would spend that slot one call at a time. The order becomes a signals_submissions
+# row the feed serves to the multiplexer, which carries it in its next batch.
+ENTITY_WALLET = os.getenv("SN89_ENTITY_WALLET", "sn89_markets_entity")
+ENTITY_WALLET_HOTKEY = os.getenv("SN89_ENTITY_WALLET_HOTKEY", "entity")
+# Not "workspace-lf": the feed excludes that tag (those rows commit here), and an
+# account's row must reach the multiplexer.
+ENTITY_LF_RAW_INPUT = "workspace-lf-entity"
+_ENTITY_KP: dict = {}
+
+
+def entity_keypair(owner: str) -> Keypair | None:
+    if owner not in _ENTITY_KP:
+        import bittensor as bt
+        kp = bt.Wallet(name=ENTITY_WALLET, hotkey=ENTITY_WALLET_HOTKEY).hotkey
+        _ENTITY_KP[owner] = kp if kp.ss58_address == owner else None
+    return _ENTITY_KP[owner]
+
+
+def queue_lf_entity(account: str, payload: dict, con: sqlite3.Connection) -> dict:
+    """An account's LF order: validated and quota-checked here like fire_lf, then
+    handed to the multiplexer's batcher through the submissions feed."""
+    uid = signals_user_for_hotkey(con, account)
+    if uid is None:
+        return {"kind": "error", "reason": "lf_hotkey_not_linked_to_signals_account"}
+    blocked = quota_block(con, uid)
+    if blocked:
+        return {"kind": "error", "reason": blocked}
+    from neurons.miner import build_signal
+    # Refuses a call that would void (pair off board, FX weekend), before a slot is used.
+    sig = build_signal(account, payload["trade_pair"], payload["direction"])
+    sub_id = create_submission(con, uid, sig, raw_input=ENTITY_LF_RAW_INPUT)
+    return {"kind": "lf.queued", "submission_id": sub_id}
+
+
+def fire_entity(row: sqlite3.Row, payload: dict, owner: str,
+                con: sqlite3.Connection) -> dict:
+    account = row["hotkey"]
+    if not config.signals_entity_active(time.time()) or owner not in config.SIGNALS_ENTITY_HOTKEYS:
+        return {"kind": "error", "reason": "entity_not_armed"}
+    if row["kind"] == "lf":
+        return queue_lf_entity(account, payload, con)
+    if row["kind"] != "hf":
+        # The ingest scores Closers votes under the signer, never an account.
+        return {"kind": "error", "reason": "closers_not_supported_for_accounts"}
+    kp = entity_keypair(owner)
+    if kp is None:
+        return {"kind": "error", "reason": "no_entity_signer"}
+    payload = _stamp_hf(payload)
+    if payload.get("kind") == "error":
+        return payload
+    payload["account"] = account
+    res = asyncio.run(fire_ws(kp, payload))
+    # The entity key is shared with the multiplexer, which sends its own HF calls on
+    # its own counter; a wall-clock collision comes back stale_seq and clears on retry.
+    if str(res.get("reason") or res.get("error") or "").startswith("stale_seq"):
+        res = asyncio.run(fire_ws(kp, payload))
+    return res
+
+
+def _stamp_hf(payload: dict) -> dict:
+    """Stamp band/horizon from the HF board AT FIRE TIME (see fire())."""
+    pair = str(payload["trade_pair"]).upper()
+    board = hf.hf_bands_as_of(time.time()) or {}
+    cls = hf.hf_asset_class_as_of(pair, time.time())
+    if cls is None:
+        return {"kind": "error", "reason": f"pair_not_on_hf_board:{pair}"}
+    _row = board.get(pair)
+    tp, sl, hz = (_row[0], _row[1], _row[2]) if _row else (None, None, None)
+    if config.custom_bands_enforced_as_of(time.time()):
+        tp = float(payload.get("tp_bps") or tp)
+        sl = float(payload.get("sl_bps") or sl)
+        hz = int(payload.get("horizon_s") or hz)
+    if tp is None or sl is None or hz is None:
+        return {"kind": "error", "reason": f"band_required:{pair}"}
+    return {"trade_pair": pair, "direction": payload["direction"],
+            "asset_class": cls, "tp_bps": tp, "sl_bps": sl, "horizon_s": hz}
+
+
 def fire(row: sqlite3.Row, signers: dict, feed_tokens: dict,
          con: sqlite3.Connection) -> dict:
     payload = json.loads(row["payload"])
+    owner = (entity.parse(row["hotkey"]) or (None,))[0]
     # The validator ignores commits from a hotkey that is not on the subnet, so a
     # call fired for a pruned hotkey is committed, shown "live" and never graded.
     # A resting limit can outlive the registration, so this is checked at fire as
     # well as at placement. Mainnet only; fails open on a missing/stale cache.
     if NETWORK_SCOPE == "finney":
         reg = registered_hotkeys()
-        if reg is not None and row["hotkey"] not in reg:
+        if reg is not None and (owner or row["hotkey"]) not in reg:
             return {"kind": "error", "reason": "hotkey_not_registered"}
+    if owner is not None:
+        return fire_entity(row, payload, owner, con)
     if row["kind"] == "lf":
         return fire_lf(row["hotkey"], signers, payload, feed_tokens, con)
     kp = keypair_for(row["hotkey"], signers)
@@ -526,7 +614,7 @@ def main() -> None:
                         res = fire(row, signers, feed_tokens, c)
                     except Exception as e:  # noqa: BLE001
                         res = {"kind": "error", "reason": f"{type(e).__name__}: {e}"}
-                    ok = res.get("kind") in ("hf.receipt", "lf.commit")
+                    ok = res.get("kind") in ("hf.receipt", "lf.commit", "lf.queued")
                     status = "filled" if ok else "rejected"
                     c.execute("UPDATE sn89_limit_orders SET status=?, result=?, "
                               "fired_at=? WHERE id=?",

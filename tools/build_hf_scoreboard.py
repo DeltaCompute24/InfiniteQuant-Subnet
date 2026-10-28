@@ -28,7 +28,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, "/opt/sn89-signals")
-from sn89_signals import config, hf, hf_grade, scoring     # noqa: E402
+from sn89_signals import config, entity, hf, hf_grade, scoring     # noqa: E402
 
 # The cadence strip + the network block (correlation / crowding / lean / pulse)
 # are the SAME functions the LF board runs, imported rather than reimplemented —
@@ -306,8 +306,14 @@ def _accepted_calls() -> dict:
                 p = sub.get("payload") or {}
                 if str(p.get("kind", "")) in hf.NON_HF_KINDS:
                     continue        # graded by closers.py / markets.py — not an HF call
+                # An entity call is scored under its ACCOUNT (entity.scoring_key, the
+                # same rule hf_grade applies to the grade cache), so the board must
+                # aggregate it there too. The dict key and the grade key stay
+                # signer:seq: that is what the ingest receipted and what grades keys on.
+                t0 = rcpt.get("grid_t0_ms")
                 calls[(hk, seq)] = {
                     "hk": hk, "pair": p.get("trade_pair"),
+                    "score_hk": entity.scoring_key(hk, p, t0 / 1000.0 if t0 else None),
                     "direction": p.get("direction"),
                     "asset_class": p.get("asset_class"),
                     "grid_t0_ms": rcpt.get("grid_t0_ms")}
@@ -891,7 +897,7 @@ def _signals_view(calls: dict, grades: dict, held: dict, paths: dict, registered
             st = "pending"
         elif st not in ("won", "lost"):
             continue                 # void: a real submission, but no outcome
-        rows.append((hk, int(c["grid_t0_ms"]) / 1000.0, st,
+        rows.append((c.get("score_hk") or hk, int(c["grid_t0_ms"]) / 1000.0, st,
                      (paths.get(key) or {}).get("out_bps"),
                      json.dumps({"trade_pair": c.get("pair"),
                                  "direction": c.get("direction")}),
@@ -1041,6 +1047,7 @@ def main() -> int:
         if hk not in registered:
             continue
         key = f"{hk}:{seq}"
+        hk = c.get("score_hk") or hk          # an entity account's own row
         a = agg.setdefault(hk, {"won": 0, "lost": 0, "wash": 0, "pending": 0})
         pair = c["pair"] or "?"
         if c.get("grid_t0_ms"):
