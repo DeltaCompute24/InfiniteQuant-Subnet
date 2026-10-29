@@ -1136,6 +1136,8 @@ class HFRejected(Exception):
 
 
 def validate_submission(payload: dict, t0_unix: float) -> None:
+    if config.hf_ended_as_of(t0_unix):
+        raise HFRejected("hf_ended")
     board = hf_bands_as_of(t0_unix)
     if board is None:
         raise HFRejected("hf_not_live_at_t0")

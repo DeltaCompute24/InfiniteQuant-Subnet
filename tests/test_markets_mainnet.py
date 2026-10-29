@@ -41,7 +41,8 @@ pytestmark = pytest.mark.skipif(not _source_defaults(),
 def test_history_before_t_is_untouched():
     assert config.COMP_WEIGHTS_HISTORY[:len(PRE_T_HISTORY)] == PRE_T_HISTORY
     assert config.COMP_WEIGHTS_HISTORY[len(PRE_T_HISTORY):] == ((T, "lf:0.4375,hf:0.4375,markets:0.125"),
-                                                                (1791936000, "lf:0.375,hf:0.375,markets:0.25"))
+                                                                (1791936000, "lf:0.375,hf:0.375,markets:0.25"),
+                                                                (1793836800, "lf:0.375,agent:0.25,reserve:0.125,markets:0.25"))
 
 
 def test_markets_doubles_from_the_vault_arm():

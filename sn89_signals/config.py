@@ -1409,6 +1409,14 @@ COMP_WEIGHTS_HISTORY: tuple = (
     # Markets claims stood at 5,874 alpha owed against ~296 alpha/day of Markets emission. A Markets share that
     # no entity claims burns (it does not return to LF/HF).
     (1791936000, "lf:0.375,hf:0.375,markets:0.25"),
+    # ⚑ 2026-11-05 00:00:00 UTC (Whit, 2026-10-29): HF ENDS. Its share goes to `agent` (calls
+    # from algos built in the hosted IQ Agent, graded like LF) and `reserve` (burn placeholder).
+    # mecid-0-RELATIVE, chain split still [52428, 13107]. Of the TOTAL:
+    #   LF 30 / Agent 20 / reserve 10 / Markets 20 / Referrers 20 (mecid-1, unchanged).
+    # `agent` has no vector until it arms and `reserve` never has one, so combine() BURNS their
+    # 0.375; LF stays at exactly 0.375 (writing the row without hf would renormalize LF to 0.6).
+    # HF_END_FROM_UNIX below is the same instant: new HF receipts are refused from it.
+    (1793836800, "lf:0.375,agent:0.25,reserve:0.125,markets:0.25"),
 )
 _COMP_ENV = os.getenv("SN89_COMP_WEIGHTS", "")
 if _COMP_ENV:
@@ -1460,6 +1468,16 @@ DB_PATH = os.getenv("SN89_DB_PATH", os.path.expanduser("~/.sn89/validator.db"))
 # The first markets START at this instant; their bets are taken from one window earlier
 # (markets_accepting_as_of). Testnet keeps its own earlier arm via SN89_MARKETS_FROM in .env.test.
 MARKETS_FROM_UNIX = int(os.getenv("SN89_MARKETS_FROM", "1791504000"))
+
+# HF competition end (Whit, 2026-10-29). From this instant hf.validate_submission refuses every
+# new HF call with `hf_ended`; calls before it still grade. Its share leaves COMP_WEIGHTS_HISTORY
+# in the same instant. The HF ingest/anchor/ticks pipeline keeps running: it also carries
+# Markets bets, vault frames and the LF pair-lock feed. 0 disables (testnet convenience).
+HF_END_FROM_UNIX = int(os.getenv("SN89_HF_END_FROM", "1793836800"))
+
+
+def hf_ended_as_of(t_unix: float) -> bool:
+    return HF_END_FROM_UNIX > 0 and t_unix >= HF_END_FROM_UNIX
 
 
 def markets_active_as_of(t_unix: float) -> bool:
