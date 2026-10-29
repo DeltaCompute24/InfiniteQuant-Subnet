@@ -272,3 +272,12 @@ def test_commit_slot_spaces_writers(tmp_path):
     with entity.commit_slot(lock, min_gap_s=0.3):
         pass
     assert time.time() - t0 >= 0.3
+
+
+def test_single_call_batch_root_is_the_call_hash():
+    # A 1-call batch's root equals the call's own commit hash. _reveal_batch must
+    # convert the batch row instead of inserting a colliding account row.
+    import hashlib
+    from sn89_signals import entity
+    pt = b'{"x":1}'
+    assert entity.batch_root([pt]) == hashlib.sha256(pt).hexdigest()

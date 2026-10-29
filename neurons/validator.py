@@ -158,6 +158,12 @@ class Validator:
         for col, decl in (("eliminated_t0", "REAL"),):
             if col not in meta_cols:
                 self.db.execute(f"ALTER TABLE hotkey_meta ADD COLUMN {col} {decl}")
+        # Re-expand every revealed entity batch. Before the single-call fix in
+        # _reveal_batch, a 1-call batch lost its account row (its root equals the
+        # call's own hash), so those calls were never graded. Re-expansion is
+        # idempotent: rows that already exist are INSERT OR IGNOREd.
+        self.db.execute("UPDATE signals SET status='sealed' "
+                        "WHERE status='batch' AND batch=1 AND blob_json IS NOT NULL")
         self.db.commit()
 
     # ── 1. ingest ────────────────────────────────────────────────────────────
@@ -499,6 +505,19 @@ class Validator:
             "WHERE commit_hex=?", (root_hex,)).fetchone()
         for commit_hex, pt, item in calls:
             account = Signal.from_bytes(pt).hotkey
+            if commit_hex == root_hex:
+                # A 1-call batch: the Merkle root of one leaf IS that leaf, so the
+                # call's key is the batch row's own key. Turn the batch row into
+                # the account call instead of inserting a row that would collide.
+                self.db.execute(
+                    "UPDATE signals SET hotkey=?, blob_json=?, plaintext=?, "
+                    "status='revealed' WHERE commit_hex=?",
+                    (account, json.dumps(item, separators=(",", ":")), pt.decode(),
+                     root_hex))
+                self.db.execute(
+                    "INSERT OR IGNORE INTO hotkey_meta (hotkey, first_seen_unix) VALUES (?,?)",
+                    (account, t0))
+                continue
             self.db.execute(
                 "INSERT OR IGNORE INTO signals (commit_hex,hotkey,round,url_tag,"
                 "first_seen_block,commit_block,t0_unix,t0_ms,blob_json,plaintext,status) "
@@ -509,7 +528,8 @@ class Validator:
             self.db.execute(
                 "INSERT OR IGNORE INTO hotkey_meta (hotkey, first_seen_unix) VALUES (?,?)",
                 (account, t0))
-        self.db.execute("UPDATE signals SET status='batch' WHERE commit_hex=?", (root_hex,))
+        self.db.execute("UPDATE signals SET status='batch' WHERE commit_hex=? "
+                        "AND status='sealed'", (root_hex,))
         print(f"  ✓ batch {root_hex[:12]}… {hk[:8]}… → {len(calls)} account call(s)")
 
     def _write_entity_split(self, sig_rows, meta, uid_by_hotkey, now, referral_rows,
