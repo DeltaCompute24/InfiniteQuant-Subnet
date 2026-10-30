@@ -1480,6 +1480,28 @@ def hf_ended_as_of(t_unix: float) -> bool:
     return HF_END_FROM_UNIX > 0 and t_unix >= HF_END_FROM_UNIX
 
 
+# ── Agent competition (Whit, 2026-10-29) ─────────────────────────────────────
+# Calls from algos and agents built in the hosted IQ Agent, scored by the LF path
+# unchanged. They are LF calls of signals-entity ACCOUNTS whose number is at least
+# AGENT_ACCOUNT_MIN: only the entity hotkey can commit for its accounts, so "only
+# hosted calls count" is checkable on chain. Those accounts score in `agent` and
+# never in `lf`. From AGENT_COMP_FROM the vector is computed every cycle; it is paid
+# only once COMP_WEIGHTS_HISTORY gives `agent` a share (2026-11-05 00:00 UTC), so the
+# days in between are a scored, unpaid opening. Stricter gate than LF: free accounts
+# plus a gate at the coin-flip line is a money leak (0.55 / 40 admits a coin flip
+# about 1.9% of the time, decaying with n). FX is not in the agent universe: the
+# hosted data mount carries no FX feed.
+AGENT_ACCOUNT_MIN = 100_000_000
+AGENT_COMP_FROM_UNIX = int(os.getenv("SN89_AGENT_COMP_FROM", "1793318400"))   # 2026-10-30 00:00 UTC
+AGENT_QUALIFY_LB_FLOOR = 0.55
+AGENT_QUALIFY_MIN_DECISIVE = 40
+AGENT_EXCLUDED_CLASSES = frozenset({"forex"})
+
+
+def agent_comp_active(t_unix: float) -> bool:
+    return AGENT_COMP_FROM_UNIX > 0 and t_unix >= AGENT_COMP_FROM_UNIX
+
+
 def markets_active_as_of(t_unix: float) -> bool:
     """A market STARTING at t exists under the rules (market_exists keys on the start)."""
     return bool(MARKETS_FROM_UNIX and t_unix >= MARKETS_FROM_UNIX)

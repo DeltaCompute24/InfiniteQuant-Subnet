@@ -27,9 +27,16 @@ def weights_from_journal(
     now: float,
     referrals: list[dict] | None = None,
     keepalive: set[int] | None = None,
+    scope: str = "lf",
 ) -> dict[int, float]:
     """Re-derive {uid: weight} from a published journal, identically to the
     validator. PURE.
+
+    scope:   "lf" scores every key except Agent-competition accounts
+             (entity.is_agent_account); "agent" scores only those, from
+             config.AGENT_COMP_FROM, without FX, under the caller's qualify gate
+             (scoring.qualify_gate). Eliminations and copy detection always read the
+             WHOLE journal, so copying across the two competitions is still caught.
 
     keepalive: uids from keepalive_uids() (config.KEEPALIVE_*). Eliminated and
              struck hotkeys are removed from it here. None → byte-identical to
@@ -52,6 +59,20 @@ def weights_from_journal(
     # account's sanction applied to the shared UID would zero every other account.
     uid_by_hotkey = entity.with_accounts(uid_by_hotkey, set(meta))
     is_account = lambda hk: entity.parse(hk) is not None  # noqa: E731
+    if scope not in ("lf", "agent"):
+        raise ValueError(f"unknown scope {scope!r}")
+    agent = scope == "agent"
+
+    def in_scope(hk: str) -> bool:
+        return entity.is_agent_account(hk) == agent
+
+    def row_ok(s: dict) -> bool:
+        if not agent:
+            return True
+        if s["t0_unix"] < config.AGENT_COMP_FROM_UNIX or not s.get("plaintext"):
+            return False
+        pair = Signal.from_bytes(s["plaintext"].encode()).trade_pair
+        return config.asset_class_for(pair, s["t0_unix"]) not in config.AGENT_EXCLUDED_CLASSES
 
     # ── re-derive eliminations from the decisive history (don't trust the journal) ─
     decisive_by_hk: dict[str, list[tuple[float, bool, bool]]] = {}
@@ -110,11 +131,13 @@ def weights_from_journal(
             continue
         if hk in flagged_accounts:
             continue                       # a flagged copier account earns nothing
+        if not in_scope(hk):
+            continue
         # decisive history with the FRESHLY re-derived is_copy (copy-window rows
         # override; outside-window rows keep their journaled is_copy).
         decisive = []
         for s in signals:
-            if s["hotkey"] == hk and s["status"] in ("won", "lost"):
+            if s["hotkey"] == hk and s["status"] in ("won", "lost") and row_ok(s):
                 cp = is_copy_by_commit.get(s["commit_hex"], bool(s.get("is_copy", 0)))
                 # 4th element = journaled resolution time (exit_at_ms -> seconds).
                 # qualified_wins needs it to build a CAUSAL as-of window; without
@@ -137,7 +160,8 @@ def weights_from_journal(
         # never a valid call, so counting it as a wash would penalise the miner for
         # our own rejection.
         graded = [(s["t0_unix"], s["status"] == "washed") for s in signals
-                  if s["hotkey"] == hk and s["status"] in ("won", "lost", "washed")]
+                  if s["hotkey"] == hk and s["status"] in ("won", "lost", "washed")
+                  and row_ok(s)]
         # qualified post-warmup wins (point-in-time gate + tier x efficiency) — sizes emission.
         qwins = scoring.qualified_wins(decisive, m["first_seen_unix"], habitual,
                                        graded=graded)
@@ -152,7 +176,7 @@ def weights_from_journal(
     # side pay for the copier.
     referral_pairs = None
     referral_suspended: set[str] = set()
-    if config.REFERRAL_ENABLED and referrals:
+    if config.REFERRAL_ENABLED and referrals and not agent:
         referral_pairs = scoring.valid_referral_pairs(referrals)
         ref_rows = _referral_pair_rows(signals, referral_pairs, now)
         for recruiter, recruit in referral_pairs:

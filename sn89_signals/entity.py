@@ -25,6 +25,14 @@ def parse(account) -> tuple[str, int] | None:
     return (m.group(1), int(m.group(2))) if m else None
 
 
+def is_agent_account(key) -> bool:
+    """An Agent-competition account: an entity account numbered at or above
+    config.AGENT_ACCOUNT_MIN. Scores in `agent`, never in `lf`."""
+    parsed = parse(key)
+    return (parsed is not None and parsed[0] in config.SIGNALS_ENTITY_HOTKEYS
+            and parsed[1] >= config.AGENT_ACCOUNT_MIN)
+
+
 def check_claim(signer: str, payload: dict | None, t_unix: float) -> None:
     """Ingest-side validation. No `account` field is always fine (a plain call)."""
     acct = (payload or {}).get("account")

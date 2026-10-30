@@ -1194,16 +1194,46 @@ def win_multiplier(hit_rate: float) -> float:
 win_multiplier_legacy = win_multiplier
 
 
+# (lb_floor, min_decisive) while a competition with its own gate is being scored
+# (replay.weights_from_journal scope="agent"); None means the LF constants.
+_GATE: "tuple[float, int] | None" = None
+
+
+class qualify_gate:
+    """`with qualify_gate(0.55, 40): ...` scores with a stricter gate, then restores."""
+
+    def __init__(self, lb_floor: float, min_decisive: int):
+        self.gate = (float(lb_floor), int(min_decisive))
+
+    def __enter__(self):
+        global _GATE
+        self.prev, _GATE = _GATE, self.gate
+        return self
+
+    def __exit__(self, *exc):
+        global _GATE
+        _GATE = self.prev
+        return False
+
+
+def _gate_floor() -> float:
+    return _GATE[0] if _GATE else config.QUALIFY_LB_FLOOR
+
+
+def _gate_min() -> int:
+    return _GATE[1] if _GATE else config.QUALIFY_MIN_DECISIVE
+
+
 def is_qualified(rep_wins: int, rep_decisive: int) -> bool:
     """Confidence qualify gate: enough sample, and the Wilson lower bound on the
     true hit-rate is at least QUALIFY_LB_FLOOR (≈90 % sure you beat a coin flip)."""
-    return (rep_decisive >= config.QUALIFY_MIN_DECISIVE
-            and confident_edge(rep_wins, rep_decisive) >= config.QUALIFY_LB_FLOOR)
+    return (rep_decisive >= _gate_min()
+            and confident_edge(rep_wins, rep_decisive) >= _gate_floor())
 
 
 def is_qualified_legacy(rep_wins: int, rep_decisive: int) -> bool:
     """LEGACY raw-hit qualify gate (rep_decisive ≥ floor and raw hit ≥ MIN_HIT)."""
-    return (rep_decisive >= config.QUALIFY_MIN_DECISIVE
+    return (rep_decisive >= _gate_min()
             and rep_decisive > 0
             and (rep_wins / rep_decisive) >= config.QUALIFY_MIN_HIT)
 

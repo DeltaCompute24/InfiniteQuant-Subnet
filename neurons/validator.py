@@ -1026,6 +1026,23 @@ class Validator:
                 except Exception as e:  # noqa: BLE001 — dead competition burns its share
                     print(f"  ! Markets vector failed (share burns): {e}")
                     vectors["markets"] = None
+            # Agent competition (config.AGENT_*): LF scoring over the agent accounts only,
+            # under its own gate. Computed from AGENT_COMP_FROM so the opening is scored;
+            # combine() ignores it until COMP_WEIGHTS_HISTORY gives `agent` a share.
+            if config.agent_comp_active(now):
+                try:
+                    with scoring.qualify_gate(config.AGENT_QUALIFY_LB_FLOOR,
+                                              config.AGENT_QUALIFY_MIN_DECISIVE):
+                        vectors["agent"] = replay.weights_from_journal(
+                            sig_rows, meta, uid_by_hotkey, now, scope="agent")
+                except Exception as e:  # noqa: BLE001 — dead competition burns its share
+                    print(f"  ! Agent vector failed (share burns): {e}")
+                    vectors["agent"] = None
+                if shares.get("agent", 0) <= 0:
+                    av = vectors.get("agent") or {}
+                    print(f"  · agent (unpaid until its share starts): "
+                          f"{'∅' if vectors.get('agent') is None else sum(1 for u, x in av.items() if x > 0 and u != config.BURN_UID)} earning uid(s), "
+                          f"burn={av.get(config.BURN_UID, 0):.3f}")
             w = competitions.combine(vectors, shares)
             self._write_entity_split(sig_rows, meta, uid_by_hotkey, now, referral_rows,
                                      keepalive, vectors.get("markets"), shares)
