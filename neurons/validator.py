@@ -532,6 +532,14 @@ class Validator:
                         "AND status='sealed'", (root_hex,))
         print(f"  ✓ batch {root_hex[:12]}… {hk[:8]}… → {len(calls)} account call(s)")
 
+    @staticmethod
+    def _agent_vector_fn(sig_rows, meta, now):
+        def fn(m):
+            with scoring.qualify_gate(config.AGENT_QUALIFY_LB_FLOOR,
+                                      config.AGENT_QUALIFY_MIN_DECISIVE):
+                return replay.weights_from_journal(sig_rows, meta, m, now, scope="agent")
+        return fn
+
     def _write_entity_split(self, sig_rows, meta, uid_by_hotkey, now, referral_rows,
                             keepalive, markets_vec, shares):
         """Append this cycle's entity split (replay.entity_split) for the payout side.
@@ -547,7 +555,9 @@ class Validator:
                                                       referrals=referral_rows,
                                                       keepalive=keepalive),
                 lambda m: hf_grade.mecid1_weights(m, now),
-                markets_vec, shares, uid_by_hotkey, accounts)
+                markets_vec, shares, uid_by_hotkey, accounts,
+                agent_fn=(self._agent_vector_fn(sig_rows, meta, now)
+                          if config.agent_comp_active(now) else None))
             os.makedirs(os.path.dirname(config.ENTITY_SPLIT_PATH), exist_ok=True)
             with open(config.ENTITY_SPLIT_PATH, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps({"ts": int(now), "split": split},

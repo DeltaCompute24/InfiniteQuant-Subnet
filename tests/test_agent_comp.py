@@ -113,3 +113,25 @@ def test_agent_unpaid_until_its_share():
 def test_bad_scope_raises():
     with pytest.raises(ValueError):
         replay.weights_from_journal([], {}, {}, NOW, scope="hf")
+
+
+def test_entity_split_pays_agent_accounts_from_the_agent_share():
+    sig = _rows(AG, "BTCUSD", 40, 10) + _rows(SIG_ACCT, "ETHUSD", 30, 10)
+    meta, uids = _meta(AG, SIG_ACCT), {ENT: 5}
+    shares = {"lf": 0.375, "agent": 0.25, "reserve": 0.125, "markets": 0.25}
+    lf = lambda m: replay.weights_from_journal(sig, meta, m, NOW)          # noqa: E731
+    ag = lambda m: _agent(sig, meta, m)                                     # noqa: E731
+    split = replay.entity_split(lf, lambda m: {}, None, shares, uids, {AG, SIG_ACCT}, agent_fn=ag)[ENT]
+    assert set(split["accounts"]) == {AG, SIG_ACCT}
+    assert split["accounts"][AG] == pytest.approx(0.25 * ag({**uids, AG: -1, SIG_ACCT: -2})[-1])
+    assert split["accounts"][SIG_ACCT] == pytest.approx(0.375 * lf({**uids, AG: -1, SIG_ACCT: -2})[-2])
+
+
+def test_entity_split_unpaid_agent_before_its_share():
+    sig = _rows(AG, "BTCUSD", 40, 10)
+    meta, uids = _meta(AG), {ENT: 5}
+    shares = config.comp_weights_as_of(config.HF_END_FROM_UNIX - 1)
+    split = replay.entity_split(lambda m: replay.weights_from_journal(sig, meta, m, NOW),
+                                lambda m: {}, None, shares, uids, {AG},
+                                agent_fn=lambda m: _agent(sig, meta, m))[ENT]
+    assert split["accounts"] == {}
