@@ -55,7 +55,7 @@ _REFX_RE = re.compile(rf"^{_REFX_PREFIX}:(\d+):(5[1-9A-HJ-NP-Za-km-z]{{46,50}})$
 _REFS_PREFIX = "sn89refs"
 _REFS_V = 1
 _REFS_RE = re.compile(rf"^{_REFS_PREFIX}:(\d+):(5[1-9A-HJ-NP-Za-km-z]{{46,50}})"
-                      rf":(5[1-9A-HJ-NP-Za-km-z]{{46,50}})$")
+                      rf":(5[1-9A-HJ-NP-Za-km-z]{{46,50}}(?:_\d{{1,9}})?)$")
 
 # Entity BATCH (config.SIGNALS_ENTITY_*): an allow-listed entity hotkey commits
 # "sn89b:1:<root>:<round>:<url_tag>" where root is the Merkle root (hf.merkle_root)
@@ -208,7 +208,9 @@ def encode_referrer_succession(from_ss58: str, to_ss58: str) -> str:
 
 def decode_referrer_succession(data: str) -> dict | None:
     """Decode an sn89refs succession attestation, or None. Both ss58s are
-    checksum-verified and a self-succession is dropped."""
+    checksum-verified and a self-succession is dropped. The successor may be an
+    entity account `<ss58>_<n>` (§ identity succession); its entity hotkey is
+    checksum-verified here and allow-listed at replay (entity.with_accounts)."""
     m = _REFS_RE.match((data or "").strip())
     if not m:
         return None
@@ -218,7 +220,7 @@ def decode_referrer_succession(data: str) -> dict | None:
     try:
         from scalecodec.utils.ss58 import ss58_decode
         ss58_decode(frm)
-        ss58_decode(to)
+        ss58_decode(to.split("_", 1)[0])
     except Exception:  # noqa: BLE001
         return None
     return {"from": frm, "to": to}

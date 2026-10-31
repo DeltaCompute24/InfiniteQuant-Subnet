@@ -1318,6 +1318,26 @@ def referrer_succession_active(now_unix: float) -> bool:
             and now_unix >= REFERRER_SUCCESSION_FROM_UNIX)
 
 
+# § identity succession (2026-11-01). Since the signals entity armed (2026-10-28)
+# a deregistered hosted miner moves to an entity ACCOUNT (<entity_hk>_<n>), not
+# to a new hotkey. Referral pairs are bound to hotkeys, so the move stranded
+# both sides: a recruiter's base sat on a dead key, and a recruit's pair pointed
+# at a key that would never earn again (35 recruiter-side and 72 recruit-side
+# pairs on 2026-10-31). From this stamp an sn89refs attestation may name an
+# account of an allow-listed entity as the successor, and the attestation is
+# read as what it always meant -- the SAME PERSON on a new key -- on BOTH sides
+# of a pair: a recruit with no UID is replaced by its live successor too.
+# Before the stamp replay is byte-identical (recruiter side only, hotkeys only).
+REFERRAL_IDENTITY_SUCCESSION_FROM_UNIX = int(
+    os.getenv("SN89_REFERRAL_IDENTITY_SUCCESSION_FROM", "1793491200"))  # 2026-11-01T00:00:00Z
+
+
+def referral_identity_succession_active(now_unix: float) -> bool:
+    """Whether sn89refs also resolves recruits and may name an entity account."""
+    return (REFERRAL_IDENTITY_SUCCESSION_FROM_UNIX > 0
+            and now_unix >= REFERRAL_IDENTITY_SUCCESSION_FROM_UNIX)
+
+
 COMBINED_WEIGHTS = os.getenv("SN89_COMBINED_WEIGHTS", "0") == "1"
 
 

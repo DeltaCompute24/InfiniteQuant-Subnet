@@ -28,7 +28,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from sn89_signals import chain, config  # noqa: E402
+from sn89_signals import chain, config, entity  # noqa: E402
 
 RECOMMIT_S = 600
 
@@ -46,6 +46,28 @@ def journaled_block(db_path: str, frm: str, to: str) -> int | None:
     return int(r[0]) if r else None
 
 
+def successor_live(ch, db_path: str, to: str) -> bool:
+    """A hotkey holding a UID, or (§ identity succession) an OPENED account of an
+    allow-listed entity whose hotkey holds a UID. Opened = journaled in the
+    validator's entity_accounts, so we never attest onto an account the
+    validator has not seen."""
+    hks = set(ch.metagraph().hotkeys)
+    parsed = entity.parse(to)
+    if parsed is None:
+        return to in hks
+    if parsed[0] not in config.SIGNALS_ENTITY_HOTKEYS or parsed[0] not in hks:
+        return False
+    try:
+        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            return con.execute("SELECT 1 FROM entity_accounts WHERE account=?",
+                               (to,)).fetchone() is not None
+        finally:
+            con.close()
+    except sqlite3.OperationalError:
+        return False
+
+
 def _wallet(name: str, hotkey: str):
     import bittensor as bt
     w = bt.Wallet(name=name, hotkey=hotkey)
@@ -55,12 +77,13 @@ def _wallet(name: str, hotkey: str):
     return w
 
 
-def commit(ch, w, frm: str, to: str) -> bool:
+def commit(ch, w, frm: str, to: str, db_path: str) -> bool:
     if frm == to:
         print(f"  ✗ {frm[:8]}…: self-succession refused")
         return False
-    if to not in set(ch.metagraph().hotkeys):
-        print(f"  ✗ {to[:8]}… holds no UID on {config.NETUID} — not attesting")
+    if not successor_live(ch, db_path, to):
+        print(f"  ✗ {to[:8]}…{to[-4:]} holds no UID / is not an opened entity account "
+              f"on {config.NETUID} — not attesting")
         return False
     resp = ch.commit_referrer_succession(w, frm, to)
     # SDK 10 returns an ExtrinsicResponse (truthy object); older SDKs a bool.
@@ -113,8 +136,8 @@ def drain(args, ch, w) -> int:
             print(f"  · pending {frm[:8]}… → {to[:8]}… (no wallet; dry)")
             return 0
         block = ch.current_block()
-        if not commit(ch, w, frm, to):
-            if to not in set(ch.metagraph().hotkeys):
+        if not commit(ch, w, frm, to, args.db):
+            if not successor_live(ch, args.db, to):
                 # successor not registered YET (re-roll still funding): leave it
                 return 0
             state[key] = {"status": "refused", "at": time.time()}
@@ -149,7 +172,7 @@ def main() -> int:
     if w is None:
         print(f"dry: would attest {args.frm} → {args.to}")
         return 0
-    if not commit(ch, w, args.frm, args.to):
+    if not commit(ch, w, args.frm, args.to, args.db):
         return 1
     deadline = time.time() + args.wait
     while time.time() < deadline:

@@ -198,6 +198,34 @@ def weights_from_journal(
                                    use_points=False)
 
 
+def resolve_referral_successions(pairs: list[tuple[str, str]],
+                                 withheld: set[str],
+                                 successions: list[dict],
+                                 uid_by_hotkey: dict[str, int],
+                                 now: float):
+    """§ referrer succession + § identity succession, the ONE implementation
+    shared by referrer_weights_from_journal and tools/publish_referrer_standing.py.
+    Returns (pairs, withheld, uid_by_hotkey).
+
+    Before the identity stamp: recruiters only, unchanged. After it: an attested
+    successor may be an entity account (added to uid_by_hotkey through
+    entity.with_accounts, allow-listed entities only), recruits resolve too, and
+    the withheld set (keyed by recruit) follows the recruit onto its new key.
+    """
+    if not config.referrer_succession_active(now):
+        return pairs, withheld, uid_by_hotkey
+    if not config.referral_identity_succession_active(now):
+        return (scoring.apply_referrer_succession(pairs, successions, uid_by_hotkey),
+                withheld, uid_by_hotkey)
+    uid_by_hotkey = entity.with_accounts(
+        uid_by_hotkey, {s.get("to_hk") for s in successions if s.get("to_hk")})
+    resolve = scoring.succession_resolver(successions, uid_by_hotkey)
+    withheld = {resolve(r) for r in withheld}
+    pairs = scoring.apply_referrer_succession(pairs, successions, uid_by_hotkey,
+                                              recruits=True)
+    return pairs, withheld, uid_by_hotkey
+
+
 def referrer_withheld_recruits(signals: list[dict],
                                orig_pairs: list[tuple[str, str]],
                                remapped_pairs: list[tuple[str, str]],
@@ -367,9 +395,8 @@ def referrer_weights_from_journal(
     # on its coldkey's live successor. After the withheld set on purpose — that
     # set is keyed by RECRUIT, so a recruiter shadowing its own recruit carries
     # the penalty onto its new key (same person) instead of shedding it.
-    if config.referrer_succession_active(now):
-        pairs = scoring.apply_referrer_succession(
-            pairs, referrer_successions or [], uid_by_hotkey)
+    pairs, withheld, uid_by_hotkey = resolve_referral_successions(
+        pairs, withheld, referrer_successions or [], uid_by_hotkey, now)
 
     recruit_hks = {recruit for _, recruit in pairs}
     lf_tally = referrer_recruit_tallies(signals, meta, now, recruit_hks)

@@ -28,7 +28,7 @@ import json, os, sqlite3, sys, time
 from pathlib import Path
 
 sys.path.insert(0, "/opt/sn89-signals")
-from sn89_signals import config, replay, scoring                 # noqa: E402
+from sn89_signals import config, entity, replay, scoring         # noqa: E402
 
 OUT = Path(os.environ.get(
     "IQ_SN89_REFERRER_STANDING",
@@ -143,11 +143,17 @@ def main() -> int:
     successions = load_successions(config.DB_PATH)
     succeeded_from: dict = {}
     if config.referrer_succession_active(now):
-        before = {recruit: recruiter for recruiter, recruit in pairs}
-        pairs = scoring.apply_referrer_succession(pairs, successions, uid_by_hotkey)
-        for recruiter, recruit in pairs:
-            if before.get(recruit) not in (None, recruiter):
-                succeeded_from.setdefault(recruiter, set()).add(before[recruit])
+        uid_by_hotkey = entity.with_accounts(uid_by_hotkey, {r for r, _ in pairs})
+        before = list(pairs)
+        pairs, withheld, uid_by_hotkey = replay.resolve_referral_successions(
+            pairs, withheld, successions, uid_by_hotkey, now)
+        after_by_recruit = {recruit: recruiter for recruiter, recruit in pairs}
+        resolve = scoring.succession_resolver(successions, uid_by_hotkey)
+        for recruiter, recruit in before:
+            rc = resolve(recruit) if config.referral_identity_succession_active(now) else recruit
+            eff = after_by_recruit.get(rc)
+            if eff is not None and eff != recruiter:
+                succeeded_from.setdefault(eff, set()).add(recruiter)
 
     fields, missing = competition_tallies(sig_rows, meta, uid_by_hotkey, now)
     multicomp = config.referrer_multicomp_active(now)

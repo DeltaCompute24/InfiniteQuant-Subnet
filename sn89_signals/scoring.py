@@ -596,25 +596,11 @@ def apply_referral_transfers(pairs: list[tuple[str, str]],
                   for recruiter, recruit in pairs)
 
 
-def apply_referrer_succession(pairs: list[tuple[str, str]],
-                              successions: list[dict],
-                              uid_by_hk: dict[str, int]) -> list[tuple[str, str]]:
-    """Credit a pair whose recruiter hotkey holds NO UID to that recruiter's
-    live successor (§ referrer succession). Runs AFTER apply_referral_transfers.
-
-    successions: [{from_hk, to_hk, commit_block}] — sn89refs attestations
-    journaled ONLY from config.SUCCESSION_ATTESTOR_HK. The LATEST attestation
-    per from_hk wins, so a mistaken one is corrected by attesting again.
-
-      * Only a recruiter WITHOUT a UID moves. A registered hotkey keeps its
-        own pairs, so this can never take a base from a live key.
-      * CHAINS (A dead → B dead → C live), up to REFERRER_SUCCESSION_MAX_HOPS,
-        with a cycle guard. Safe here where transfers are not: every hop is
-        the same person re-rolling, attested by the operator who did it.
-      * If the chain ends on a hotkey with no UID either, the pair stays on
-        its recruiter (it burns, exactly as before).
-      * A pair whose successor IS the recruit is dropped (no self-referral).
-    """
+def succession_resolver(successions: list[dict], uid_by_hk: dict[str, int]):
+    """hk -> the live key it resolves to through sn89refs attestations, or hk
+    itself when it holds a UID, has no attested successor, or the chain dead-ends.
+    Latest attestation per from_hk wins; chains up to
+    REFERRER_SUCCESSION_MAX_HOPS with a cycle guard."""
     best: dict[str, tuple[int, str]] = {}
     for s in successions or []:
         frm, to, ob = s.get("from_hk"), s.get("to_hk"), s.get("commit_block")
@@ -637,12 +623,50 @@ def apply_referrer_succession(pairs: list[tuple[str, str]],
             cur = n
         return cur if uid_by_hk.get(cur) is not None else hk
 
+    return resolve
+
+
+def apply_referrer_succession(pairs: list[tuple[str, str]],
+                              successions: list[dict],
+                              uid_by_hk: dict[str, int],
+                              recruits: bool = False) -> list[tuple[str, str]]:
+    """Credit a pair whose recruiter hotkey holds NO UID to that recruiter's
+    live successor (§ referrer succession). Runs AFTER apply_referral_transfers.
+
+    successions: [{from_hk, to_hk, commit_block}] — sn89refs attestations
+    journaled ONLY from config.SUCCESSION_ATTESTOR_HK. The LATEST attestation
+    per from_hk wins, so a mistaken one is corrected by attesting again.
+
+      * Only a recruiter WITHOUT a UID moves. A registered hotkey keeps its
+        own pairs, so this can never take a base from a live key.
+      * CHAINS (A dead → B dead → C live), up to REFERRER_SUCCESSION_MAX_HOPS,
+        with a cycle guard. Safe here where transfers are not: every hop is
+        the same person re-rolling, attested by the operator who did it.
+      * If the chain ends on a hotkey with no UID either, the pair stays on
+        its recruiter (it burns, exactly as before).
+      * A pair whose successor IS the recruit is dropped (no self-referral).
+      * recruits=True (§ identity succession): the recruit side resolves the
+        same way, so a recruit that moved to a new key or an entity account
+        keeps its pair. If two pairs land on one recruit, the earliest-sorted
+        pair is kept, so a recruit still has exactly one recruiter.
+    """
+    resolve = succession_resolver(successions, uid_by_hk)
     out = []
     for recruiter, recruit in pairs:
         eff = resolve(recruiter)
-        if eff != recruit:
-            out.append((eff, recruit))
-    return sorted(out)
+        rc = resolve(recruit) if recruits else recruit
+        if eff != rc:
+            out.append((eff, rc))
+    out = sorted(set(out))
+    if recruits:
+        kept, seen = [], set()
+        for recruiter, recruit in out:
+            if recruit in seen:
+                continue
+            seen.add(recruit)
+            kept.append((recruiter, recruit))
+        out = kept
+    return out
 
 
 def referrer_scores(pairs: list[tuple[str, str]],

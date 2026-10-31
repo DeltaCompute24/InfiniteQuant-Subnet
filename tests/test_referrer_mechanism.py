@@ -271,3 +271,80 @@ class TestSuccessionJournal:
         succ = [{"from_hk": f, "to_hk": t, "commit_block": cb}
                 for (f, t), cb in rows.items()]
         assert scoring.apply_referrer_succession([(A, R1)], succ, {B: 1, C: 2}) == [(B, R1)]
+
+
+class TestIdentitySuccession:
+    """§ identity succession (2026-11-01): sn89refs may name an entity account,
+    and recruits resolve through attestations too."""
+    ENT = sorted(config.SIGNALS_ENTITY_HOTKEYS)[0] if config.SIGNALS_ENTITY_HOTKEYS else None
+    OLD = "5HbkgCR1nx7T9vga9ZCCTTadnefMxWhA3vYFSaic7uA8aGQ2"
+
+    def acct(self, n):
+        return f"{self.ENT}_{n}"
+
+    def test_account_successor_roundtrip_and_budget(self):
+        data = chain.encode_referrer_succession(self.OLD, self.acct(123456))
+        assert len(data.encode()) <= 128
+        assert chain.decode_referrer_succession(data) == {"from": self.OLD, "to": self.acct(123456)}
+
+    def test_account_successor_bad_checksum_dropped(self):
+        bad = self.ENT[:-1] + ("3" if self.ENT[-1] != "3" else "4")
+        assert chain.decode_referrer_succession(f"sn89refs:1:{self.OLD}:{bad}_5") is None
+
+    def test_account_as_from_still_refused(self):
+        assert chain.decode_referrer_succession(
+            f"sn89refs:1:{self.acct(5)}:{self.OLD}") is None
+
+    def test_recruit_side_resolves_only_with_flag(self):
+        uid = {A: 1, C: 2}                       # R1 dead, successor C live
+        succ = [{"from_hk": R1, "to_hk": C, "commit_block": 5}]
+        assert scoring.apply_referrer_succession([(A, R1)], succ, uid) == [(A, R1)]
+        assert scoring.apply_referrer_succession([(A, R1)], succ, uid, recruits=True) == [(A, C)]
+
+    def test_live_recruit_never_moves(self):
+        uid = {A: 1, R1: 3, C: 2}
+        succ = [{"from_hk": R1, "to_hk": C, "commit_block": 5}]
+        assert scoring.apply_referrer_succession([(A, R1)], succ, uid, recruits=True) == [(A, R1)]
+
+    def test_two_pairs_onto_one_recruit_keep_one(self):
+        uid = {A: 1, B: 2, C: 3}                  # R1, R2 dead, both attested to C
+        succ = [{"from_hk": R1, "to_hk": C, "commit_block": 5},
+                {"from_hk": R2, "to_hk": C, "commit_block": 6}]
+        out = scoring.apply_referrer_succession([(A, R1), (B, R2)], succ, uid, recruits=True)
+        assert out == [(A, C)]
+
+    def test_resolve_both_sides_to_accounts_after_stamp(self):
+        from sn89_signals import replay
+        if self.ENT is None:
+            pytest.skip("no entity allow-listed")
+        t = config.REFERRAL_IDENTITY_SUCCESSION_FROM_UNIX + 10
+        succ = [{"from_hk": A, "to_hk": self.acct(7), "commit_block": 5},
+                {"from_hk": R1, "to_hk": self.acct(8), "commit_block": 6}]
+        uid = {self.ENT: 39}
+        pairs, withheld, u2 = replay.resolve_referral_successions(
+            [(A, R1)], {R1}, succ, uid, t)
+        assert pairs == [(self.acct(7), self.acct(8))]
+        assert withheld == {self.acct(8)}      # the penalty follows the person
+        assert u2[self.acct(7)] == 39 and u2[self.acct(8)] == 39
+
+    def test_before_stamp_byte_identical(self):
+        from sn89_signals import replay
+        if self.ENT is None:
+            pytest.skip("no entity allow-listed")
+        t = config.REFERRAL_IDENTITY_SUCCESSION_FROM_UNIX - 10
+        assert config.referrer_succession_active(t)
+        succ = [{"from_hk": A, "to_hk": self.acct(7), "commit_block": 5},
+                {"from_hk": R1, "to_hk": C, "commit_block": 6}]
+        uid = {self.ENT: 39, C: 4}
+        pairs, withheld, u2 = replay.resolve_referral_successions(
+            [(A, R1)], {R1}, succ, uid, t)
+        assert pairs == [(A, R1)] and withheld == {R1} and u2 == uid
+
+    def test_unlisted_entity_account_does_not_resolve(self):
+        from sn89_signals import replay
+        t = config.REFERRAL_IDENTITY_SUCCESSION_FROM_UNIX + 10
+        stranger = "5HbkgCR1nx7T9vga9ZCCTTadnefMxWhA3vYFSaic7uA8aGQ2"
+        succ = [{"from_hk": A, "to_hk": f"{stranger}_1", "commit_block": 5}]
+        pairs, _, _ = replay.resolve_referral_successions(
+            [(A, R1)], set(), succ, {stranger: 50, R1: 3}, t)
+        assert pairs == [(A, R1)]
