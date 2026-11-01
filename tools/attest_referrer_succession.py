@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sqlite3
 import sys
 import time
@@ -31,6 +32,17 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from sn89_signals import chain, config, entity  # noqa: E402
 
 RECOMMIT_S = 600
+# A chain-side failure that clears by itself (chef's commitment space limit per
+# interval, rate limits, RPC trouble) is NOT a refusal: the item holds the head
+# of the queue and is retried every RETRY_S, up to MAX_TRANSIENT attempts.
+# Before 2026-11-01 these were marked refused on the first failure, which
+# stranded 29 account successions in two SpaceLimitExceeded bursts.
+RETRY_S = 600
+MAX_TRANSIENT = 36
+_TRANSIENT = re.compile(r"SpaceLimitExceeded|RateLimit|TooMany|429|timed? ?out|"
+                        r"Connection|Transaction is outdated|Priority is too low",
+                        re.I)
+_LAST_ERR = ""
 
 
 def journaled_block(db_path: str, frm: str, to: str) -> int | None:
@@ -85,10 +97,19 @@ def commit(ch, w, frm: str, to: str, db_path: str) -> bool:
         print(f"  ✗ {to[:8]}…{to[-4:]} holds no UID / is not an opened entity account "
               f"on {config.NETUID} — not attesting")
         return False
-    resp = ch.commit_referrer_succession(w, frm, to)
+    global _LAST_ERR
+    _LAST_ERR = ""
+    try:
+        resp = ch.commit_referrer_succession(w, frm, to)
+    except Exception as e:  # noqa: BLE001 — classified by the caller
+        _LAST_ERR = f"{type(e).__name__}: {e}"
+        print(f"  ✗ sn89refs {frm[:8]}… → {to[:8]}… raised {_LAST_ERR[:160]}")
+        return False
     # SDK 10 returns an ExtrinsicResponse (truthy object); older SDKs a bool.
     ok = bool(getattr(resp, "success", resp))
     msg = getattr(resp, "message", "") or ""
+    if not ok:
+        _LAST_ERR = str(msg) or "submit failed"
     print(f"  {'⇢' if ok else '✗'} sn89refs {frm[:8]}… → {to[:8]}… submitted={ok}"
           + (f" ({str(msg)[:120]})" if msg and not ok else ""))
     return ok
@@ -132,6 +153,8 @@ def drain(args, ch, w) -> int:
                 continue
             if time.time() - float(st.get("committed_at", 0)) < RECOMMIT_S:
                 return 0                 # in flight — the slot is busy, wait
+        if st.get("status") == "retry" and time.time() < float(st.get("next_at", 0)):
+            return 0                     # transient failure — hold the head of the queue
         if w is None:
             print(f"  · pending {frm[:8]}… → {to[:8]}… (no wallet; dry)")
             return 0
@@ -140,7 +163,16 @@ def drain(args, ch, w) -> int:
             if not successor_live(ch, args.db, to):
                 # successor not registered YET (re-roll still funding): leave it
                 return 0
-            state[key] = {"status": "refused", "at": time.time()}
+            n = int(st.get("attempts", 0)) + 1 if st.get("status") == "retry" else 1
+            if _TRANSIENT.search(_LAST_ERR or "") and n < MAX_TRANSIENT:
+                state[key] = {"status": "retry", "attempts": n,
+                              "next_at": time.time() + RETRY_S,
+                              "reason": (_LAST_ERR or "")[:200]}
+                save()
+                print(f"  ↻ transient, retry {n}/{MAX_TRANSIENT} in {RETRY_S}s")
+                return 0
+            state[key] = {"status": "refused", "at": time.time(),
+                          "attempts": n, "reason": (_LAST_ERR or "")[:200]}
             save()
             continue
         state[key] = {"status": "committed", "committed_at": time.time(),
