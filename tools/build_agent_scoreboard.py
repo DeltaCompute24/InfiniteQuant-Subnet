@@ -25,6 +25,9 @@ OUT = os.getenv("SN89_AGENT_SCOREBOARD_PATH",
 # and cannot read the validator DB, so this root job hands it the on-chain status.
 VERDICTS = os.getenv("SN89_AGENT_VERDICTS_PATH", "/opt/iq-platform/data/live/sn89-agent/verdicts.json")
 OWNERS = os.getenv("SN89_AGENT_ACCOUNTS_PATH", "/opt/iq-platform/data/live/sn89-agent/accounts.json")
+# The intake's own records: calls/<n>.jsonl (call -> algo), commits.jsonl (call -> commitment)
+# and algo_names.json (the owner's public nickname per algo). The validator never sees an algo.
+AGENT_DIR = os.getenv("SN89_AGENT_DIR", os.path.dirname(OWNERS))
 
 
 def _test_numbers() -> set:
@@ -33,6 +36,66 @@ def _test_numbers() -> set:
             return {int(v["n"]) for k, v in json.load(fh).items() if k.startswith("test:")}
     except (OSError, ValueError, KeyError):
         return set()
+
+
+def _jsonl(path: str) -> list:
+    out = []
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    out.append(json.loads(line))
+                except ValueError:
+                    pass
+    except OSError:
+        pass
+    return out
+
+
+def _algo_of_commit(agent_dir: str) -> dict:
+    """commitment -> (subaccount n, algo_id, nickname or None), from the intake's own files."""
+    try:
+        with open(os.path.join(agent_dir, "accounts.json"), encoding="utf-8") as fh:
+            owners = {int(v["n"]): k for k, v in json.load(fh).items()}
+    except (OSError, ValueError, KeyError):
+        return {}
+    try:
+        with open(os.path.join(agent_dir, "algo_names.json"), encoding="utf-8") as fh:
+            names = json.load(fh)
+    except (OSError, ValueError):
+        names = {}
+    call_algo = {}
+    for n in owners:
+        for c in _jsonl(os.path.join(agent_dir, "calls", f"{n}.jsonl")):
+            call_algo[int(c["id"])] = (n, str(c.get("algo_id") or ""))
+    out = {}
+    for cm in _jsonl(os.path.join(agent_dir, "commits.jsonl")):
+        ch, cid = cm.get("commitment"), cm.get("call_id")
+        if not cm.get("ok") or not ch or cid is None or int(cid) not in call_algo:
+            continue
+        n, algo = call_algo[int(cid)]
+        out[ch] = (n, algo, (names.get(owners[n]) or {}).get(algo) or None)
+    return out
+
+
+def _algo_rows(mine: list, by_commit: dict) -> list:
+    """Per-algo record inside one account. The algo folder name stays private; only the
+    owner's nickname is published, and an algo without one is listed unnamed."""
+    groups: dict = {}
+    for s in mine:
+        _, algo, name = by_commit.get(s["commit_hex"], (None, None, None))
+        g = groups.setdefault(algo, {"name": name, "calls": 0, "won": 0, "lost": 0, "washed": 0,
+                                     "void": 0, "pending": 0})
+        g["calls"] += 1
+        g[s["status"] if s["status"] in ("won", "lost", "washed", "void") else "pending"] += 1
+    out = []
+    for g in groups.values():
+        dec = g["won"] + g["lost"]
+        g["decisive"] = dec
+        g["hit_rate_pct"] = round(100 * g["won"] / dec, 1) if dec else None
+        out.append(g)
+    out.sort(key=lambda g: (g["name"] is None, -g["calls"]))
+    return out
 
 
 def _iso(t):
@@ -51,6 +114,7 @@ def build(db_path: str, now: float) -> dict:
     con.close()
 
     hidden = _test_numbers()
+    by_commit = _algo_of_commit(AGENT_DIR)
     accounts = sorted(hk for hk in meta
                       if entity.is_agent_account(hk) and entity.parse(hk)[1] not in hidden)
     pseudo = {a: -(i + 1) for i, a in enumerate(accounts)}
@@ -77,6 +141,7 @@ def build(db_path: str, now: float) -> dict:
             "lb_pct": round(100 * lb, 1) if lb is not None else None,
             "qualified": qualified, "weight_share_pct": None,
             "last_call_at": _iso(max((s["t0_unix"] for s in mine), default=None)),
+            "algos": _algo_rows(mine, by_commit),
         })
     total = sum(weights.values())
     for r in rows:

@@ -46,6 +46,7 @@ def db(tmp_path, monkeypatch):
     owners.write_text(json.dumps({"web:1": {"n": config.AGENT_ACCOUNT_MIN + 1},
                                   "test:x": {"n": config.AGENT_ACCOUNT_MIN + 2}}))
     monkeypatch.setattr(bas, "OWNERS", str(owners))
+    monkeypatch.setattr(bas, "AGENT_DIR", str(tmp_path))
     return str(p)
 
 
@@ -68,3 +69,23 @@ def test_verdicts_cover_agent_accounts_only(db):
              if entity.is_agent_account(hk)}
     con.close()
     assert set(v) == agent and len(v) == 110          # two agent accounts x 55; _5 excluded
+
+
+def test_algos_split_by_intake_record_and_publish_only_nicknames(db, tmp_path):
+    n = config.AGENT_ACCOUNT_MIN + 1
+    hk = f"{ENT}_{n}"
+    (tmp_path / "calls").mkdir()
+    # Calls 0-29 from algo "secret-folder-a" (nicknamed), 30-54 from "b" (no nickname).
+    with open(tmp_path / "calls" / f"{n}.jsonl", "w") as fh:
+        for i in range(55):
+            fh.write(json.dumps({"id": 9_000_000_000 + i,
+                                 "algo_id": "secret-folder-a" if i < 30 else "b"}) + "\n")
+    with open(tmp_path / "commits.jsonl", "w") as fh:
+        for i in range(55):
+            fh.write(json.dumps({"call_id": 9_000_000_000 + i, "commitment": f"{hk}-{i}",
+                                 "ok": True}) + "\n")
+    (tmp_path / "algo_names.json").write_text(json.dumps({"web:1": {"secret-folder-a": "Night Owl"}}))
+    row = bas.build(db, NOW)["leaderboard"][0]
+    assert [(a["name"], a["calls"], a["won"], a["lost"]) for a in row["algos"]] == \
+        [("Night Owl", 30, 30, 0), (None, 25, 15, 10)]
+    assert "secret-folder" not in json.dumps(row)
