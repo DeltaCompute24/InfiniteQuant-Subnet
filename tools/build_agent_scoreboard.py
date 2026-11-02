@@ -21,6 +21,9 @@ from sn89_signals import config, entity, replay, scoring  # noqa: E402
 OUT = os.getenv("SN89_AGENT_SCOREBOARD_PATH",
                 "/opt/iq-platform/data/live/sn89-agent-scoreboard.json")
 # The intake account map; accounts opened by an internal `test:` login stay off the board.
+# Per-call verdicts for the IQ Agent workspace, keyed by commitment. The intake runs as iq
+# and cannot read the validator DB, so this root job hands it the on-chain status.
+VERDICTS = os.getenv("SN89_AGENT_VERDICTS_PATH", "/opt/iq-platform/data/live/sn89-agent/verdicts.json")
 OWNERS = os.getenv("SN89_AGENT_ACCOUNTS_PATH", "/opt/iq-platform/data/live/sn89-agent/accounts.json")
 
 
@@ -93,11 +96,28 @@ def build(db_path: str, now: float) -> dict:
     }
 
 
+def verdicts(db_path: str) -> dict:
+    """commit_hex -> {status, exit_at_ms} for every agent-account call the validator holds."""
+    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        rows = con.execute("SELECT commit_hex, hotkey, status, exit_at_ms FROM signals "
+                           "WHERE instr(hotkey, '_') > 0").fetchall()
+    finally:
+        con.close()
+    return {ch: {"status": st, "exit_at_ms": ex}
+            for ch, hk, st, ex in rows if entity.is_agent_account(hk)}
+
+
+def _write(path: str, obj) -> None:
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(obj, fh, separators=(",", ":"))
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, path)
+
+
 if __name__ == "__main__":
     board = build(config.DB_PATH, time.time())
-    tmp = OUT + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(board, fh, separators=(",", ":"))
-    os.chmod(tmp, 0o644)
-    os.replace(tmp, OUT)
+    _write(OUT, board)
+    _write(VERDICTS, verdicts(config.DB_PATH))
     print(f"agent scoreboard: {board['n_accounts']} account(s), {board['n_qualified']} qualified -> {OUT}")

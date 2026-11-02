@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from sn89_signals import config, hf
+from sn89_signals import config, entity, hf
 from sn89_signals.schema import Signal
 
 NOW = 1_800_000_000.0
@@ -58,3 +58,13 @@ def test_board_lists_agent_accounts_only_and_hides_test_logins(db):
     assert b["gate"] == {"lb_floor_pct": 55, "min_decisive": 40}
     assert b["paid"] is True                                 # NOW is after the agent share starts
     assert bas.build(db, config.HF_END_FROM_UNIX - 1)["paid"] is False
+
+
+def test_verdicts_cover_agent_accounts_only(db):
+    v = bas.verdicts(db)
+    assert v and all(isinstance(x["status"], str) for x in v.values())
+    con = sqlite3.connect(db)
+    agent = {ch for ch, hk in con.execute("SELECT commit_hex, hotkey FROM signals")
+             if entity.is_agent_account(hk)}
+    con.close()
+    assert set(v) == agent and len(v) == 110          # two agent accounts x 55; _5 excluded
