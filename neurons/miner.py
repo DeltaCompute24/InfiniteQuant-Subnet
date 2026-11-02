@@ -179,9 +179,10 @@ def submit(wallet: "bt.Wallet", sig: Signal, ch: chain.Chain | None = None) -> d
     pushed = True if not self_hosted else bucket.mirror_to_relay(
         blob, sig.hotkey, sig.nonce)
     pushed = bool(pushed or _push_owner_webhook(blob, url))
-    ok = ch.commit(wallet, sig.commitment().hex(), rnd, url)
+    ok, err = chain.commit_ok(ch.commit(wallet, sig.commitment().hex(), rnd, url))
     return {
-        "ok": bool(ok),
+        "ok": ok,
+        "error": err if not ok else "",
         "nonce": sig.nonce,
         "commitment": sig.commitment().hex(),
         "round": rnd,
@@ -222,9 +223,10 @@ def submit_batch(wallet: "bt.Wallet", sigs: list[Signal],
     bucket.update_index(ent, nonce)
     pushed = bucket.mirror_to_relay(blob, ent, nonce) if (
         bucket.BLOB_DIR or config.R2_ACCESS_KEY_ID) else True
-    ok = ch.commit_batch(wallet, root, rnd, url)
+    ok, err = chain.commit_ok(ch.commit_batch(wallet, root, rnd, url))
     return {
-        "ok": bool(ok),
+        "ok": ok,
+        "error": err if not ok else "",
         "root": root,
         "round": rnd,
         "reveals_at_utc": time.strftime(
@@ -443,7 +445,7 @@ def cmd_transfer_referrals(args) -> int:
         print("confirmation mismatch — nothing committed", file=sys.stderr)
         return 1
     ch = chain.Chain()
-    ok = ch.commit_referral_transfer(w, to)
+    ok, _ = chain.commit_ok(ch.commit_referral_transfer(w, to))
     print("transfer committed on-chain — it takes effect at the validator's "
           "next weight cycle" if ok else "COMMIT FAILED — nothing transferred")
     return 0 if ok else 1
@@ -835,8 +837,8 @@ def cmd_refer(args) -> int:
               f"block(s) ago and may not be observed yet — a referral now could "
               f"shadow it. Retry in ~{wait_s}s.", file=sys.stderr)
         return 1
-    ok = ch.commit_referral(w, recruit)
-    print(json.dumps({"ok": bool(ok), "recruiter": hotkey, "recruit": recruit}, indent=2))
+    ok, err = chain.commit_ok(ch.commit_referral(w, recruit))
+    print(json.dumps({"ok": ok, "error": err, "recruiter": hotkey, "recruit": recruit}, indent=2))
     if ok:
         print("\nNEXT STEPS:\n"
               "  1. Hold your next SIGNAL commit for ~90s (it could shadow this "

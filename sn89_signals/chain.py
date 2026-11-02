@@ -22,6 +22,22 @@ import bittensor as bt
 
 from . import config
 
+
+def commit_ok(resp) -> tuple[bool, str]:
+    """(success, message) for a set_commitment result.
+
+    bittensor 10 returns an ExtrinsicResponse, which defines __len__ (== 2) and so is
+    ALWAYS truthy: `bool(resp)` reports a refused commitment (SpaceLimitExceeded, rate
+    limit, bad nonce) as committed. Older SDKs return a (success, message) tuple or a
+    bare bool. 2026-11-02: the entity multiplexer dropped 9 account opens, a referral
+    and 7 LF batches as "committed" this way.
+    """
+    if hasattr(resp, "success"):
+        return bool(resp.success), str(getattr(resp, "message", "") or "")
+    if isinstance(resp, tuple):
+        return bool(resp[0]), str(resp[1]) if len(resp) > 1 else ""
+    return bool(resp), ""
+
 _PREFIX = "sn89"
 _V = 1
 _RE = re.compile(rf"^{_PREFIX}:(\d+):([0-9a-f]{{64}}):(\d+):([0-9a-f]{{16}})$")
