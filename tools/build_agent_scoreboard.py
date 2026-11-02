@@ -67,7 +67,7 @@ def build(db_path: str, now: float) -> dict:
         # Before an account qualifies, its weight is only the new-miner dust floor, not a share.
         weights[a] = vec.get(pseudo[a], 0.0) if qualified else 0.0
         rows.append({
-            "label": f"Agent {entity.parse(a)[1] - config.AGENT_ACCOUNT_MIN}",
+            "label": str(entity.parse(a)[1]),           # the subaccount id the owner sees
             "account": a, "calls": len(mine), "won": c["won"], "lost": c["lost"],
             "washed": c["washed"], "pending": pending, "void": c["void"], "decisive": dec,
             "hit_rate_pct": round(100 * c["won"] / dec, 1) if dec else None,

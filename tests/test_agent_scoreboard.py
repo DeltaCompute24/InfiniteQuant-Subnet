@@ -51,7 +51,7 @@ def db(tmp_path, monkeypatch):
 
 def test_board_lists_agent_accounts_only_and_hides_test_logins(db):
     b = bas.build(db, NOW)
-    assert [r["label"] for r in b["leaderboard"]] == ["Agent 1"]
+    assert [r["label"] for r in b["leaderboard"]] == [str(config.AGENT_ACCOUNT_MIN + 1)]
     r = b["leaderboard"][0]
     assert (r["won"], r["lost"], r["decisive"], r["qualified"]) == (45, 10, 55, True)
     assert r["weight_share_pct"] == 100.0
