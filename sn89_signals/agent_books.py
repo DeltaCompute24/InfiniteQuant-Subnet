@@ -499,10 +499,15 @@ def replay_book(account: str, receipts: list, ticks: list, universe: dict, *,
         accept(rs[ri])
         ri += 1
 
+    positions = {p: {"qty": book.qty[p], "avg": book.avg[p], "mark": book.marks[p]}
+                 for p in sorted(book.qty) if book.qty[p]}
     return {"account": account, "fills": fills, "refused": refused, "noops": noops,
             "daily": daily, "weeks": weeks, "series": series,
             "eliminated_at_ms": eliminated_at, "hwm": hwm,
-            "equity": book.equity(), "balance": book.balance()}
+            "equity": book.equity(), "balance": book.balance(),
+            "unrealised": book.unrealised(), "ath": ath, "positions": positions,
+            "declared": dict(sorted(declared.items())),
+            "open_week_buckets": len(week_fill_buckets)}
 
 
 def replay_books(receipts: list, ticks: list, universe: dict, *, start_ms: int,

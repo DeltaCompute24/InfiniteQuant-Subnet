@@ -1522,6 +1522,45 @@ def agent_comp_active(t_unix: float) -> bool:
     return AGENT_COMP_FROM_UNIX > 0 and t_unix >= AGENT_COMP_FROM_UNIX
 
 
+# ── Agent competition v2: agent BOOKS (sn89_signals/agent_books*.py) ─────────
+# Hosted algos hold a leverage book per entity account, scored as weekly high-water-mark
+# gains (agent_books.py). The pool is the `agentbook` share key. OFF by default: 0 = off.
+# When on, the validator pays the FROZEN week that most recently ended, from
+# AGENT_BOOKS_FREEZE_DELAY_S after its Monday 00:00 UTC close until the same offset a week
+# later (agent_books_io.pay_week_start_ms). Set it to a Monday 00:00 UTC + the delay: the
+# week before it is the first scored (and paid) week, which is also the replay EPOCH every
+# book starts from. combine() still ignores the vector until COMP_WEIGHTS_HISTORY gives
+# `agentbook` a share, so the flag alone never moves emission. SAME env name as the intake
+# (iq-platform side), so one value opens intake and validator together.
+AGENT_BOOKS_FROM_UNIX = int(os.getenv("SN89_AGENT_BOOKS_FROM", "0"))
+# Freeze delay = HF GRADE_ABANDON_S: every tick window of the week is published (or final
+# as missing) before the week is frozen, so every replayer freezes the same input.
+AGENT_BOOKS_FREEZE_DELAY_S = 6 * 3600
+AGENT_BOOKS_DIR = os.getenv("SN89_AGENT_BOOKS_DIR", os.path.expanduser("~/.sn89/agent-books"))
+# Where the intake writes one receipt log per account (`<n>.jsonl`), and where it publishes
+# the same lines (comma-separated URLs, or one URL ending in index.json listing them).
+AGENT_BOOKS_RECEIPTS_DIR = os.getenv("SN89_AGENT_BOOKS_RECEIPTS_DIR",
+                                     "/opt/iq-platform/data/live/sn89-agent/books")
+AGENT_BOOKS_RECEIPTS_URLS = os.getenv("SN89_AGENT_BOOKS_RECEIPTS_URLS", "")
+# Live book state for the intake (refuses receipts of an eliminated book) and the hosted
+# droplet (an algo reads its own book). Written by tools/agent_books_weekly.py --live.
+AGENT_BOOKS_LIVE_PATH = os.getenv("SN89_AGENT_BOOKS_LIVE_PATH",
+                                  "/opt/iq-platform/data/live/agent-books-live.json")
+# Entities whose bond coldkey is fixed here instead of by an `sn89entity:<coldkey>`
+# commitment (the entity's one commitment slot also carries LF batches and Markets oracle
+# anchors, so a registration commit would be overwritten within minutes). Registration only:
+# the bond itself is still checked every week like anyone else's.
+AGENT_BOOKS_GRANDFATHERED: dict = {
+    # IQ Markets / signals entity (UID 39) -> the subnet owner coldkey.
+    "5Hdvy1Msc9Su6U7kcJQRFnc39NNVumAcPnqFLoHqZ4Uix6g3":
+        "5HCC5ENqaQa38uuVWxeqdpMP9dYbgebjVGtJdSShSKv4mGZH",
+}
+
+
+def agent_books_active(t_unix: float) -> bool:
+    return AGENT_BOOKS_FROM_UNIX > 0 and t_unix >= AGENT_BOOKS_FROM_UNIX
+
+
 def markets_active_as_of(t_unix: float) -> bool:
     """A market STARTING at t exists under the rules (market_exists keys on the start)."""
     return bool(MARKETS_FROM_UNIX and t_unix >= MARKETS_FROM_UNIX)

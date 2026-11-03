@@ -29,6 +29,7 @@ import bittensor as bt
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from sn89_signals import agent_books_io  # noqa: E402  (Agent competition v2, flag-gated)
 from sn89_signals import (bucket, chain, closers, competitions, config, crypto, entity,
                           markets,
                           hf, hf_grade, replay, scoring)
@@ -541,13 +542,15 @@ class Validator:
         return fn
 
     def _write_entity_split(self, sig_rows, meta, uid_by_hotkey, now, referral_rows,
-                            keepalive, markets_vec, shares):
+                            keepalive, markets_vec, shares, agentbook_shares=None):
         """Append this cycle's entity split (replay.entity_split) for the payout side.
         Never raises: a bookkeeping failure must not stop weight setting."""
         try:
             if not config.signals_entity_active(now):
                 return
             accounts = {hk for hk in meta if entity.parse(hk) is not None}
+            if agentbook_shares:
+                accounts |= set(agentbook_shares)
             if not accounts:
                 return
             split = replay.entity_split(
@@ -557,7 +560,9 @@ class Validator:
                 lambda m: hf_grade.mecid1_weights(m, now),
                 markets_vec, shares, uid_by_hotkey, accounts,
                 agent_fn=(self._agent_vector_fn(sig_rows, meta, now)
-                          if config.agent_comp_active(now) else None))
+                          if config.agent_comp_active(now) else None),
+                agentbook_fn=((lambda m: agent_books_io.agentbook_vector(agentbook_shares, m))
+                              if agentbook_shares else None))
             os.makedirs(os.path.dirname(config.ENTITY_SPLIT_PATH), exist_ok=True)
             with open(config.ENTITY_SPLIT_PATH, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps({"ts": int(now), "split": split},
@@ -1053,9 +1058,27 @@ class Validator:
                     print(f"  · agent (unpaid until its share starts): "
                           f"{'∅' if vectors.get('agent') is None else sum(1 for u, x in av.items() if x > 0 and u != config.BURN_UID)} earning uid(s), "
                           f"burn={av.get(config.BURN_UID, 0):.3f}")
+            # Agent competition v2 (agent_books_io): per-account shares of the FROZEN week
+            # that most recently ended, read from SN89_AGENT_BOOKS_DIR. Flag-gated
+            # (SN89_AGENT_BOOKS_FROM, default off); combine() ignores `agentbook` until
+            # COMP_WEIGHTS_HISTORY gives it a share. A missing week file burns the share.
+            agentbook_shares = None
+            if config.agent_books_active(now):
+                try:
+                    agentbook_shares = agent_books_io.cycle_shares(now)
+                    vectors["agentbook"] = agent_books_io.agentbook_vector(
+                        agentbook_shares, uid_by_hotkey)
+                except Exception as e:  # noqa: BLE001 — dead competition burns its share
+                    print(f"  ! agentbook vector failed (share burns): {e}")
+                    agentbook_shares, vectors["agentbook"] = None, None
+                print(f"  · agentbook week {agent_books_io.week_label(agent_books_io.pay_week_start_ms(now))}: "
+                      + ("no frozen file (share burns)" if agentbook_shares is None
+                         else f"{len(agentbook_shares)} paid account(s)")
+                      + ("" if shares.get("agentbook", 0) > 0 else " [unpaid: no share yet]"))
             w = competitions.combine(vectors, shares)
             self._write_entity_split(sig_rows, meta, uid_by_hotkey, now, referral_rows,
-                                     keepalive, vectors.get("markets"), shares)
+                                     keepalive, vectors.get("markets"), shares,
+                                     agentbook_shares=agentbook_shares)
             parts = " ".join(
                 f"{k}={'∅' if vectors.get(k) is None else len([u for u, x in (vectors[k] or {}).items() if x > 0 and u != config.BURN_UID])}"
                 for k in shares)
