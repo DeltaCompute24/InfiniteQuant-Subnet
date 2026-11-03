@@ -1,0 +1,19 @@
+# STAGED — not installed. Shadow / non-consensus: the live book state the intake (refuses
+# receipts of an eliminated book) and the hosted droplet (an algo reads its own book) read.
+[Unit]
+Description=SN89 agent books — live book state (Agent competition v2)
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+UMask=0022
+WorkingDirectory=/opt/sn89-signals
+EnvironmentFile=/opt/sn89-signals/.env.main
+Environment=HOME=/root
+Environment=PYTHONUNBUFFERED=1
+Environment=SN89_AGENT_BOOKS_DIR=/root/.sn89/agent-books
+ExecStart=/usr/bin/flock -w 200 /run/lock/sn89-agent-books.lock /opt/sn89-signals/.venv/bin/python tools/agent_books_weekly.py --live --out /root/.sn89/agent-books --live-out /opt/iq-platform/data/live/agent-books-live.json
+TimeoutStartSec=280
+Nice=10
+IOSchedulingClass=idle

@@ -288,9 +288,14 @@ def test_frozen_week_is_byte_deterministic():
 # ── validator side ───────────────────────────────────────────────────────────
 def test_pay_week_rolls_over_after_freeze_delay():
     nxt = MON + ab.WEEK_MS
-    delay = config.AGENT_BOOKS_FREEZE_DELAY_S
+    delay = config.AGENT_BOOKS_PAY_DELAY_S
     assert abio.pay_week_start_ms(nxt / 1000 + delay - 1) == MON - ab.WEEK_MS
     assert abio.pay_week_start_ms(nxt / 1000 + delay) == MON
+    # the freeze is possible 2 h before anyone pays from it
+    fz = config.AGENT_BOOKS_FREEZE_DELAY_S
+    assert fz < delay
+    assert abio.freezable_week_start_ms(nxt + fz * 1000) == MON
+    assert abio.freezable_week_start_ms(nxt + fz * 1000 - 1) == MON - ab.WEEK_MS
 
 
 def test_flag_off_by_default_changes_nothing(tmp_path, monkeypatch):
@@ -310,13 +315,15 @@ def test_flag_off_by_default_changes_nothing(tmp_path, monkeypatch):
 
 
 def test_flag_on_pays_the_frozen_week(tmp_path, monkeypatch):
-    monkeypatch.setattr(config, "AGENT_BOOKS_FROM_UNIX", (MON + ab.WEEK_MS) // 1000 + 6 * 3600)
+    monkeypatch.setattr(config, "AGENT_BOOKS_FROM_UNIX", MON // 1000)   # intake opens MON
     assert abio.epoch_ms() == MON
+    # first week not paid yet: no file is even looked for, the share burns
+    assert abio.cycle_shares(MON / 1000 + 3 * 86400, out_dir=str(tmp_path)) is None
     a1, a2 = f"{ENT}_{N0 + 1}", f"{ENT}_{N0 + 2}"
     doc = abio.build_week(_results({a1: 0.03, a2: 0.01}), MON, {ENT: BOND_CK},
                           {ENT: 1e5}, [])
     (tmp_path / "agent-books-week-2026-11-02.json").write_bytes(abio.dumps_week(doc))
-    now = config.AGENT_BOOKS_FROM_UNIX + 60
+    now = (MON + ab.WEEK_MS) // 1000 + config.AGENT_BOOKS_PAY_DELAY_S + 60
     sh = abio.cycle_shares(now, out_dir=str(tmp_path))
     assert sh == {a1: 0.75, a2: 0.25}
     assert abio.agentbook_vector(sh, {ENT: 39}) == {39: 1.0}
@@ -377,3 +384,25 @@ def test_live_state_shape_agreed_with_intake():
         assert all(isinstance(v, float) for v in bk["positions"].values())
         assert sum(abs(v) for v in bk["positions"].values()) < 1.2
     json.dumps(doc, allow_nan=False)
+
+
+def test_publish_weeks_copies_with_sha_and_index(tmp_path):
+    import importlib.util
+    import pathlib
+    p = pathlib.Path(__file__).resolve().parent.parent / "deploy" / "agent-books" / "publish_weeks.py"
+    spec = importlib.util.spec_from_file_location("publish_weeks", p)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    src, dst = tmp_path / "src", tmp_path / "dst"
+    src.mkdir()
+    data = abio.dumps_week(abio.build_week(_results({f"{ENT}_{N0}": 0.1}), MON,
+                                           {ENT: BOND_CK}, {ENT: 1e5}, []))
+    (src / "agent-books-week-2026-11-02.json").write_bytes(data)
+    (src / "agent-books-entities.json").write_text("{}")
+    assert m.main(str(src), str(dst)) == 0 and m.main(str(src), str(dst)) == 0
+    assert (dst / "agent-books-week-2026-11-02.json").read_bytes() == data
+    sha = hashlib.sha256(data).hexdigest()
+    assert (dst / "agent-books-week-2026-11-02.json.sha256").read_text().strip() == sha
+    idx = json.loads((dst / "index.json").read_text())
+    assert idx == {"weeks": [{"week": "2026-11-02", "file": "agent-books-week-2026-11-02.json",
+                              "sha256": sha}]}

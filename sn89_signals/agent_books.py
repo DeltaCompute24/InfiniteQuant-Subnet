@@ -175,8 +175,11 @@ def verify_receipt(receipt: dict, verify_fn) -> bool:
 
 
 def receipts_root(receipts: list) -> str:
-    ordered = sorted(receipts, key=receipt_order_key)
-    return hf.merkle_root([hf.leaf(receipt_signing_bytes(r)) for r in ordered])
+    """Merkle root over the receipts' signing bytes in (t_recv_ms, account, seq) order; the
+    bytes themselves break a tie (two different receipts under one key), so the root never
+    depends on input order."""
+    leaves = sorted((receipt_order_key(r), receipt_signing_bytes(r)) for r in receipts)
+    return hf.merkle_root([hf.leaf(b) for _k, b in leaves])
 
 
 # ── entities ─────────────────────────────────────────────────────────────────

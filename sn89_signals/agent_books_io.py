@@ -38,20 +38,15 @@ A receipt counts only if (1) the window containing its t_recv_ms is anchored wit
 agent_root equal to receipts_root(all receipts of that window) and (2) the anchor block's
 timestamp is no later than window end + AGENT_ANCHOR_MAX_LAG_MS.
 
-What the live HF anchor publisher (neurons/hf_anchor.py) has to add, NOT done here:
-  1. in _roots(w): read the agent receipts with window_start_ms(t_recv_ms) == w from the
-     intake's books/*.jsonl (load_receipts, signatures checked), agent_root =
-     agent_books.receipts_root(them), agent_n = len; quote_root = quote_root(ticks);
-  2. commit encode_anchor_v2(...) instead of hf.encode_anchor(...) from the arm instant,
-     and write agent_root / agent_n / quote_root (+ the anchor block's timestamp as
-     anchor_ts_ms once the commit lands) into <w>.anchor.json; publish the window's agent
-     receipts as <w>/agent.jsonl beside receipts.jsonl / ticks.jsonl;
-  3. anchor EVERY window that has ticks, not only receipt-bearing ones: a book's marks
-     and day-end equity come from quiet windows too. 480 anchors/day fits the budget
-     (24 per epoch, ~100 B each, 3,100 B MaxSpace);
-  4. every reader of the HF anchor (hf.decode_anchor / verify_anchor callers, hf_cycle)
-     must accept the v2 prefix, and the HF grader keeps verifying `root` and `tick_root`
-     through window_root_v2.
+The publisher side is neurons/hf_anchor.py `_sweep_v2`, armed per window by
+config.AGENT_ANCHOR_V2_FROM_UNIX (SN89_AGENT_ANCHOR_V2_FROM; 0 = v1 exactly). It anchors
+every window with ticks, receipts or agent receipts (quiet ones included: a book's marks
+and day-end equity come from them; 480/day fits the 3,100 B/epoch budget), writes
+<w>.agent.jsonl + <w>.anchor-v2.json (with anchor_block / anchor_ts_ms read back from
+chain) and publishes them as <w>/agent.jsonl and <w>/anchor-v2.json. hf.decode_anchor /
+hf.verify_anchor accept both versions. A window's agent_root is computed over stage 1 of the
+loader (verified_receipts: shape + signature, re-signed copies collapsed); equivocation is
+judged afterwards (dedupe_receipts), so one bad signer cannot void a whole window.
 The intake must write a receipt before its window is sealed (TICK_SETTLE_WINDOWS = 2
 windows after close today); a receipt written later is unanchored and never counts.
 """
@@ -117,55 +112,135 @@ def check_shape(r) -> str | None:
     return None
 
 
+def _parse_verified(line, verify, entities):
+    """One line -> (receipt, None) or (None, drop_reason)."""
+    if isinstance(line, bytes):
+        line = line.decode("utf-8", "replace")
+    if not line.strip():
+        return None, None
+    try:
+        r = json.loads(line)
+    except ValueError:
+        return None, "bad_json"
+    why = check_shape(r)
+    if why:
+        return None, why
+    if entities is not None and r["entity"] not in entities:
+        return None, "unknown_entity"
+    r = {k: r[k] for k in RECEIPT_KEYS}
+    if not ab.verify_receipt(r, lambda m, s, hk=r["entity"]: verify(hk, m, s)):
+        return None, "bad_signature"
+    return r, None
+
+
+def verified_receipts(lines, verify=sr25519_verify, entities=None) -> tuple[list, dict]:
+    """Stage 1: shape + signature, and the same signed content seen twice collapsed to one
+    (sr25519 signatures are randomised, so a re-signed copy differs only in `sig`). This is
+    the set a window's agent_root is computed over: no cross-window judgement yet."""
+    drops: dict = {}
+    seen: dict = {}
+    for line in lines:
+        r, why = _parse_verified(line, verify, entities)
+        if why:
+            drops[why] = drops.get(why, 0) + 1
+        if r is None:
+            continue
+        key = ab.receipt_signing_bytes(r)
+        if key in seen:
+            drops["duplicate"] = drops.get("duplicate", 0) + 1
+            continue
+        seen[key] = r
+    out = sorted(seen.values(), key=lambda r: (ab.receipt_order_key(r),
+                                               ab.receipt_signing_bytes(r)))
+    return out, dict(sorted(drops.items()))
+
+
+def dedupe_receipts(receipts: list) -> tuple[list, dict]:
+    """Stage 2: the same (account, seq) with DIFFERENT signed content is equivocation by the
+    signer; every version is dropped ("seq_conflict"), so an entity can never choose
+    afterwards which one counted."""
+    by_key: dict = {}
+    for r in receipts:
+        by_key.setdefault((r["account"], r["seq"]), []).append(r)
+    out, n = [], 0
+    for key in sorted(by_key):
+        rs = by_key[key]
+        if len({ab.receipt_signing_bytes(r) for r in rs}) > 1:
+            n += len(rs)
+            continue
+        out.append(rs[0])
+    return sorted(out, key=ab.receipt_order_key), ({"seq_conflict": n} if n else {})
+
+
+def merge_drops(*ds) -> dict:
+    out: dict = {}
+    for d in ds:
+        for k, v in d.items():
+            out[k] = out.get(k, 0) + v
+    return dict(sorted(out.items()))
+
+
 def load_receipts(lines, verify=sr25519_verify, entities=None) -> tuple[list, dict]:
     """Lines -> (receipts ordered by agent_books.receipt_order_key, {drop_reason: count}).
 
     verify(hotkey, message, sig_hex) -> bool is injected (sr25519_verify in production).
-    `entities`: optional allow-set of entity hotkeys (None = any).
-    The same (account, seq) twice with identical content is one receipt ("duplicate");
-    twice with DIFFERENT content is equivocation by the signer and BOTH are dropped
-    ("seq_conflict"), so an entity can never choose afterwards which one counted."""
-    drops: dict = {}
+    `entities`: optional allow-set of entity hotkeys (None = any). Stage 1
+    (verified_receipts) then stage 2 (dedupe_receipts); with anchoring, filter_anchored
+    runs between the two."""
+    rs, d1 = verified_receipts(lines, verify, entities)
+    rs, d2 = dedupe_receipts(rs)
+    return rs, merge_drops(d1, d2)
 
-    def drop(reason):
-        drops[reason] = drops.get(reason, 0) + 1
 
-    by_key: dict = {}
-    conflict: set = set()
-    for line in lines:
-        if isinstance(line, bytes):
-            line = line.decode("utf-8", "replace")
-        if not line.strip():
-            continue
+class AgentReceiptIndex:
+    """Incremental reader of the intake's books/*.jsonl for the HF anchor publisher:
+    each refresh() reads only bytes appended since the last one (a file that shrank is
+    re-read whole), verifies them, and files them by anchor window."""
+
+    def __init__(self, path: str, verify=sr25519_verify, retain_ms: int = 2 * 86_400_000):
+        self.path, self.verify, self.retain_ms = path, verify, retain_ms
+        self.off: dict = {}
+        self.by_window: dict = {}
+        self.drops: dict = {}
+
+    def refresh(self) -> None:
         try:
-            r = json.loads(line)
-        except ValueError:
-            drop("bad_json")
-            continue
-        why = check_shape(r)
-        if why:
-            drop(why)
-            continue
-        if entities is not None and r["entity"] not in entities:
-            drop("unknown_entity")
-            continue
-        r = {k: r[k] for k in RECEIPT_KEYS}
-        if not ab.verify_receipt(r, lambda m, s, hk=r["entity"]: verify(hk, m, s)):
-            drop("bad_signature")
-            continue
-        key = (r["account"], r["seq"])
-        prev = by_key.get(key)
-        if prev is None:
-            by_key[key] = r
-        elif hf.canonical_json(prev) == hf.canonical_json(r):
-            drop("duplicate")
-        else:
-            conflict.add(key)
-    for key in sorted(conflict):
-        by_key.pop(key, None)
-        drops["seq_conflict"] = drops.get("seq_conflict", 0) + 2
-    out = sorted(by_key.values(), key=ab.receipt_order_key)
-    return out, dict(sorted(drops.items()))
+            names = sorted(n for n in os.listdir(self.path) if n.endswith(".jsonl"))
+        except OSError:
+            return
+        for n in names:
+            p = os.path.join(self.path, n)
+            try:
+                size = os.path.getsize(p)
+                off = self.off.get(n, 0)
+                if size < off:
+                    off = 0
+                if size == off:
+                    continue
+                with open(p, "rb") as fh:
+                    fh.seek(off)
+                    chunk = fh.read(size - off)
+            except OSError:
+                continue
+            end = chunk.rfind(b"\n")
+            if end < 0:
+                continue                              # no complete line yet
+            self.off[n] = off + end + 1
+            for line in chunk[:end].split(b"\n"):
+                r, why = _parse_verified(line, self.verify, None)
+                if why:
+                    self.drops[why] = self.drops.get(why, 0) + 1
+                if r is not None:
+                    self.by_window.setdefault(window_start_ms(r["t_recv_ms"]), {})[
+                        ab.receipt_signing_bytes(r)] = r
+
+    def window(self, w: int) -> list:
+        rs = list((self.by_window.get(int(w)) or {}).values())
+        return sorted(rs, key=lambda r: (ab.receipt_order_key(r), ab.receipt_signing_bytes(r)))
+
+    def prune(self, before_ms: int) -> None:
+        for w in [w for w in self.by_window if w < before_ms - self.retain_ms]:
+            del self.by_window[w]
 
 
 def iter_dir_lines(path: str):
@@ -234,63 +309,23 @@ def iter_url_lines(urls, fetch):
 
 
 # ── anchoring (pure) ─────────────────────────────────────────────────────────
-AGENT_ANCHOR_PREFIX = "sn89hf:2:"
+AGENT_ANCHOR_PREFIX = hf.ANCHOR_V2_PREFIX
 # A receipt's window must be anchored no later than this after the window closes. The HF
 # anchor lands ~2 windows after close today (TICK_SETTLE_WINDOWS); 15 min leaves room for a
 # retry and is far too short to trade on knowledge of the window's own outcome.
 AGENT_ANCHOR_MAX_LAG_MS = 15 * 60_000
 
 
-def quote_tick_bytes(t: dict) -> bytes:
-    return hf.canonical_json({k: t[k] for k in ("a", "b", "k", "p", "t") if k in t}).encode()
-
-
-def quote_root(ticks: list) -> str:
-    return hf.merkle_root([hashlib.blake2b(quote_tick_bytes(t), digest_size=32).digest()
-                           for t in sorted(ticks, key=hf.tick_order_key)])
+quote_tick_bytes = hf.quote_tick_bytes
+quote_root = hf.quote_root
+window_root_v2 = hf.window_root_v2
+encode_anchor_v2 = hf.encode_anchor_v2
+decode_anchor_v2 = hf.decode_anchor_v2
+verify_anchor_v2 = hf.verify_anchor_v2
 
 
 def window_start_ms(t_ms: int) -> int:
     return hf.window_start_ms(t_ms)
-
-
-def window_root_v2(root_hex: str, tick_root_hex: str, quote_root_hex: str,
-                   agent_root_hex: str) -> str:
-    return hashlib.blake2b(bytes.fromhex(root_hex) + bytes.fromhex(tick_root_hex)
-                           + bytes.fromhex(quote_root_hex) + bytes.fromhex(agent_root_hex),
-                           digest_size=32).hexdigest()
-
-
-def encode_anchor_v2(w_start_ms: int, n: int, tick_n: int, agent_n: int, root_hex: str,
-                     tick_root_hex: str, quote_root_hex: str, agent_root_hex: str) -> str:
-    s = (f"{AGENT_ANCHOR_PREFIX}{int(w_start_ms) // 1000}:{int(n)}:{int(tick_n)}:"
-         f"{int(agent_n)}:"
-         f"{window_root_v2(root_hex, tick_root_hex, quote_root_hex, agent_root_hex)}")
-    if len(s.encode()) > hf.ANCHOR_MAX_BYTES:
-        raise ValueError(f"anchor {len(s.encode())}B exceeds the {hf.ANCHOR_MAX_BYTES}B field")
-    return s
-
-
-def decode_anchor_v2(s) -> dict | None:
-    if not isinstance(s, str) or not s.startswith(AGENT_ANCHOR_PREFIX):
-        return None
-    try:
-        w_s, n, tick_n, agent_n, wroot = s[len(AGENT_ANCHOR_PREFIX):].split(":")
-        if len(wroot) != 64:
-            return None
-        bytes.fromhex(wroot)
-        return {"w": int(w_s) * 1000, "n": int(n), "tick_n": int(tick_n),
-                "agent_n": int(agent_n), "window_root": wroot}
-    except ValueError:
-        return None
-
-
-def verify_anchor_v2(onchain: str, root_hex: str, tick_root_hex: str, quote_root_hex: str,
-                     agent_root_hex: str, n: int, tick_n: int, agent_n: int) -> bool:
-    a = decode_anchor_v2(onchain)
-    return bool(a and a["n"] == n and a["tick_n"] == tick_n and a["agent_n"] == agent_n
-                and a["window_root"] == window_root_v2(root_hex, tick_root_hex,
-                                                       quote_root_hex, agent_root_hex))
 
 
 def receipts_by_window(receipts: list) -> dict:
@@ -741,14 +776,20 @@ def build_live(results: dict, now_ms: int) -> dict:
 # ── validator side ───────────────────────────────────────────────────────────
 def pay_week_start_ms(now_unix: float) -> int:
     """The week the validator pays at `now`: the most recently ended week, from
-    AGENT_BOOKS_FREEZE_DELAY_S after its close."""
-    t = int(now_unix * 1000) - config.AGENT_BOOKS_FREEZE_DELAY_S * 1000
+    AGENT_BOOKS_PAY_DELAY_S after its close."""
+    t = int(now_unix * 1000) - config.AGENT_BOOKS_PAY_DELAY_S * 1000
     return ab.week_start_ms(t) - ab.WEEK_MS
 
 
+def freezable_week_start_ms(now_ms: int) -> int:
+    """The latest week whose tick windows are all final (AGENT_BOOKS_FREEZE_DELAY_S)."""
+    return ab.week_start_ms(int(now_ms) - config.AGENT_BOOKS_FREEZE_DELAY_S * 1000) - ab.WEEK_MS
+
+
 def epoch_ms() -> int:
-    """First scored week = the week paid at AGENT_BOOKS_FROM. Every book replays from it."""
-    return pay_week_start_ms(config.AGENT_BOOKS_FROM_UNIX)
+    """First scored week: the Monday at SN89_AGENT_BOOKS_FROM (the intake's opening).
+    Every book replays from it."""
+    return ab.week_start_ms(config.AGENT_BOOKS_FROM_UNIX * 1000)
 
 
 def load_week_shares(out_dir: str, week_start_ms: int) -> dict | None:
@@ -791,4 +832,7 @@ def cycle_shares(now_unix: float, out_dir: str | None = None) -> dict | None:
     for the paid week is missing (then the share burns)."""
     if not config.agent_books_active(now_unix):
         return None
-    return load_week_shares(out_dir or config.AGENT_BOOKS_DIR, pay_week_start_ms(now_unix))
+    ws = pay_week_start_ms(now_unix)
+    if ws < epoch_ms():
+        return None                      # the first scored week has not been paid yet
+    return load_week_shares(out_dir or config.AGENT_BOOKS_DIR, ws)

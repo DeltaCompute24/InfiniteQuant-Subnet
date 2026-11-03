@@ -18,6 +18,16 @@ guarantee turns on with the chain anchor, at the same time emissions do.
 
 State: <state_dir>/anchored.txt — window ids already fully processed, so a restart
 never re-anchors (which would burn the per-epoch commitment space budget).
+
+v2 (agent books; config.AGENT_ANCHOR_V2_FROM_UNIX, default 0 = off). A window whose START
+is at or after the arm goes through _sweep_v2 instead: the anchor also binds the window's
+agent book receipts (the intake's books/*.jsonl, signature-checked) and a quote root over
+the ticks' bid/ask, QUIET windows are anchored too (a book's marks come from them), the
+commit result is read with chain.commit_ok, and the inclusion block + its timestamp are
+read back into <w>.anchor-v2.json (anchor_ts_ms). Published per window beside the v1
+files: agent.jsonl and anchor-v2.json. Windows before the arm are processed by the v1 code
+below exactly as before. Nothing here depends on HF scoring being live
+(config.HF_END_FROM_UNIX): the anchor keeps running for Markets, the tick feed and books.
 """
 from __future__ import annotations
 
@@ -30,7 +40,7 @@ import pathlib
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from sn89_signals import hf
+from sn89_signals import agent_books, agent_books_io, config, hf
 
 LOG_DIR = Path(os.getenv("SN89_HF_LOG_DIR", "/var/lib/sn89-hf"))
 TICK_DIR = Path(os.getenv("SN89_HF_TICK_DIR", str(LOG_DIR / "ticks")))
@@ -54,6 +64,8 @@ PUBLIC_DIR = os.getenv("SN89_HF_PUBLIC_DIR", "")           # webhook-served; emp
 # The margin therefore gates the RECEIPT branch as well, not just the tick branch.
 TICK_SETTLE_WINDOWS = int(os.getenv("SN89_HF_TICK_SETTLE_WINDOWS", "2"))
 WINDOW_MS = hf.ANCHOR_WINDOW_S * 1000
+V2_READBACK_TRIES = int(os.getenv("SN89_HF_ANCHOR_V2_READBACK_TRIES", "5"))
+V2_READBACK_SLEEP_S = float(os.getenv("SN89_HF_ANCHOR_V2_READBACK_SLEEP_S", "3"))
 
 
 def _log(m: str) -> None:
@@ -77,6 +89,7 @@ class Anchorer:
         self.sub = None
         self.wallet = None
         self._fails: dict = {}
+        self._agent = None
         if ANCHOR_WALLET:
             import bittensor as bt
             self.sub = bt.Subtensor(NETWORK)
@@ -185,9 +198,19 @@ class Anchorer:
             stem = tp.name.split(".", 1)[0]
             if stem.isdigit() and int(stem) <= cutoff:
                 cand.add(int(stem))
+        if config.AGENT_ANCHOR_V2_FROM_UNIX:
+            idx = self._agent_index()
+            idx.refresh()
+            idx.prune(cutoff)
+            cand.update(w for w in idx.by_window
+                        if w <= cutoff and config.agent_anchor_v2_as_of(w))
         sealed = sorted(w for w in cand if str(w) not in done)
         n = 0
         for w in sealed:
+            if config.agent_anchor_v2_as_of(w):
+                if self._sweep_v2(w):
+                    n += 1
+                continue
             r = self._roots(w)
             if r is None:
                 continue
@@ -220,6 +243,119 @@ class Anchorer:
                  f"wroot={r['window_root'][:16]}… "
                  f"{'ANCHORED' if (self.wallet and committed) else ('quiet(published)' if not r['n'] else ('UNANCHORED' if self.wallet else 'sealed(preview)'))}")
         return n
+
+    # ── v2 (agent books) ─────────────────────────────────────────────────────
+    def _agent_index(self):
+        if self._agent is None:
+            self._agent = agent_books_io.AgentReceiptIndex(config.AGENT_BOOKS_RECEIPTS_DIR)
+        return self._agent
+
+    def _roots_v2(self, w: int):
+        idx = self._agent_index()
+        agent = idx.window(w)
+        base = self._roots(w)
+        if base is None:
+            if not agent:
+                return None
+            e = hf.merkle_root([])
+            base = {"n": 0, "tick_n": 0, "root": e, "tick_root": hf.tick_root([])}
+        tlog = TICK_DIR / f"{w}.ticks.jsonl"
+        ticks = ([json.loads(l) for l in tlog.open() if l.strip()] if tlog.exists() else [])
+        q = hf.quote_root(ticks)
+        ar = agent_books.receipts_root(agent)
+        r = {"n": base["n"], "tick_n": base["tick_n"], "agent_n": len(agent),
+             "root": base["root"], "tick_root": base["tick_root"], "quote_root": q,
+             "agent_root": ar,
+             "window_root": hf.window_root_v2(base["root"], base["tick_root"], q, ar)}
+        r["anchor"] = hf.encode_anchor_v2(w, r["n"], r["tick_n"], r["agent_n"], r["root"],
+                                          r["tick_root"], q, ar)
+        return r, agent
+
+    def _commit_v2(self, data: str):
+        """(committed, inclusion_block, block_ts_ms). Success from chain.commit_ok — an
+        ExtrinsicResponse is always truthy — then the inclusion block read back from
+        CommitmentOf (set_commitment waits for inclusion by default)."""
+        from sn89_signals import chain as _chain
+        resp = self.sub.set_commitment(wallet=self.wallet, netuid=NETUID, data=data,
+                                       wait_for_finalization=False)
+        ok, msg = _chain.commit_ok(resp)
+        if not ok:
+            _log(f"v2 anchor refused: {msg or 'no message'}")
+            return False, None, None
+        hk = self.wallet.hotkey.ss58_address
+        for i in range(V2_READBACK_TRIES):
+            try:
+                v = self.sub.substrate.query("Commitments", "CommitmentOf", [NETUID, hk])
+                val = v.value if hasattr(v, "value") else v
+                if isinstance(val, dict) and _chain._extract_raw_str(val.get("info")) == data:
+                    blk = int(val.get("block") or 0)
+                    bh = self.sub.get_block_hash(blk)
+                    ts = int(self.sub.substrate.query("Timestamp", "Now", block_hash=bh).value)
+                    return True, blk, ts
+            except Exception as e:  # noqa: BLE001 — read-back is best effort
+                _log(f"v2 read-back error: {e}")
+            if i + 1 < V2_READBACK_TRIES:
+                time.sleep(V2_READBACK_SLEEP_S)
+        _log("!! v2 anchor committed but read-back never matched — anchor_ts_ms left null "
+             "(its agent receipts will not count)")
+        return True, None, None
+
+    def _publish_v2(self, w: int) -> None:
+        if not PUBLIC_DIR:
+            return
+        import shutil
+        dst = pathlib.Path(PUBLIC_DIR) / str(w)
+        dst.mkdir(parents=True, exist_ok=True)
+        for src, out in ((LOG_DIR / f"{w}.agent.jsonl", dst / "agent.jsonl"),
+                         (LOG_DIR / f"{w}.anchor-v2.json", dst / "anchor-v2.json")):
+            if src.exists():
+                shutil.copyfile(src, out)
+                try:
+                    out.chmod(0o644)
+                except OSError:
+                    pass
+        try:
+            dst.chmod(0o755)
+        except OSError:
+            pass
+
+    def _sweep_v2(self, w: int) -> bool:
+        """One v2 window. True when it is retired (anchored, or given up on)."""
+        got = self._roots_v2(w)
+        if got is None:
+            return False
+        r, agent = got
+        if r["n"] and not r["tick_n"]:
+            _log(f"!! window {w}: {r['n']} receipts but ZERO ticks past the settle margin "
+                 f"— check iq-sn89-hf-ticks. Anchoring an empty tick_root permanently "
+                 f"mis-binds this window.")
+        doc = {"v": 2, "t": "hf-anchor-v2", "w": int(w), **r,
+               "anchor_block": None, "anchor_ts_ms": None}
+        with open(LOG_DIR / f"{w}.agent.jsonl", "w", encoding="utf-8") as fh:
+            for rc in agent:
+                fh.write(hf.canonical_json(rc) + "\n")
+        should = bool(r["n"] or r["tick_n"] or r["agent_n"])
+        committed = False
+        if self.wallet and should:
+            committed, blk, ts = self._commit_v2(r["anchor"])
+            doc["anchor_block"], doc["anchor_ts_ms"] = blk, ts
+        (LOG_DIR / f"{w}.anchor-v2.json").write_text(json.dumps(doc, sort_keys=True))
+        self._publish(w)
+        self._publish_v2(w)
+        if self.wallet and should and not committed:
+            self._fails[w] = self._fails.get(w, 0) + 1
+            if self._fails[w] < COMMIT_MAX_TRIES:
+                _log(f"window {w}: v2 commit failed ({self._fails[w]}/{COMMIT_MAX_TRIES}), "
+                     f"will retry")
+                return False
+            _log(f"!! window {w}: GIVING UP after {COMMIT_MAX_TRIES} v2 commit attempts — "
+                 f"window retired UNANCHORED")
+        _mark(w)
+        _log(f"window {w} v2: n={r['n']} ticks={r['tick_n']} agent={r['agent_n']} "
+             f"wroot={r['window_root'][:16]}… "
+             + ("ANCHORED" if committed else ("UNANCHORED" if self.wallet else "sealed(preview)"))
+             + (f" ts={doc['anchor_ts_ms']}" if committed else ""))
+        return True
 
     def run(self):
         LOG_DIR.mkdir(parents=True, exist_ok=True)

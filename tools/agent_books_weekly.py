@@ -2,8 +2,8 @@
 """Agent competition v2: freeze a week of agent books, refresh the live book state, or
 verify a published weekly file by recomputing it.
 
-  freeze  (default)  the week that ended most recently (or --week YYYY-MM-DD, a Monday),
-                     once AGENT_BOOKS_FREEZE_DELAY_S has passed since its close. Writes
+  freeze  (default)  the latest week whose ticks are final (AGENT_BOOKS_FREEZE_DELAY_S after
+                     its close), or --week YYYY-MM-DD (a Monday). Writes
                      <out>/agent-books-week-<monday>.json (+ .sha256). Refuses to
                      overwrite a frozen week whose bytes would change (exit 3).
   --live             --live-out (config.AGENT_BOOKS_LIVE_PATH): every book replayed
@@ -89,37 +89,37 @@ def load_receipts(args) -> tuple[list, dict]:
         if urls:
             yield from abio.iter_url_lines(urls, fetch_text)
     verify = (lambda hk, m, s: True) if args.no_verify_sig else abio.sr25519_verify
-    rs, drops = abio.load_receipts(lines(), verify=verify)
+    rs, d1 = abio.verified_receipts(lines(), verify=verify)
+    d2 = {}
     if args.require_anchor:
         rs, d2 = abio.filter_anchored(rs, load_anchor_windows(args.anchor_dir))
-        for k, v in d2.items():
-            drops[k] = drops.get(k, 0) + v
-        drops = dict(sorted(drops.items()))
-    return rs, drops
+    rs, d3 = abio.dedupe_receipts(rs)
+    return rs, abio.merge_drops(d1, d2, d3)
 
 
 def load_anchor_windows(log_dir: str) -> dict:
-    """{w: {"agent_root", "agent_n", "anchor_ts_ms"}} from <log_dir>/<w>.anchor.json.
+    """{w: {"agent_root", "agent_n", "anchor_ts_ms"}} from the v2 anchor records the HF anchor
+    publisher writes (<log_dir>/<w>.anchor-v2.json locally, <w>/anchor-v2.json published).
 
-    These fields exist only once the HF anchor publisher writes v2 anchors (see the
-    agent_books_io module doc). This reader trusts the local files; a third-party replayer
-    must additionally check each one with agent_books_io.verify_anchor_v2 against the anchor
-    hotkey's on-chain commitment history and take anchor_ts_ms from that block."""
+    This reader trusts the local files (our own publisher wrote them). A third-party replayer
+    must additionally check each one with hf.verify_anchor (v2 form) against the anchor
+    hotkey's on-chain commitment history and take anchor_ts_ms from that inclusion block."""
     out = {}
     try:
         names = os.listdir(log_dir)
     except OSError:
         return out
     for n in names:
-        if not n.endswith(".anchor.json"):
+        if not n.endswith(".anchor-v2.json"):
             continue
         try:
             with open(os.path.join(log_dir, n), encoding="utf-8") as fh:
                 a = json.load(fh)
-            if "agent_root" in a and "anchor_ts_ms" in a:
-                out[int(a["w"])] = {"agent_root": a["agent_root"], "agent_n": int(a["agent_n"]),
-                                    "anchor_ts_ms": int(a["anchor_ts_ms"])}
-        except (OSError, ValueError, KeyError):
+            if a.get("anchor_ts_ms") is None:
+                continue
+            out[int(a["w"])] = {"agent_root": a["agent_root"], "agent_n": int(a["agent_n"]),
+                                "anchor_ts_ms": int(a["anchor_ts_ms"])}
+        except (OSError, ValueError, KeyError, TypeError):
             continue
     return out
 
@@ -236,7 +236,7 @@ def main() -> int:
         return 0 if ok else 1
 
     ws = (monday_ms(args.week) if args.week
-          else abio.pay_week_start_ms(now_ms / 1000))
+          else abio.freezable_week_start_ms(now_ms))
     if not args.force and now_ms < ws + ab.WEEK_MS + config.AGENT_BOOKS_FREEZE_DELAY_S * 1000:
         _log(f"week {abio.week_label(ws)} is not final until "
              f"{config.AGENT_BOOKS_FREEZE_DELAY_S // 3600}h after it closes (use --force)")
