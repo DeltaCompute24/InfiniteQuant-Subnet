@@ -563,19 +563,38 @@ def entity_split(lf_fn, hf_fn, markets_vec: dict | None, shares: dict,
         t = sum(v.values())
         return {u: x / t for u, x in v.items()} if t > 0 else {}
     nv = {k: _norm(v) for k, v in vecs.items()}
+    # The floor weight (immunity / probation / keep-alive dust) is SET per uid in
+    # compute_weights (weights[uid] = DUST_WEIGHT), not added, so on chain an entity UID
+    # carries ONE dust per competition however many of its accounts sit on the floor. On
+    # pseudo-uids every floor account carried its own dust: 100 warm-up accounts showed
+    # 100x the dust the UID really earned and took most of the entity's emission
+    # (found 2026-11-04). Accounts on the floor now SHARE one dust per competition.
+    dust = {}
+    for k, v in vecs.items():
+        t = sum(v.values()) if v else 0.0
+        dust[k] = (config.DUST_WEIGHT / t) if t > 0 else 0.0
+
+    def _is_dust(k, x):
+        d = dust[k]
+        return d > 0 and abs(x - d) <= 1e-9 * d
     nm = _norm(markets_vec)
     for ent in config.SIGNALS_ENTITY_HOTKEYS:
         uid = uid_by_hotkey.get(ent)
         if uid is None:
             continue
-        acc = {}
-        for a in accounts:
-            if entity.parse(a)[0] != ent:
+        mine = [a for a in accounts if entity.parse(a)[0] == ent]
+        part = {a: 0.0 for a in mine}
+        for k in ("lf", "hf", "agent", "agentbook"):
+            sh = shares.get(k, 0)
+            if not sh or not nv[k]:
                 continue
-            part = sum(shares.get(k, 0) * nv[k].get(pseudo[a], 0.0)
-                       for k in ("lf", "hf", "agent", "agentbook"))
-            if part > 0:
-                acc[a] = part
+            on_floor = [a for a in mine if _is_dust(k, nv[k].get(pseudo[a], 0.0))]
+            for a in mine:
+                x = nv[k].get(pseudo[a], 0.0)
+                if a in on_floor:
+                    x = dust[k] / len(on_floor)
+                part[a] += sh * x
+        acc = {a: v for a, v in part.items() if v > 0}
         mk = shares.get("markets", 0) * nm.get(uid, 0.0)
         total = mk + sum(acc.values())
         out[ent] = {"uid": uid, "markets": mk, "accounts": acc,

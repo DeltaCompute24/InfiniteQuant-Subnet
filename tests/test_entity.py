@@ -263,6 +263,22 @@ def test_entity_split_measures_each_account(armed, monkeypatch):
     assert 0 < split["markets_frac"] < 1
 
 
+def test_entity_split_floor_accounts_share_one_dust(armed):
+    """On chain an entity UID carries ONE floor dust per competition (compute_weights SETS
+    weights[uid] = DUST_WEIGHT), so accounts on the floor share it; an earner keeps its part."""
+    a1, a2, a3 = f"{ENT}_1", f"{ENT}_2", f"{ENT}_3"
+    D = config.DUST_WEIGHT
+
+    def lf(m):
+        return {m[a1]: D, m[a2]: D, m[a3]: 0.5, 0: 1.0 - 0.5 - 2 * D}
+    split = replay.entity_split(lf, lambda m: {}, None, {"lf": 1.0}, {ENT: 5}, {a1, a2, a3})[ENT]
+    assert split["accounts"][a1] == pytest.approx(D / 2)
+    assert split["accounts"][a2] == pytest.approx(D / 2)
+    assert split["accounts"][a3] == pytest.approx(0.5)
+    # what the UID really gets on chain: one dust plus the earned weight
+    assert sum(split["accounts"].values()) == pytest.approx(D + 0.5)
+
+
 def test_commit_slot_spaces_writers(tmp_path):
     import time
     lock = str(tmp_path / "c.lock")
