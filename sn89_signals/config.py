@@ -1558,6 +1558,10 @@ AGENT_BOOKS_RECEIPTS_URLS = os.getenv("SN89_AGENT_BOOKS_RECEIPTS_URLS", "")
 # droplet (an algo reads its own book). Written by tools/agent_books_weekly.py --live.
 AGENT_BOOKS_LIVE_PATH = os.getenv("SN89_AGENT_BOOKS_LIVE_PATH",
                                   "/opt/iq-platform/data/live/agent-books-live.json")
+# Per-book trades for the IQ Terminal's read-only agent book view ({n}.json), written with
+# --live. Display only: nothing pays from it.
+AGENT_BOOKS_TRADES_DIR = os.getenv("SN89_AGENT_BOOKS_TRADES_DIR",
+                                   "/opt/iq-platform/data/live/sn89-agent/trades")
 # Entities whose bond coldkey is fixed here instead of by an `sn89entity:<coldkey>`
 # commitment (the entity's one commitment slot also carries LF batches and Markets oracle
 # anchors, so a registration commit would be overwritten within minutes). Registration only:

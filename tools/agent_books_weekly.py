@@ -197,6 +197,8 @@ def main() -> int:
     ap.add_argument("--epoch")
     ap.add_argument("--live", action="store_true")
     ap.add_argument("--live-out", default=config.AGENT_BOOKS_LIVE_PATH)
+    ap.add_argument("--trades-dir", default=config.AGENT_BOOKS_TRADES_DIR,
+                    help="with --live: per-book trades for the IQ Terminal ('' = off)")
     ap.add_argument("--verify")
     ap.add_argument("--force", action="store_true")
     ap.add_argument("--receipts-dir", default=config.AGENT_BOOKS_RECEIPTS_DIR)
@@ -222,6 +224,14 @@ def main() -> int:
         _atomic_write(args.live_out,
                       (json.dumps(doc, sort_keys=True, separators=(",", ":")) + "\n").encode())
         _log(f"live: {len(doc['books'])} books -> {args.live_out}")
+        if args.trades_dir:
+            os.makedirs(args.trades_dir, exist_ok=True)
+            for acct, tdoc in abio.build_trades(results, now_ms).items():
+                n = acct.rsplit("_", 1)[-1]
+                if n.isdigit():
+                    _atomic_write(os.path.join(args.trades_dir, f"{n}.json"),
+                                  (json.dumps(tdoc, sort_keys=True, separators=(",", ":"),
+                                              allow_nan=False) + "\n").encode())
         return 0
 
     if args.verify:

@@ -49,6 +49,7 @@ def test_no_fill_before_delay_first_tick_after():
     assert len(res["fills"]) == 1
     f = res["fills"][0]
     assert f["t_ms"] == t0 + 3000 and f["px"] == 103.0
+    assert f["seq"] == t0
 
 
 def test_fill_waits_for_first_tick_strictly_after_gap():

@@ -386,6 +386,23 @@ def test_live_state_shape_agreed_with_intake():
     json.dumps(doc, allow_nan=False)
 
 
+def test_trades_doc_for_terminal():
+    ticks, receipts = _world(2, days=2)
+    rs = [r for r in receipts if r["t_recv_ms"] < MON + 2 * D]
+    end = MON + 2 * D - 1
+    thin, _ = abio.load_thin_range(MON, end, rs, UNI, _reader(ticks))
+    res = abio.replay_all(rs, abio.PairIndex(thin), UNI, start_ms=MON, end_ms=end)
+    docs = abio.build_trades(res, end)
+    assert set(docs) == set(res)
+    for acct, d in docs.items():
+        assert d["fills_total"] == len(res[acct]["fills"])
+        for f in d["fills"]:
+            assert f["seq"] in {r["seq"] for r in rs if r["account"] == acct}
+        for p in d["positions"].values():
+            assert {"qty", "avg", "mark", "lev"} <= set(p)
+        json.dumps(d, allow_nan=False)
+
+
 def test_publish_weeks_copies_with_sha_and_index(tmp_path):
     import importlib.util
     import pathlib

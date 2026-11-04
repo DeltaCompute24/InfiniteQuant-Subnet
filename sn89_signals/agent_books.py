@@ -452,9 +452,9 @@ def replay_book(account: str, receipts: list, ticks: list, universe: dict, *,
         q = pending.get(pair)
         if not q or q[0][0] > tms:
             return
-        target = None
+        target = seq = None
         while q and q[0][0] <= tms:
-            target = q.pop(0)[1]
+            _, target, seq = q.pop(0)
         if not q:
             pending.pop(pair, None)
         eq = book.equity()
@@ -470,7 +470,7 @@ def replay_book(account: str, receipts: list, ticks: list, universe: dict, *,
         week_fill_buckets.add(bucket_of(tms))
         e_after = book.equity()
         fills.append({"t_ms": tms, "pair": pair, "dq": dq, "px": px, "target": target,
-                      "equity": e_after})
+                      "equity": e_after, "seq": seq})
         series.append((tms, e_after))
 
     next_b = day_start_ms(start_ms) + DAY_MS

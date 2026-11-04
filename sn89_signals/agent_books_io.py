@@ -773,6 +773,41 @@ def build_live(results: dict, now_ms: int) -> dict:
             "books": books}
 
 
+TRADES_MAX_FILLS = 500
+TRADES_MAX_POINTS = 2000
+
+
+def build_trades(results: dict, now_ms: int) -> dict:
+    """{account: doc} for the IQ Terminal's read-only agent book view (2026-11-04): the latest
+    fills (each with the receipt `seq` that asked for it), open positions with entry and mark,
+    and the equity series (one point per fill and per day end), thinned to TRADES_MAX_POINTS.
+    Money is a fraction of the starting equity (1.0). Display only: not consensus."""
+    out = {}
+    for acct in sorted(results):
+        r = results[acct]
+        eq = r["equity"]
+        unr = r["unrealised"]
+        x = r["balance"] + unr if ab.RULES_V1["hwm_basis"] == "equity" else r["balance"]
+        series = [[int(t), float(e)] for t, e in r["series"]]
+        if len(series) > TRADES_MAX_POINTS:
+            step = -(-len(series) // TRADES_MAX_POINTS)
+            series = series[::step] + ([series[-1]] if (len(series) - 1) % step else [])
+        out[acct] = {
+            "v": 1, "account": acct, "as_of_ms": int(now_ms),
+            "equity": eq, "balance": r["balance"], "unrealised": unr, "hwm": r["hwm"],
+            "ath_eod": r["ath"], "elim_floor": r["ath"] * (1 - ab.RULES_V1["elim_dd"]),
+            "eliminated_at_ms": r["eliminated_at_ms"],
+            "week_gain_so_far": max(0.0, x - r["hwm"] + min(0.0, unr)),
+            "week_active_buckets": r["open_week_buckets"],
+            "declared": r["declared"],
+            "positions": {p: {"qty": v["qty"], "avg": v["avg"], "mark": v["mark"],
+                              "lev": (v["qty"] * v["mark"] / eq) if eq else 0.0}
+                          for p, v in r["positions"].items()},
+            "fills": r["fills"][-TRADES_MAX_FILLS:], "fills_total": len(r["fills"]),
+            "series": series}
+    return out
+
+
 # ── validator side ───────────────────────────────────────────────────────────
 def pay_week_start_ms(now_unix: float) -> int:
     """The week the validator pays at `now`: the most recently ended week, from
