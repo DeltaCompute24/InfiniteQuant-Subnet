@@ -1553,9 +1553,11 @@ AGENT_BOOKS_LIVE_PATH = os.getenv("SN89_AGENT_BOOKS_LIVE_PATH",
 # anchors, so a registration commit would be overwritten within minutes). Registration only:
 # the bond itself is still checked every week like anyone else's.
 AGENT_BOOKS_GRANDFATHERED: dict = {
-    # IQ Markets / signals entity (UID 39) -> the subnet owner coldkey.
+    # IQ Markets / signals entity (UID 39) -> the subnet owner coldkey (infinitehashowner,
+    # 853,953 alpha on 89 at block 9,428,958). The entity's own owner coldkey 5HCC5ENq... held
+    # 2,381, below ENTITY_MIN_ALPHA (Whit 2026-11-03: "lets handle that").
     "5Hdvy1Msc9Su6U7kcJQRFnc39NNVumAcPnqFLoHqZ4Uix6g3":
-        "5HCC5ENqaQa38uuVWxeqdpMP9dYbgebjVGtJdSShSKv4mGZH",
+        "5Dc5NmEUptDeMLrxDSvg8kfCToxJkiF47apAYSVTycAVvDN4",
 }
 
 

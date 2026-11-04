@@ -102,7 +102,7 @@ CRYPTO_FEE_BPS = 2.9
 # TODO pin from PTN source: per-class fee for equities / indices / commodities / metals.
 FEE_TODO = CRYPTO_FEE_BPS
 
-ENTITY_MIN_ALPHA = 10_000.0
+ENTITY_MIN_ALPHA = 40_000.0   # Whit 2026-11-03: raised from 10,000
 ENTITY_COMMIT_PREFIX = "sn89entity:"
 
 RULES_V1 = MappingProxyType({

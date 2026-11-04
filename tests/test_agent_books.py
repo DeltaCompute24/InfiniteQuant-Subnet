@@ -411,9 +411,9 @@ def test_pool_split_pro_rata_losing_account_does_not_net():
 
 def test_entity_below_bond_gets_zero():
     books = {"E1": {"E1_1": 0.03}, "E2": {"E2_1": 0.01}}
-    w = ab.weekly_weights(books, {"E1": 9_999.99, "E2": 10_000})
+    w = ab.weekly_weights(books, {"E1": 39_999.99, "E2": 40_000})
     assert w == {"E2_1": pytest.approx(1.0)}
-    w = ab.weekly_weights(books, {"E2": 10_000})              # missing bond = 0
+    w = ab.weekly_weights(books, {"E2": 40_000})              # missing bond = 0
     assert w == {"E2_1": pytest.approx(1.0)}
 
 
@@ -424,8 +424,9 @@ def test_all_zero_week_burns():
 
 
 def test_entity_eligible():
-    assert ab.entity_eligible(10_000)
-    assert not ab.entity_eligible(9_999.999)
+    assert ab.entity_eligible(40_000)
+    assert not ab.entity_eligible(39_999.999)
+    assert not ab.entity_eligible(10_000)
     assert not ab.entity_eligible(None)
     assert not ab.entity_eligible(float("nan"))
 

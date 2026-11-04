@@ -218,7 +218,7 @@ def test_missing_windows_reported():
 # ── registry and bond ────────────────────────────────────────────────────────
 def test_our_entity_grandfathered_without_commitment():
     reg = abio.registry_as_of({}, 123)
-    assert reg == {ENT: BOND_CK}
+    assert reg == {ENT: "5Dc5NmEUptDeMLrxDSvg8kfCToxJkiF47apAYSVTycAVvDN4"}   # subnet owner coldkey
 
 
 def test_registry_journal_sticky_and_as_of():
@@ -246,12 +246,12 @@ def test_week_bond_gate_and_shares():
     a1, a2, b1 = f"{ENT}_{N0 + 1}", f"{ENT}_{N0 + 2}", f"{OTHER}_{N0 + 1}"
     res = _results({a1: 0.03, a2: 0.01, b1: 0.04})
     reg = {ENT: BOND_CK, OTHER: BOND_CK}
-    doc = abio.build_week(res, MON, reg, {ENT: 2380.39, OTHER: 10_000.0}, [])
+    doc = abio.build_week(res, MON, reg, {ENT: 2380.39, OTHER: 40_000.0}, [])
     assert doc["accounts"][a1]["share"] == 0 and doc["accounts"][a2]["share"] == 0
     assert doc["accounts"][b1]["share"] == 1.0
     assert doc["entities"][ENT] == {"registered": True, "bond_coldkey": BOND_CK,
                                     "bond": 2380.39, "eligible": False}
-    doc = abio.build_week(res, MON, reg, {ENT: 10_000.0, OTHER: 10_000.0}, [])
+    doc = abio.build_week(res, MON, reg, {ENT: 40_000.0, OTHER: 40_000.0}, [])
     assert doc["accounts"][a1]["share"] == pytest.approx(0.375)
     assert doc["accounts"][b1]["share"] == pytest.approx(0.5)
     # registered nowhere -> zero even with a bond

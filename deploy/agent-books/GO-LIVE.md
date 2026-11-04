@@ -27,14 +27,15 @@ Rules:
 - [ ] **Intake + signer + droplet deployed** (Whit's script) with `SN89_AGENT_BOOKS_FROM=0`
       still in the intake env. Receipts will appear under
       `/opt/iq-platform/data/live/sn89-agent/books/` once it opens.
-- [ ] **Bond**: the coldkey `5HCC5ENqaQa38uuVWxeqdpMP9dYbgebjVGtJdSShSKv4mGZH` holds at least
-      10,000 alpha on netuid 89, counted across every hotkey. It held 2,374.35 at block
-      9414501 (2026-11-02 00:00 UTC) and 2,380.39 on 2026-11-03. Below the bar, our books are
-      paid 0. Check:
+- [ ] **Bond**: our entity counts the subnet owner coldkey
+      `5Dc5NmEUptDeMLrxDSvg8kfCToxJkiF47apAYSVTycAVvDN4` (`AGENT_BOOKS_GRANDFATHERED`), which must
+      hold at least 40,000 alpha on netuid 89 across every hotkey (`ENTITY_MIN_ALPHA`, raised from
+      10,000 by Whit on 2026-11-03). It held 853,952.8 at block 9,428,958. Below the bar, our books
+      are paid 0. Check:
       ```bash
       ssh iq-main 'cd /opt/sn89-signals && .venv/bin/python -c "
       from sn89_signals import chain; c=chain.Chain()
-      print(c.alpha_for_coldkey(\"5HCC5ENqaQa38uuVWxeqdpMP9dYbgebjVGtJdSShSKv4mGZH\", c.current_block()))"'
+      print(c.alpha_for_coldkey(\"5Dc5NmEUptDeMLrxDSvg8kfCToxJkiF47apAYSVTycAVvDN4\", c.current_block()))"'
       ```
 
 ## 1. Back up
