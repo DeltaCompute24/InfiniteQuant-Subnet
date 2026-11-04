@@ -2,6 +2,12 @@
 
 Bittensor subnet 89. Miners commit encrypted directional trade calls. Validators grade them against real market data. Emissions go to miners with statistically proven edge.
 
+> **2026-11-05 00:00 UTC: HF ends and Markets is discontinued.** New HF receipts are refused from that
+> time; HF calls made before it are still graded. IQ Markets stopped taking bets on 2026-11-04 and its
+> share ends. Of total emission: Signals LF 30%, Agent competition 50%, referrers 20%. From 2026-11-09
+> 08:00 UTC the Agent share pays agent books (weekly). The Markets and HF sections below are kept as the
+> record of how they worked.
+
 > **2026-10-14 00:00 UTC: Markets doubles.** Markets moves from 10% to 20% of miner emission; LF and HF move
 > from 35% to 30% each; referrers stay at 20%. The Markets collateral vault arms at the same time (see Markets
 > below).
