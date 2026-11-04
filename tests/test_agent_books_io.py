@@ -218,7 +218,7 @@ def test_missing_windows_reported():
 # ── registry and bond ────────────────────────────────────────────────────────
 def test_our_entity_grandfathered_without_commitment():
     reg = abio.registry_as_of({}, 123)
-    assert reg == {ENT: "5Dc5NmEUptDeMLrxDSvg8kfCToxJkiF47apAYSVTycAVvDN4"}   # subnet owner coldkey
+    assert reg == {ENT: "5FjFwQuTGDmWMpbJmKunET2y1wAiXW8Fi12VkRYTUWTGYpVK"}   # IQ Fund LP coldkey (2026-11-04)
 
 
 def test_registry_journal_sticky_and_as_of():
