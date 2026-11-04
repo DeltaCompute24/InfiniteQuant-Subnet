@@ -107,7 +107,7 @@ def test_gate_override_restores():
 def test_agent_unpaid_until_its_share():
     assert config.agent_comp_active(config.AGENT_COMP_FROM_UNIX)
     assert config.comp_weights_as_of(config.HF_END_FROM_UNIX - 1).get("agent", 0) == 0
-    assert config.comp_weights_as_of(config.HF_END_FROM_UNIX)["agent"] == pytest.approx(0.25)
+    assert config.comp_weights_as_of(config.HF_END_FROM_UNIX)["agent"] == pytest.approx(0.375)
 
 
 def test_bad_scope_raises():

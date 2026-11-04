@@ -15,7 +15,7 @@ def test_shares_before_end_are_todays():
 def test_shares_after_end_drop_hf_without_renormalizing_lf():
     s = config.comp_weights_as_of(END)
     assert "hf" not in s
-    assert s == pytest.approx({"lf": 0.375, "agent": 0.25, "reserve": 0.125, "markets": 0.25})
+    assert s == pytest.approx({"lf": 0.375, "agent": 0.375, "markets": 0.25})   # GPU reserve -> agent (2026-11-04)
 
 
 def test_unarmed_agent_and_reserve_burn_their_share():
