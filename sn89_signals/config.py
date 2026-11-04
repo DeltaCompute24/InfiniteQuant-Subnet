@@ -1441,6 +1441,12 @@ COMP_WEIGHTS_HISTORY: tuple = (
     # (Whit): Markets' 0.25 also goes to `agent` (Markets is no longer the direction). Of the TOTAL from
     # 11-05: LF 30 / Agent 50 / Referrers 20. Replay-safe: no weight was ever set under the old row.
     (1793836800, "lf:0.375,agent:0.625"),
+    # ⚑ 2026-11-16 08:00:00 UTC (Whit, 2026-11-04: "make the competition live today"): Agent v1
+    # (LF-graded calls) ends and its 0.625 goes to `agentbook`, the frozen agent-books week
+    # (agent_books_io). Books opened 2026-11-04 04:30 UTC; 11-04..09 is a practice week (frozen,
+    # never paid: this row is not active while it is the pay week). The first paid week is
+    # 2026-11-09..16, frozen 11-16 06:05, paid from 08:00. mecid-0-RELATIVE, chain split unchanged.
+    (1794816000, "lf:0.375,agentbook:0.625"),
 )
 _COMP_ENV = os.getenv("SN89_COMP_WEIGHTS", "")
 if _COMP_ENV:
