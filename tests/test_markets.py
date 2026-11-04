@@ -240,9 +240,10 @@ def test_hf_readers_skip_markets_and_closers():
 
 
 def test_markets_share_appears_only_at_the_mainnet_cutover():
-    """Every row before 2026-10-09 00:00Z is untouched; Markets enters only at that instant."""
+    """Every row before 2026-10-09 00:00Z is untouched; Markets enters only at that instant and leaves at
+    the 2026-11-05 row (Whit, 2026-11-04: its share moves to agent)."""
     for eff, spec in config.COMP_WEIGHTS_HISTORY:
-        assert ("markets" in spec) == (eff >= 1791504000)
+        assert ("markets" in spec) == (1791504000 <= eff < 1793836800)
 
 
 def test_blend_with_a_markets_share():

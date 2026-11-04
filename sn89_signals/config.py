@@ -1437,9 +1437,10 @@ COMP_WEIGHTS_HISTORY: tuple = (
     # 0.375; LF stays at exactly 0.375 (writing the row without hf would renormalize LF to 0.6).
     # HF_END_FROM_UNIX below is the same instant: new HF receipts are refused from it.
     # ⚑ Amended 2026-11-04 ~02:00 UTC, BEFORE this row took effect (Whit): the GPU competition is paused
-    # on standby and its `reserve` placeholder (0.125) goes to `agent`. Of the TOTAL from 11-05:
-    #   LF 30 / Agent 30 / Markets 20 / Referrers 20. Replay-safe: no weight was ever set under the old row.
-    (1793836800, "lf:0.375,agent:0.375,markets:0.25"),
+    # on standby and its `reserve` placeholder (0.125) goes to `agent`. Amended again the same hour
+    # (Whit): Markets' 0.25 also goes to `agent` (Markets is no longer the direction). Of the TOTAL from
+    # 11-05: LF 30 / Agent 50 / Referrers 20. Replay-safe: no weight was ever set under the old row.
+    (1793836800, "lf:0.375,agent:0.625"),
 )
 _COMP_ENV = os.getenv("SN89_COMP_WEIGHTS", "")
 if _COMP_ENV:
