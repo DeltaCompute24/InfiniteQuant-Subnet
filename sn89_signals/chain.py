@@ -559,6 +559,73 @@ class Chain:
                     continue
         return out
 
+    # ── Agent books v2: entity registry + bond (read-only) ──────────────────
+    def read_entity_registrations(self) -> dict[str, dict]:
+        """{entity_hotkey: {"bond_coldkey", "commit_block"}} for every hotkey whose CURRENT
+        CommitmentOf is `sn89entity:<bond_coldkey>`. Latest-wins like every commitment, so
+        the caller journals what it sees (agent_books_io.merge_registry) and treats a
+        registration as sticky. Kept out of _decode_any on purpose: the LF ingest path must
+        not start seeing a new commitment kind."""
+        from . import agent_books
+        out: dict[str, dict] = {}
+        qm = self.st.substrate.query_map("Commitments", "CommitmentOf", [self.netuid])
+        for hotkey, reg in qm:
+            v = reg.value if hasattr(reg, "value") else reg
+            if not isinstance(v, dict):
+                continue
+            ck = agent_books.parse_entity_commit(_extract_raw_str(v.get("info")))
+            if ck:
+                out[_to_ss58(hotkey)] = {"bond_coldkey": ck,
+                                         "commit_block": int(v.get("block") or 0)}
+        return out
+
+    # The public (lite) node keeps ~256 blocks of state and, for older blocks, can answer
+    # with defaults (Timestamp.Now = 0, empty stake) instead of raising. Any read further
+    # back than this goes straight to the archive node.
+    _LITE_STATE_BLOCKS = 200
+
+    def _historic(self, block: int) -> bool:
+        if "test" in str(config.NETWORK):
+            return False
+        return self.current_block() - int(block) > self._LITE_STATE_BLOCKS
+
+    def alpha_for_coldkey(self, coldkey_ss58: str, block: int,
+                          netuid: int | None = None) -> float:
+        """Total alpha the coldkey holds on `netuid` (every hotkey) at `block`, read from a
+        finney ARCHIVE node when the block is older than the public node's state."""
+        nu = self.netuid if netuid is None else int(netuid)
+        st = self._archive() if self._historic(block) else self.st
+        return sum(float(s.stake) for s in st.get_stake_info_for_coldkey(
+            coldkey_ss58, block=int(block)) if int(s.netuid) == nu)
+
+    def block_time_ms_strict(self, block: int) -> int:
+        """block_time_ms, but a zero (pruned-state default) is re-read from the archive."""
+        t = self.block_time_ms(block)
+        if t > 0 or "test" in str(config.NETWORK):
+            return t
+        st = self._archive()
+        return int(st.substrate.query("Timestamp", "Now",
+                                      block_hash=st.get_block_hash(block)).value)
+
+    def block_at_or_after_ms(self, t_ms: int) -> int:
+        """The first block whose Timestamp.Now >= t_ms (binary search, archive-backed).
+        Raises if t_ms is after the chain head."""
+        bt_ = self.block_time_ms_strict
+        hi = self.current_block()
+        th = bt_(hi)
+        if th < t_ms:
+            raise ValueError("t_ms is after the chain head")
+        lo = max(1, hi - int((th - t_ms) / 12_000) - 600)
+        while lo > 1 and bt_(lo) >= t_ms:
+            lo = max(1, lo - 7200)
+        while hi - lo > 1:                       # invariant: time(lo) < t_ms <= time(hi)
+            mid = (lo + hi) // 2
+            if bt_(mid) >= t_ms:
+                hi = mid
+            else:
+                lo = mid
+        return hi
+
     def current_block(self) -> int:
         return self.st.get_current_block()
 

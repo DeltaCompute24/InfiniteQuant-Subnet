@@ -1526,6 +1526,60 @@ def agent_comp_active(t_unix: float) -> bool:
     return AGENT_COMP_FROM_UNIX > 0 and t_unix >= AGENT_COMP_FROM_UNIX
 
 
+# ── Agent competition v2: agent BOOKS (sn89_signals/agent_books*.py) ─────────
+# Hosted algos hold a leverage book per entity account, scored as weekly high-water-mark
+# gains (agent_books.py). The pool is the `agentbook` share key. OFF by default: 0 = off.
+# SN89_AGENT_BOOKS_FROM is the OPENING instant, shared with the intake (one value opens
+# intake and validator together): set it to a Monday 00:00 UTC. That Monday is the replay
+# EPOCH every book starts from and the first scored week. The validator pays each FROZEN
+# week during the week after it, from AGENT_BOOKS_PAY_DELAY_S after its close
+# (agent_books_io.pay_week_start_ms), so the first payment starts at FROM + 7d + 8h; before
+# that there is no week to pay and the share burns. combine() still ignores the vector until
+# COMP_WEIGHTS_HISTORY gives `agentbook` a share, so the flag alone never moves emission.
+AGENT_BOOKS_FROM_UNIX = int(os.getenv("SN89_AGENT_BOOKS_FROM", "0"))
+# A week may be frozen once every tick window in it is final: FREEZE delay = HF
+# GRADE_ABANDON_S. It is PAID from the PAY delay, 2 h later, so the Monday 06:05 freeze (and
+# its 07:05 retry) has landed before any validator looks for the file.
+AGENT_BOOKS_FREEZE_DELAY_S = 6 * 3600
+AGENT_BOOKS_PAY_DELAY_S = 8 * 3600
+AGENT_BOOKS_DIR = os.getenv("SN89_AGENT_BOOKS_DIR", os.path.expanduser("~/.sn89/agent-books"))
+# Where the intake writes one receipt log per account (`<n>.jsonl`), and where it publishes
+# the same lines (comma-separated URLs, or one URL ending in index.json listing them).
+AGENT_BOOKS_RECEIPTS_DIR = os.getenv("SN89_AGENT_BOOKS_RECEIPTS_DIR",
+                                     "/opt/iq-platform/data/live/sn89-agent/books")
+AGENT_BOOKS_RECEIPTS_URLS = os.getenv("SN89_AGENT_BOOKS_RECEIPTS_URLS", "")
+# Live book state for the intake (refuses receipts of an eliminated book) and the hosted
+# droplet (an algo reads its own book). Written by tools/agent_books_weekly.py --live.
+AGENT_BOOKS_LIVE_PATH = os.getenv("SN89_AGENT_BOOKS_LIVE_PATH",
+                                  "/opt/iq-platform/data/live/agent-books-live.json")
+# Entities whose bond coldkey is fixed here instead of by an `sn89entity:<coldkey>`
+# commitment (the entity's one commitment slot also carries LF batches and Markets oracle
+# anchors, so a registration commit would be overwritten within minutes). Registration only:
+# the bond itself is still checked every week like anyone else's.
+AGENT_BOOKS_GRANDFATHERED: dict = {
+    # IQ Markets / signals entity (UID 39) -> the subnet owner coldkey (infinitehashowner,
+    # 853,953 alpha on 89 at block 9,428,958). The entity's own owner coldkey 5HCC5ENq... held
+    # 2,381, below ENTITY_MIN_ALPHA (Whit 2026-11-03: "lets handle that").
+    "5Hdvy1Msc9Su6U7kcJQRFnc39NNVumAcPnqFLoHqZ4Uix6g3":
+        "5Dc5NmEUptDeMLrxDSvg8kfCToxJkiF47apAYSVTycAVvDN4",
+}
+
+
+def agent_books_active(t_unix: float) -> bool:
+    return AGENT_BOOKS_FROM_UNIX > 0 and t_unix >= AGENT_BOOKS_FROM_UNIX
+
+
+# HF anchor v2 (hf.ANCHOR_V2_PREFIX): from this instant every HF window whose START is at or
+# after it is anchored as v2 (binds the window's agent book receipts and the bid/ask quotes)
+# and quiet windows are anchored too. 0 = v1 exactly as before. Independent of HF scoring:
+# HF_END_FROM_UNIX does not stop the anchor, which also carries Markets bets and the ticks.
+AGENT_ANCHOR_V2_FROM_UNIX = int(os.getenv("SN89_AGENT_ANCHOR_V2_FROM", "0"))
+
+
+def agent_anchor_v2_as_of(w_start_ms: int) -> bool:
+    return AGENT_ANCHOR_V2_FROM_UNIX > 0 and int(w_start_ms) >= AGENT_ANCHOR_V2_FROM_UNIX * 1000
+
+
 def markets_active_as_of(t_unix: float) -> bool:
     """A market STARTING at t exists under the rules (market_exists keys on the start)."""
     return bool(MARKETS_FROM_UNIX and t_unix >= MARKETS_FROM_UNIX)

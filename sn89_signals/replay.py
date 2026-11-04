@@ -534,13 +534,14 @@ def keepalive_uids(uid_by_hotkey: dict[str, int], now: float, block: int,
 
 
 def entity_split(lf_fn, hf_fn, markets_vec: dict | None, shares: dict,
-                 uid_by_hotkey: dict[str, int], accounts, agent_fn=None) -> dict:
+                 uid_by_hotkey: dict[str, int], accounts, agent_fn=None,
+                 agentbook_fn=None) -> dict:
     """How an entity UID's weight divides between Markets and each signals account.
     NOT consensus: it decides nothing on chain. It exists so the entity can pay each
     account its part of what the UID receives.
 
-    lf_fn(uid_map) / hf_fn(uid_map) / agent_fn(uid_map) return the LF / HF / Agent vectors
-    for a uid map (agent_fn None: no Agent part). They are
+    lf_fn(uid_map) / hf_fn(uid_map) / agent_fn(uid_map) / agentbook_fn(uid_map) return the
+    LF / HF / Agent / Agent-books vectors for a uid map (None: no such part). They are
     re-run with every account on its own pseudo-uid (negative ints, never on chain), so
     each account's part is measured by the same code that pays the entity. Returns
     {entity_hk: {"uid", "markets", "accounts": {account: part}, "markets_frac"}}.
@@ -552,7 +553,9 @@ def entity_split(lf_fn, hf_fn, markets_vec: dict | None, shares: dict,
     m.update(pseudo)
     vecs = {"lf": lf_fn(m) if shares.get("lf", 0) > 0 else None,
             "hf": hf_fn(m) if shares.get("hf", 0) > 0 else None,
-            "agent": agent_fn(m) if agent_fn is not None and shares.get("agent", 0) > 0 else None}
+            "agent": agent_fn(m) if agent_fn is not None and shares.get("agent", 0) > 0 else None,
+            "agentbook": (agentbook_fn(m) if agentbook_fn is not None
+                          and shares.get("agentbook", 0) > 0 else None)}
 
     def _norm(v):
         if not v:
@@ -569,7 +572,8 @@ def entity_split(lf_fn, hf_fn, markets_vec: dict | None, shares: dict,
         for a in accounts:
             if entity.parse(a)[0] != ent:
                 continue
-            part = sum(shares.get(k, 0) * nv[k].get(pseudo[a], 0.0) for k in ("lf", "hf", "agent"))
+            part = sum(shares.get(k, 0) * nv[k].get(pseudo[a], 0.0)
+                       for k in ("lf", "hf", "agent", "agentbook"))
             if part > 0:
                 acc[a] = part
         mk = shares.get("markets", 0) * nm.get(uid, 0.0)

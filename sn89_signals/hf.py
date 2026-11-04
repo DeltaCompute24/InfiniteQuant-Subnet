@@ -2024,6 +2024,10 @@ def encode_anchor(w_start_ms: int, n: int, tick_n: int,
 
 
 def decode_anchor(s: str) -> dict | None:
+    """Either anchor version. v1 decodes exactly as it always has; v2 (agent books,
+    ANCHOR_V2_PREFIX) adds "v": 2 and "agent_n". History stays v1, so readers keep both."""
+    if s and isinstance(s, str) and s.startswith(ANCHOR_V2_PREFIX):
+        return decode_anchor_v2(s)
     if not s or not s.startswith(ANCHOR_PREFIX):
         return None
     try:
@@ -2035,12 +2039,78 @@ def decode_anchor(s: str) -> dict | None:
 
 
 def verify_anchor(onchain: str, root_hex: str, tick_root_hex: str,
-                  n: int, tick_n: int) -> bool:
+                  n: int, tick_n: int, *, quote_root_hex: str | None = None,
+                  agent_root_hex: str | None = None, agent_n: int | None = None) -> bool:
     """What a third party runs: recompute both roots from the published log and
-    confirm the chain committed to exactly this window."""
+    confirm the chain committed to exactly this window. A v2 anchor also needs the
+    window's quote root and agent receipts root (published in anchor-v2.json); without
+    them it does not verify."""
+    if isinstance(onchain, str) and onchain.startswith(ANCHOR_V2_PREFIX):
+        if quote_root_hex is None or agent_root_hex is None or agent_n is None:
+            return False
+        return verify_anchor_v2(onchain, root_hex, tick_root_hex, quote_root_hex,
+                                agent_root_hex, n, tick_n, agent_n)
     a = decode_anchor(onchain)
     return bool(a and a["n"] == n and a["tick_n"] == tick_n
                 and a["window_root"] == window_root(root_hex, tick_root_hex))
+
+
+# ── v2 anchor: + agent receipts root + quote root (agent books, CONSENSUS) ────
+# Armed per window by config.AGENT_ANCHOR_V2_FROM_UNIX (window start >= it); windows
+# before it stay v1 forever. v2 binds two more halves into the one window root:
+#   quote_root  over (a, t, b, k, p) of every tick — v1's tick_root binds only (a, t, p),
+#               and agent books fill at bid/ask;
+#   agent_root  agent_books.receipts_root of the window's agent book receipts.
+# `sn89hf:2:<w_s>:<n>:<tick_n>:<agent_n>:<window_root_v2>`, ~100 bytes.
+ANCHOR_V2_PREFIX = "sn89hf:2:"
+
+
+def quote_tick_bytes(t: dict) -> bytes:
+    return canonical_json({k: t[k] for k in ("a", "b", "k", "p", "t") if k in t}).encode()
+
+
+def quote_root(ticks: list) -> str:
+    return merkle_root([hashlib.blake2b(quote_tick_bytes(t), digest_size=32).digest()
+                        for t in sorted(ticks, key=tick_order_key)])
+
+
+def window_root_v2(root_hex: str, tick_root_hex: str, quote_root_hex: str,
+                   agent_root_hex: str) -> str:
+    return hashlib.blake2b(bytes.fromhex(root_hex) + bytes.fromhex(tick_root_hex)
+                           + bytes.fromhex(quote_root_hex) + bytes.fromhex(agent_root_hex),
+                           digest_size=32).hexdigest()
+
+
+def encode_anchor_v2(w_start_ms: int, n: int, tick_n: int, agent_n: int, root_hex: str,
+                     tick_root_hex: str, quote_root_hex: str, agent_root_hex: str) -> str:
+    s = (f"{ANCHOR_V2_PREFIX}{int(w_start_ms) // 1000}:{int(n)}:{int(tick_n)}:"
+         f"{int(agent_n)}:"
+         f"{window_root_v2(root_hex, tick_root_hex, quote_root_hex, agent_root_hex)}")
+    if len(s.encode()) > ANCHOR_MAX_BYTES:
+        raise ValueError(f"anchor {len(s.encode())}B exceeds the {ANCHOR_MAX_BYTES}B field")
+    return s
+
+
+def decode_anchor_v2(s) -> dict | None:
+    if not isinstance(s, str) or not s.startswith(ANCHOR_V2_PREFIX):
+        return None
+    try:
+        w_s, n, tick_n, agent_n, wroot = s[len(ANCHOR_V2_PREFIX):].split(":")
+        if len(wroot) != 64:
+            return None
+        bytes.fromhex(wroot)
+        return {"v": 2, "w": int(w_s) * 1000, "n": int(n), "tick_n": int(tick_n),
+                "agent_n": int(agent_n), "window_root": wroot}
+    except ValueError:
+        return None
+
+
+def verify_anchor_v2(onchain: str, root_hex: str, tick_root_hex: str, quote_root_hex: str,
+                     agent_root_hex: str, n: int, tick_n: int, agent_n: int) -> bool:
+    a = decode_anchor_v2(onchain)
+    return bool(a and a["n"] == n and a["tick_n"] == tick_n and a["agent_n"] == agent_n
+                and a["window_root"] == window_root_v2(root_hex, tick_root_hex,
+                                                       quote_root_hex, agent_root_hex))
 
 
 # ── grading (CONSENSUS) ──────────────────────────────────────────────────────

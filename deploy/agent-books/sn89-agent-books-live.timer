@@ -1,0 +1,11 @@
+# STAGED — not installed.
+[Unit]
+Description=SN89 agent books live state every 5 min
+
+[Timer]
+OnCalendar=*:0/5
+AccuracySec=30s
+Unit=sn89-agent-books-live.service
+
+[Install]
+WantedBy=timers.target

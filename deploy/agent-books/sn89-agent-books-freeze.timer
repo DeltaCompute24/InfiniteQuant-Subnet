@@ -1,0 +1,13 @@
+# STAGED — not installed. Freeze at 06:05 UTC Monday (6 h after the week closes, every tick
+# window final); 07:05 is an idempotent retry. Validators pay the new week from 08:00 UTC.
+[Unit]
+Description=SN89 agent books weekly freeze (Mon 06:05 + 07:05 UTC)
+
+[Timer]
+OnCalendar=Mon *-*-* 06:05:00 UTC
+OnCalendar=Mon *-*-* 07:05:00 UTC
+Persistent=true
+Unit=sn89-agent-books-freeze.service
+
+[Install]
+WantedBy=timers.target

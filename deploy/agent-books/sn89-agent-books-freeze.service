@@ -1,0 +1,22 @@
+# STAGED — not installed. See deploy/agent-books/GO-LIVE.md.
+[Unit]
+Description=SN89 agent books — freeze the last final week (Agent competition v2)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/sn89-signals
+EnvironmentFile=/opt/sn89-signals/.env.main
+Environment=HOME=/root
+Environment=PYTHONUNBUFFERED=1
+Environment=SN89_AGENT_BOOKS_DIR=/root/.sn89/agent-books
+# exit 2 = the week is not final yet (nothing written); exit 3 = a frozen week would change
+# (refused, needs a human) -> unit failed.
+SuccessExitStatus=2
+ExecStart=/usr/bin/flock /run/lock/sn89-agent-books.lock /opt/sn89-signals/.venv/bin/python tools/agent_books_weekly.py --require-anchor --out /root/.sn89/agent-books
+ExecStartPost=/opt/sn89-signals/.venv/bin/python deploy/agent-books/publish_weeks.py /root/.sn89/agent-books /opt/iq-platform/data/live/sn89-agent/weeks
+TimeoutStartSec=1800
+Nice=10
+IOSchedulingClass=idle
