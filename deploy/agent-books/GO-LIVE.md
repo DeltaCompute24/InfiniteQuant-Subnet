@@ -78,11 +78,11 @@ loads the new code until it restarts.
 Append to `sn89_signals/config.py` `COMP_WEIGHTS_HISTORY`, after the 2026-11-05 row:
 
 ```python
-    # ⚑ 2026-11-23 08:00:00 UTC: Agent v1 (LF-graded calls) ends; its 0.375 (0.25 plus the GPU
-    # competition's 0.125, moved to agent on 2026-11-04) goes to `agentbook`, the frozen agent-books
-    # week (agent_books_io). The first frozen week is 2026-11-16..23, paid from 08:00 on the 23rd.
-    # mecid-0-RELATIVE, chain split unchanged.
-    (1795420800, "lf:0.375,agentbook:0.375,markets:0.25"),
+    # ⚑ 2026-11-23 08:00:00 UTC: Agent v1 (LF-graded calls) ends; its 0.625 (0.25 plus the GPU
+    # competition's 0.125 and Markets' 0.25, both moved to agent on 2026-11-04) goes to `agentbook`,
+    # the frozen agent-books week (agent_books_io). The first frozen week is 2026-11-16..23, paid
+    # from 08:00 on the 23rd. mecid-0-RELATIVE, chain split unchanged.
+    (1795420800, "lf:0.375,agentbook:0.625"),
 ```
 
 Then run pytest (same gate as step 2), commit, and push. Check:
