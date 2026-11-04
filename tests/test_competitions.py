@@ -81,7 +81,7 @@ class TestCombine:
         assert sum(config.COMP_WEIGHTS.values()) == pytest.approx(1.0)
         competitions = set(config.COMP_WEIGHTS) - {"reserve"}
         # markets from 2026-10-09 00:00Z; agent + reserve replace hf from 2026-11-05 00:00Z
-        assert competitions <= {"lf", "hf", "closers", "markets", "agent", "agentbook", "reserve"}   # agentbook from 2026-11-16 08:00
+        assert competitions <= {"lf", "hf", "closers", "markets", "agent", "agentbook", "reserve"}   # agentbook from 2026-11-09 08:00
         assert "lf" in competitions
 
 

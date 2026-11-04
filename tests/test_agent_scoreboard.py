@@ -57,7 +57,7 @@ def test_board_lists_agent_accounts_only_and_hides_test_logins(db):
     assert (r["won"], r["lost"], r["decisive"], r["qualified"]) == (45, 10, 55, True)
     assert r["weight_share_pct"] == 100.0
     assert b["gate"] == {"lb_floor_pct": 55, "min_decisive": 40}
-    assert b["paid"] is False   # NOW (2027) is after v1 ends: its share moves to `agentbook` at 2026-11-16 08:00
+    assert b["paid"] is False   # NOW (2027) is after v1 ends: its share moves to `agentbook` at 2026-11-09 08:00
     assert bas.build(db, config.HF_END_FROM_UNIX - 1)["paid"] is False
 
 
