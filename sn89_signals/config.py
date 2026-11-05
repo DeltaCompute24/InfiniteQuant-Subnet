@@ -1160,6 +1160,12 @@ def polygon_ticker(asset: str, asset_class: str) -> str:
 # miners (the common case) with no config; self-hosters override it.
 R2_PUBLIC_BASE = os.getenv("SN89_R2_PUBLIC_BASE",
                            "https://partner.infinitequant.app/sn89/blob")
+# More hosts a validator reads blobs from, comma-separated, after R2_PUBLIC_BASE.
+# Empty on mainnet. The testnet validator keeps its local base for our bots and
+# lists the relay here for outside miners. The commitment's url_tag binds the full
+# URL, so a blob only matches through the base it was committed against.
+R2_EXTRA_BASES = tuple(b.strip() for b in os.getenv("SN89_R2_EXTRA_BASES", "").split(",")
+                       if b.strip())
 R2_ENDPOINT = os.getenv("SN89_R2_ENDPOINT", "")        # s3 api endpoint (miner upload)
 R2_BUCKET = os.getenv("SN89_R2_BUCKET", "")
 R2_ACCESS_KEY_ID = os.getenv("SN89_R2_ACCESS_KEY_ID", "")
@@ -1468,7 +1474,7 @@ COMP_WEIGHTS = comp_weights_as_of(2**62)   # current-era shares (latest entry)
 # deadline (bucket.fetch); per loop iteration the outstanding fetches run in a
 # small thread pool under a total budget, and whatever doesn't finish is simply
 # retried next loop (the on-chain commitment is durable, and a captured blob is
-# pinned). Validators fetch ONLY from R2_PUBLIC_BASE (the owner relay by
+# pinned). Validators fetch ONLY from R2_PUBLIC_BASE plus R2_EXTRA_BASES (the owner relay by
 # default, or an operator-set bucket) — that base is the trust boundary; the
 # blob is encrypted and integrity-checked against the on-chain hash regardless.
 BLOB_FETCH_DEADLINE_S = float(os.getenv("SN89_BLOB_FETCH_DEADLINE_S", "8"))

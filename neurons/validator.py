@@ -408,17 +408,18 @@ class Validator:
         self.db.commit()
 
     def _find_blob(self, hotkey: str, tag: str, max_bytes: int | None = None) -> dict | None:
-        if not config.R2_PUBLIC_BASE:
-            return None
-        # bucket listing: {base}/{hotkey}/index.json maintained by the miner
-        idx = bucket.fetch(f"{config.R2_PUBLIC_BASE.rstrip('/')}/{hotkey}/index.json") or {}
-        for nonce in (idx.get("nonces") or [])[-50:]:
-            url = bucket.blob_url(hotkey, nonce)
-            if chain.url_tag(url) == tag:
-                # An entity batch carries up to BATCH_MAX_ITEMS timelock blobs (~1.8 KB
-                # each), past the 64 KiB single-blob cap.
-                return (bucket.fetch(url, max_bytes=max_bytes) if max_bytes
-                        else bucket.fetch(url))
+        for base in (config.R2_PUBLIC_BASE, *config.R2_EXTRA_BASES):
+            if not base:
+                continue
+            # bucket listing: {base}/{hotkey}/index.json maintained by the miner
+            idx = bucket.fetch(f"{base.rstrip('/')}/{hotkey}/index.json") or {}
+            for nonce in (idx.get("nonces") or [])[-50:]:
+                url = bucket.blob_url(hotkey, nonce, base=base)
+                if chain.url_tag(url) == tag:
+                    # An entity batch carries up to BATCH_MAX_ITEMS timelock blobs (~1.8 KB
+                    # each), past the 64 KiB single-blob cap.
+                    return (bucket.fetch(url, max_bytes=max_bytes) if max_bytes
+                            else bucket.fetch(url))
         return None
 
     # ── 2. reveal ────────────────────────────────────────────────────────────
