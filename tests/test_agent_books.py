@@ -493,3 +493,73 @@ def test_replay_books_groups_by_account():
     assert set(out) == {"A", "B"}
     assert out["A"]["weeks"][0]["paid"] == pytest.approx(0.01)
     assert out["B"]["weeks"][0]["paid"] == 0.0
+
+
+# ── exit reserve past the daily cap ──────────────────────────────────────────
+
+EXIT_T = ab.EXIT_RESERVE_FROM_S * 1000 + 3_600_000
+
+
+def _cap_rules():
+    return ab.RULES_V1
+
+
+def test_reduces_only():
+    d = {"BTCUSD": 0.2, "ETHUSD": -0.1}
+    assert ab.reduces_only({"BTCUSD": 0.0}, d)
+    assert ab.reduces_only({"BTCUSD": 0.1, "ETHUSD": -0.05}, d)
+    assert not ab.reduces_only({}, d)
+    assert not ab.reduces_only({"BTCUSD": 0.2}, d)       # unchanged size
+    assert not ab.reduces_only({"BTCUSD": 0.25}, d)      # larger
+    assert not ab.reduces_only({"BTCUSD": -0.1}, d)      # flip
+    assert not ab.reduces_only({"SOLUSD": 0.1}, d)       # new pair
+    assert not ab.reduces_only({"BTCUSD": 0.0, "SOLUSD": 0.1}, d)   # mixed
+
+
+def test_change_allowed_under_cap_is_unchanged():
+    d = {"BTCUSD": 0.2}
+    assert ab.change_allowed(47, {"SOLUSD": 0.1}, d, 0, _cap_rules())
+    assert not ab.change_allowed(48, {"BTCUSD": 0.0}, d, 0, _cap_rules())
+
+
+def test_change_allowed_reserve():
+    d = {"BTCUSD": 0.2}
+    cap = 48
+    before = ab.EXIT_RESERVE_FROM_S * 1000 - 1
+    assert not ab.change_allowed(cap, {"BTCUSD": 0.0}, d, before, _cap_rules())
+    assert ab.change_allowed(cap, {"BTCUSD": 0.0}, d, EXIT_T, _cap_rules())
+    assert not ab.change_allowed(cap, {"SOLUSD": 0.1}, d, EXIT_T, _cap_rules())
+    assert ab.change_allowed(cap + ab.EXIT_RESERVE_PER_DAY - 1, {"BTCUSD": 0.0}, d, EXIT_T, _cap_rules())
+    assert not ab.change_allowed(cap + ab.EXIT_RESERVE_PER_DAY, {"BTCUSD": 0.0}, d, EXIT_T, _cap_rules())
+
+
+def _flip_receipts(day_ms):
+    """48 receipts that open and flip, ending long 0.1 BTC, then a close."""
+    out = []
+    for i in range(48):
+        out.append({"account": "a", "seq": i + 1, "t_recv_ms": day_ms + i * 60_000,
+                    "targets": {"BTCUSD": 0.1 if i % 2 == 1 else -0.1}})
+    out.append({"account": "a", "seq": 49, "t_recv_ms": day_ms + 3_000_000,
+                "targets": {"BTCUSD": 0.0}})
+    return out
+
+
+def _replay_cap(day_ms):
+    ticks = [{"a": "BTCUSD", "t": day_ms + i * 1000, "p": 100.0, "b": 100.0, "k": 100.0}
+             for i in range(0, 3_600, 5)]
+    return ab.replay_book("a", _flip_receipts(day_ms), ticks, {"BTCUSD": "crypto"},
+                          start_ms=day_ms, end_ms=day_ms + 3_600_000, rules=ab.RULES_V1)
+
+
+def test_replay_exit_past_cap_after_the_date():
+    day = (ab.EXIT_RESERVE_FROM_S + 2 * 86400) * 1000
+    r = _replay_cap(day)
+    assert not [w for _r, w in r["refused"] if w == "day_cap"]
+    assert r["declared"] == {}
+
+
+def test_replay_exit_past_cap_refused_before_the_date():
+    day = (ab.EXIT_RESERVE_FROM_S - 2 * 86400) * 1000
+    r = _replay_cap(day)
+    assert [w for _r, w in r["refused"] if w == "day_cap"] == ["day_cap"]
+    assert r["declared"] == {"BTCUSD": 0.1}

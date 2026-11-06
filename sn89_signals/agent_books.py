@@ -24,6 +24,9 @@ ACCEPTANCE (at t_recv_ms, before any price is known)
   * at most max_changes_per_day (48) accepted receipts that change at least one declared
     target per UTC day; a receipt over the cap is refused whole. A receipt that changes
     nothing is a no-op: neither refused nor counted.
+  * from EXIT_RESERVE_FROM_S, a receipt that only moves pairs toward zero (every changed
+    pair ends smaller and on the same side, or closed) may also use EXIT_RESERVE_PER_DAY
+    further slots that day, so a book at the cap can still get out. See change_allowed().
   Refusing is chosen over clamping or scaling. A scaled vector is a position the algo
   never asked for, and its author cannot tell from its own fills that it was resized; a
   refusal is loud, leaves the previous book intact, and is the same rule a venue applies
@@ -123,6 +126,38 @@ RULES_V1 = MappingProxyType({
 })
 
 BOOK_RULES_HISTORY: tuple = ((0, RULES_V1),)
+
+
+# Exit reserve (Whit 2026-11-06, Mahmoud's feedback): a book at the daily cap could not close a
+# position until 00:00 UTC. Keyed on the receipt's own time, not the replay's start, so a replay
+# that starts before the date still applies it from the date on. Reductions are bounded by the
+# entries that made them possible, and the reserve bounds them again per day.
+EXIT_RESERVE_FROM_S = 1794009600      # 2026-11-07 00:00 UTC
+EXIT_RESERVE_PER_DAY = 16
+
+
+def reduces_only(changed: dict, declared: dict) -> bool:
+    """True when every changed pair moves toward zero without crossing it. `changed` is
+    {pair: new target}; `declared` holds the targets before this receipt."""
+    if not changed:
+        return False
+    for pair, new in changed.items():
+        old = float(declared.get(pair, 0.0))
+        new = float(new)
+        if old == 0.0 or new * old < 0.0 or abs(new) >= abs(old):
+            return False
+    return True
+
+
+def change_allowed(used: int, changed: dict, declared: dict, t_recv_ms: int, rules) -> bool:
+    """Whether a target-changing receipt fits the day, `used` receipts already accepted. The one
+    statement of the rule: the replay, the intake and the backtest all call this."""
+    cap = int(rules["max_changes_per_day"])
+    if used < cap:
+        return True
+    if int(t_recv_ms) < EXIT_RESERVE_FROM_S * 1000:
+        return False
+    return used < cap + EXIT_RESERVE_PER_DAY and reduces_only(changed, declared)
 
 
 def book_rules_as_of(t_unix: float):
@@ -343,7 +378,6 @@ def replay_book(account: str, receipts: list, ticks: list, universe: dict, *,
     fee_tbl = rules["fee_bps"]
     fee_default = float(rules["fee_bps_default"])
     delay = int(rules["fill_delay_ms"])
-    max_changes = int(rules["max_changes_per_day"])
     elim_mult = 1.0 - float(rules["elim_dd"])
     eps = float(rules["elim_eps"])
     basis = rules["hwm_basis"]
@@ -429,7 +463,7 @@ def replay_book(account: str, receipts: list, ticks: list, universe: dict, *,
             noops.append(r)
             return
         day = day_start_ms(r["t_recv_ms"])
-        if changes_by_day.get(day, 0) >= max_changes:
+        if not change_allowed(changes_by_day.get(day, 0), changed, declared, r["t_recv_ms"], rules):
             refused.append((r, "day_cap"))
             return
         changes_by_day[day] = changes_by_day.get(day, 0) + 1
