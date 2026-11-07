@@ -20,6 +20,55 @@ from . import config, entity, scoring
 from .schema import Signal
 
 
+def apply_account_migrations(signals: list[dict], meta: dict[str, dict],
+                             migrations: list[dict], successions: list[dict],
+                             now: float) -> tuple[list[dict], dict[str, dict], set[str]]:
+    """Score a migrated hotkey's record under its entity account. PURE.
+
+    migrations: [{from_hk, to_hk, commit_block, commit_unix}], journaled sn89mig commits signed by
+    from_hk. successions: journaled sn89refs attestations. A move counts only with both, into an
+    allow-listed LF account, one hotkey per account, the earliest commit first. Rows placed before
+    max(LF_MIGRATION_FROM_UNIX, commit_unix) move; later rows stay on the old hotkey. The account
+    takes the earlier first_seen and the summed strikes.
+
+    Returns (signals, meta, moved_hotkeys). The caller drops moved_hotkeys from its UID map, which
+    stops those UIDs earning and lets referrer succession pass their pairs on."""
+    if now < config.LF_MIGRATION_FROM_UNIX or not migrations:
+        return signals, meta, set()
+    attested = {(s["from_hk"], s["to_hk"]) for s in successions}
+    moves: dict[str, dict] = {}
+    taken: set[str] = set()
+    for m in sorted(migrations, key=lambda r: (r["commit_block"], r["from_hk"])):
+        frm, to = m["from_hk"], m["to_hk"]
+        acct = entity.parse(to)
+        if (frm, to) not in attested or acct is None or entity.parse(frm) is not None:
+            continue
+        if acct[0] not in config.SIGNALS_ENTITY_HOTKEYS or entity.is_agent_account(to):
+            continue
+        if frm in moves or to in taken:
+            continue
+        moves[frm] = m
+        taken.add(to)
+    if not moves:
+        return signals, meta, set()
+    out = []
+    for s in signals:
+        m = moves.get(s["hotkey"])
+        if m and s["t0_unix"] < max(config.LF_MIGRATION_FROM_UNIX, float(m["commit_unix"])):
+            s = {**s, "hotkey": m["to_hk"]}
+        out.append(s)
+    mt = {k: dict(v) for k, v in meta.items()}
+    for frm, m in moves.items():
+        old = mt.pop(frm, None)
+        if old is None:
+            continue
+        cur = mt.get(m["to_hk"])
+        mt[m["to_hk"]] = old if cur is None else {
+            **cur, "first_seen_unix": min(cur["first_seen_unix"], old["first_seen_unix"]),
+            "strikes": int(cur.get("strikes") or 0) + int(old.get("strikes") or 0)}
+    return out, mt, set(moves)
+
+
 def weights_from_journal(
     signals: list[dict],
     meta: dict[str, dict],
@@ -28,6 +77,7 @@ def weights_from_journal(
     referrals: list[dict] | None = None,
     keepalive: set[int] | None = None,
     scope: str = "lf",
+    lf_bonded: set[str] | None = None,
 ) -> dict[int, float]:
     """Re-derive {uid: weight} from a published journal, identically to the
     validator. PURE.
@@ -53,6 +103,9 @@ def weights_from_journal(
              are RE-DERIVED here (never trusted from the journal); inert unless
              config.REFERRAL_ENABLED. Default None → byte-identical to the
              pre-referral output.
+    lf_bonded: hotkeys holding the LF bond (config.LF_BOND_*). In scope "lf" a hotkey on its own
+             UID outside this set earns nothing, keep-alive floor included. Entity accounts are
+             exempt. None → no gate.
     """
     # Entity accounts (config.SIGNALS_ENTITY_*) score as their own miners and resolve
     # to the entity's UID here. Every UID-keyed sanction below must skip them: one
@@ -62,6 +115,10 @@ def weights_from_journal(
     if scope not in ("lf", "agent"):
         raise ValueError(f"unknown scope {scope!r}")
     agent = scope == "agent"
+    bond_gate = lf_bonded is not None and not agent
+    if bond_gate and keepalive:
+        keepalive = keepalive - {uid_by_hotkey[h] for h in uid_by_hotkey
+                                 if not is_account(h) and h not in lf_bonded}
 
     def in_scope(hk: str) -> bool:
         return entity.is_agent_account(hk) == agent
@@ -132,6 +189,8 @@ def weights_from_journal(
         if hk in flagged_accounts:
             continue                       # a flagged copier account earns nothing
         if not in_scope(hk):
+            continue
+        if bond_gate and not is_account(hk) and hk not in lf_bonded:
             continue
         # decisive history with the FRESHLY re-derived is_copy (copy-window rows
         # override; outside-window rows keep their journaled is_copy).

@@ -720,6 +720,22 @@ SIGNALS_ENTITY_HOTKEYS: frozenset = frozenset({
 })
 
 
+# LF CUTOVER (Whit, 2026-11-07), both from Monday 2026-11-09 00:00 UTC.
+# MIGRATION: a hotkey commits `sn89mig:1:<entity_hk>_<n>` and SUCCESSION_ATTESTOR_HK attests the
+# same move with sn89refs. Its record then scores under the account (replay.
+# apply_account_migrations) and its UID stops earning.
+# BOND: an LF miner on its own UID needs LF_BOND_MIN_ALPHA of alpha on this netuid, per UID, read
+# from its coldkey at the first block of each UTC day. Entity accounts sit under the entity's bond.
+# An unbonded UID's share goes to the miners still scored; nothing is burned for it.
+LF_MIGRATION_FROM_UNIX = int(os.getenv("SN89_LF_MIGRATION_FROM", "1794182400"))  # 2026-11-09T00:00:00Z
+LF_BOND_FROM_UNIX = int(os.getenv("SN89_LF_BOND_FROM", "1794182400"))  # 2026-11-09T00:00:00Z
+LF_BOND_MIN_ALPHA = float(os.getenv("SN89_LF_BOND_MIN_ALPHA", "1000"))
+
+
+def lf_bond_active(t_unix: float) -> bool:
+    return bool(LF_BOND_FROM_UNIX) and t_unix >= LF_BOND_FROM_UNIX
+
+
 # Where OUR validator appends each weight cycle's entity split (replay.entity_split), read
 # by the Markets payout cycle to pay each account its part. Not consensus.
 ENTITY_SPLIT_PATH = os.getenv("SN89_ENTITY_SPLIT_PATH", os.path.expanduser("~/.sn89/entity-split.jsonl"))

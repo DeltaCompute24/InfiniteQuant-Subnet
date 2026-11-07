@@ -73,6 +73,13 @@ _REFS_V = 1
 _REFS_RE = re.compile(rf"^{_REFS_PREFIX}:(\d+):(5[1-9A-HJ-NP-Za-km-z]{{46,50}})"
                       rf":(5[1-9A-HJ-NP-Za-km-z]{{46,50}}(?:_\d{{1,9}})?)$")
 
+# Account MIGRATION (config.LF_MIGRATION_FROM_UNIX): a hotkey commits "sn89mig:1:<account>" to
+# move its own record to an entity account. Counts only when SUCCESSION_ATTESTOR_HK attested the
+# same from -> to, so a record cannot be pushed onto an account uninvited.
+_MIG_PREFIX = "sn89mig"
+_MIG_V = 1
+_MIG_RE = re.compile(rf"^{_MIG_PREFIX}:(\d+):(5[1-9A-HJ-NP-Za-km-z]{{46,50}}_\d{{1,9}})$")
+
 # Entity BATCH (config.SIGNALS_ENTITY_*): an allow-listed entity hotkey commits
 # "sn89b:1:<root>:<round>:<url_tag>" where root is the Merkle root (hf.merkle_root)
 # over sha256(plaintext) of every account call in the batch, in blob order. One
@@ -242,6 +249,24 @@ def decode_referrer_succession(data: str) -> dict | None:
     return {"from": frm, "to": to}
 
 
+def encode_account_migration(to_account: str) -> str:
+    return f"{_MIG_PREFIX}:{_MIG_V}:{to_account}"
+
+
+def decode_account_migration(data: str) -> dict | None:
+    """Decode an sn89mig migration, or None. The signer is the hotkey that moves."""
+    m = _MIG_RE.match((data or "").strip())
+    if not m or int(m.group(1)) != _MIG_V:
+        return None
+    to = m.group(2)
+    try:
+        from scalecodec.utils.ss58 import ss58_decode
+        ss58_decode(to.split("_", 1)[0])
+    except Exception:  # noqa: BLE001
+        return None
+    return {"to": to}
+
+
 def _decode_any(data: str | None) -> dict | None:
     """Decode a commitment payload of either kind. Signal entries keep their
     exact legacy shape plus kind="signal" (existing consumers ignore unknown
@@ -272,6 +297,10 @@ def _decode_any(data: str | None) -> dict | None:
     if refx:
         refx["kind"] = "referral_transfer"
         return refx
+    mig = decode_account_migration(data)
+    if mig:
+        mig["kind"] = "account_migration"
+        return mig
     refs = decode_referrer_succession(data)
     if refs:
         refs["kind"] = "referrer_succession"
@@ -435,6 +464,12 @@ class Chain:
         validator has journaled this one."""
         data = encode_referrer_succession(from_ss58, to_ss58)
         return self.st.set_commitment(wallet=wallet, netuid=self.netuid, data=data,
+                                      wait_for_finalization=False)
+
+    def commit_account_migration(self, wallet: "bt.Wallet", to_account: str):
+        """Move this hotkey's record to an entity account (sn89mig), signed by the hotkey."""
+        return self.st.set_commitment(wallet=wallet, netuid=self.netuid,
+                                      data=encode_account_migration(to_account),
                                       wait_for_finalization=False)
 
     def commit_referral(self, wallet: "bt.Wallet", recruit_ss58: str) -> bool:

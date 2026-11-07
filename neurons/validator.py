@@ -107,6 +107,22 @@ CREATE TABLE IF NOT EXISTS referrer_successions (
   observed_unix    REAL NOT NULL,
   PRIMARY KEY (from_hk, to_hk)
 );
+CREATE TABLE IF NOT EXISTS account_migrations (
+  from_hk          TEXT PRIMARY KEY,  -- the hotkey that signed sn89mig
+  to_hk            TEXT NOT NULL,     -- <entity_hk>_<n>
+  commit_block     INTEGER NOT NULL,  -- FIRST observed inclusion block; never updated
+  commit_unix      REAL NOT NULL,
+  observed_unix    REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS lf_bonds (
+  day_unix         INTEGER NOT NULL,  -- UTC midnight of the snapshot
+  hotkey           TEXT NOT NULL,
+  coldkey          TEXT NOT NULL,
+  alpha            REAL NOT NULL,     -- coldkey alpha on the netuid at the snapshot block
+  uids             INTEGER NOT NULL,  -- LF hotkeys sharing that coldkey
+  bonded           INTEGER NOT NULL,
+  PRIMARY KEY (day_unix, hotkey)
+);
 CREATE TABLE IF NOT EXISTS entity_accounts (
   account          TEXT PRIMARY KEY,  -- <entity_hk>_<n>
   commit_block     INTEGER NOT NULL,  -- FIRST observed sn89acct inclusion block; never updated
@@ -265,6 +281,67 @@ class Validator:
             (frm, to, cb, block, now))
         print(f"  ⇢ referrer succession {frm[:8]}… → {to[:8]}… commit_block={cb}")
 
+    def _journal_account_migration(self, c: dict, block: int, now: float):
+        """Journal one sn89mig, signed by the hotkey that moves. The first commit stands."""
+        cb = int(c.get("commit_block") or block)
+        ms = self.ch.block_time_ms(cb)
+        cur = self.db.execute(
+            "INSERT OR IGNORE INTO account_migrations (from_hk, to_hk, commit_block, commit_unix, "
+            "observed_unix) VALUES (?,?,?,?,?)",
+            (c["hotkey"], c["to"], cb, (ms / 1000.0) if ms else now, now))
+        if cur.rowcount:
+            print(f"  ↷ account migration {c['hotkey'][:8]}… → {c['to'][-12:]} commit_block={cb}")
+
+    def _apply_lf_cutover(self, sig_rows, meta, uid_by_hotkey, now):
+        """Migrated records score under their accounts for every consumer of this cycle."""
+        migrations = [{"from_hk": f, "to_hk": t, "commit_block": cb, "commit_unix": cu}
+                      for f, t, cb, cu in self.db.execute(
+                          "SELECT from_hk, to_hk, commit_block, commit_unix "
+                          "FROM account_migrations")]
+        successions = [{"from_hk": f, "to_hk": t} for f, t in self.db.execute(
+            "SELECT from_hk, to_hk FROM referrer_successions")]
+        sig_rows, meta, moved = replay.apply_account_migrations(
+            sig_rows, meta, migrations, successions, now)
+        if moved:
+            print(f"  ↷ {len(moved)} hotkey(s) scored under entity accounts")
+            uid_by_hotkey = {h: u for h, u in uid_by_hotkey.items() if h not in moved}
+        return sig_rows, meta, uid_by_hotkey
+
+    def _lf_bonded(self, now, mg, uid_by_hotkey, meta):
+        """Hotkeys holding the LF bond today, snapshotted once at the first block of the UTC day.
+        A failed read keeps the last snapshot; with none yet the gate stays open this cycle, so a
+        node outage cannot zero the miners."""
+        if not config.lf_bond_active(now):
+            return None
+        day = int(now // 86400) * 86400
+        rows = self.db.execute("SELECT hotkey, bonded FROM lf_bonds WHERE day_unix=?",
+                               (day,)).fetchall()
+        if rows:
+            return {h for h, b in rows if b}
+        try:
+            snap = self.ch.block_at_or_after_ms(day * 1000)
+            by_ck: dict = {}
+            for hk, ck in zip(mg.hotkeys, mg.coldkeys):
+                if hk in uid_by_hotkey and hk in meta and hk not in config.SIGNALS_ENTITY_HOTKEYS:
+                    by_ck.setdefault(ck, []).append(hk)
+            out = []
+            for ck, hks in by_ck.items():
+                a = self.ch.alpha_for_coldkey(ck, snap)
+                ok = a / len(hks) >= config.LF_BOND_MIN_ALPHA
+                out += [(day, hk, ck, a, len(hks), int(ok)) for hk in hks]
+            self.db.executemany("INSERT OR REPLACE INTO lf_bonds VALUES (?,?,?,?,?,?)", out)
+            self.db.commit()
+            print(f"  ⚖ LF bond snapshot block {snap}: "
+                  f"{sum(r[5] for r in out)}/{len(out)} UIDs bonded")
+            return {r[1] for r in out if r[5]}
+        except Exception as e:  # noqa: BLE001 — weight setting must survive a chain read
+            prev = self.db.execute("SELECT MAX(day_unix) FROM lf_bonds").fetchone()[0]
+            print(f"  ! LF bond snapshot failed, using {prev}: {e}")
+            if prev is None:
+                return None
+            return {h for h, in self.db.execute(
+                "SELECT hotkey FROM lf_bonds WHERE day_unix=? AND bonded=1", (prev,))}
+
     def _journal_entity_claim(self, c: dict, block: int, now: float):
         """sn89acct / sn89refa, journaled ONLY from an allow-listed, armed entity.
         Anyone else committing these payloads is ignored, by design."""
@@ -367,6 +444,8 @@ class Validator:
                 self._journal_referral_transfer(c, block, now)
             elif c.get("kind") == "referrer_succession":
                 self._journal_referrer_succession(c, block, now)
+            elif c.get("kind") == "account_migration":
+                self._journal_account_migration(c, block, now)
             elif c.get("kind") == "batch":
                 self._journal_commit(c, block, now, batch=True)
             elif c.get("kind") in ("account_open", "account_referral"):
@@ -543,7 +622,8 @@ class Validator:
         return fn
 
     def _write_entity_split(self, sig_rows, meta, uid_by_hotkey, now, referral_rows,
-                            keepalive, markets_vec, shares, agentbook_shares=None):
+                            keepalive, markets_vec, shares, agentbook_shares=None,
+                            lf_bonded=None):
         """Append this cycle's entity split (replay.entity_split) for the payout side.
         Never raises: a bookkeeping failure must not stop weight setting."""
         try:
@@ -557,7 +637,8 @@ class Validator:
             split = replay.entity_split(
                 lambda m: replay.weights_from_journal(sig_rows, meta, m, now,
                                                       referrals=referral_rows,
-                                                      keepalive=keepalive),
+                                                      keepalive=keepalive,
+                                                      lf_bonded=lf_bonded),
                 lambda m: hf_grade.mecid1_weights(m, now),
                 markets_vec, shares, uid_by_hotkey, accounts,
                 agent_fn=(self._agent_vector_fn(sig_rows, meta, now)
@@ -970,6 +1051,8 @@ class Validator:
         meta = {hk: {"first_seen_unix": fs, "strikes": int(sk or 0)}
                 for hk, fs, sk in self.db.execute(
                     "SELECT hotkey, first_seen_unix, strikes FROM hotkey_meta")}
+        sig_rows, meta, uid_by_hotkey = self._apply_lf_cutover(sig_rows, meta, uid_by_hotkey, now)
+        lf_bonded = self._lf_bonded(now, mg, uid_by_hotkey, meta)
         referral_rows = [
             {"recruiter_hk": r, "recruit_hk": c, "commit_block": cb,
              "recruit_reg_block": rb}
@@ -994,7 +1077,8 @@ class Validator:
                 reg = {}
             keepalive = replay.keepalive_uids(uid_by_hotkey, now, block, reg, calls)
         w = replay.weights_from_journal(sig_rows, meta, uid_by_hotkey, now,
-                                        referrals=referral_rows, keepalive=keepalive)
+                                        referrals=referral_rows, keepalive=keepalive,
+                                        lf_bonded=lf_bonded)
         if keepalive is not None:
             print(f"  ♥ keep-alive: {len(keepalive)} uids eligible "
                   f"(floor goes to those not otherwise earning)")
@@ -1079,7 +1163,7 @@ class Validator:
             w = competitions.combine(vectors, shares)
             self._write_entity_split(sig_rows, meta, uid_by_hotkey, now, referral_rows,
                                      keepalive, vectors.get("markets"), shares,
-                                     agentbook_shares=agentbook_shares)
+                                     agentbook_shares=agentbook_shares, lf_bonded=lf_bonded)
             parts = " ".join(
                 f"{k}={'∅' if vectors.get(k) is None else len([u for u, x in (vectors[k] or {}).items() if x > 0 and u != config.BURN_UID])}"
                 for k in shares)
