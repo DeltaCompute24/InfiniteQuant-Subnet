@@ -739,6 +739,11 @@ def lf_bond_active(t_unix: float) -> bool:
 # Where OUR validator appends each weight cycle's entity split (replay.entity_split), read
 # by the Markets payout cycle to pay each account its part. Not consensus.
 ENTITY_SPLIT_PATH = os.getenv("SN89_ENTITY_SPLIT_PATH", os.path.expanduser("~/.sn89/entity-split.jsonl"))
+# Each entity account's part of the referrer (mecid-1) vector, one line per weight cycle (2026-11-09):
+# recruiters moved onto entity accounts at the LF cutover are paid from what their entity UID receives.
+ENTITY_REFERRER_SPLIT_PATH = os.getenv(
+    "SN89_ENTITY_REFERRER_SPLIT_PATH",
+    os.path.join(os.path.dirname(ENTITY_SPLIT_PATH), "sn89-entity-referrer-split.jsonl"))
 
 
 def signals_entity_active(t_unix: float) -> bool:

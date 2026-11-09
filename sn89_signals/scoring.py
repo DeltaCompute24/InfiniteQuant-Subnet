@@ -778,6 +778,24 @@ def referrer_weights(scores: dict[str, float], uid_by_hk: dict[str, int],
     return {u: w / total for u, w in weights.items()} if total > 0 else {burn_uid: 1.0}
 
 
+def referrer_account_parts(scores: dict[str, float], uid_by_hk: dict[str, int],
+                           now_unix: float | None = None) -> dict[str, float]:
+    """{entity account: its weight in the referrer vector}, same arithmetic as
+    referrer_weights. Several accounts share their entity's UID there; this is how
+    that UID's referrer weight divides between them. Bookkeeping only."""
+    from . import entity as _entity
+    pool = sum(v for hk, v in scores.items() if uid_by_hk.get(hk) is not None)
+    if pool <= 0:
+        return {}
+    cap = config.miner_emission_cap_as_of(
+        _time.time() if now_unix is None else now_unix)
+    raw = {hk: cap * (v / pool) for hk, v in scores.items()
+           if uid_by_hk.get(hk) is not None and v > 0}
+    total = sum(raw.values()) + max(0.0, 1.0 - sum(raw.values()))
+    return {hk: w / total for hk, w in raw.items()
+            if _entity.parse(hk) is not None} if total > 0 else {}
+
+
 def referral_pair_followers(pair_rows: list[GradedRow], hk_a: str, hk_b: str,
                             now_unix: float) -> dict[str, float]:
     """Pair-scoped no-copy gate, DIRECTION-AWARE: {follower_hotkey:

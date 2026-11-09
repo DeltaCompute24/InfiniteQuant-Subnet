@@ -399,7 +399,29 @@ def referrer_weights_from_journal(
     extra_tallies: dict[str, dict[str, float]] | None = None,
     referrer_successions: list[dict] | None = None,
 ) -> dict[int, float]:
-    """§ referrer mechanism (mecid 1) — PURE rebuild, the auditor's mirror of
+    """{uid: weight} for the referrer mechanism. See referrer_scores_from_journal."""
+    scores, uids = referrer_scores_from_journal(
+        signals, meta, uid_by_hotkey, now, referrals=referrals,
+        referral_transfers=referral_transfers, extra_tallies=extra_tallies,
+        referrer_successions=referrer_successions)
+    return scoring.referrer_weights(scores, uids)
+
+
+def referrer_scores_from_journal(
+    signals: list[dict],
+    meta: dict[str, dict],
+    uid_by_hotkey: dict[str, int],
+    now: float,
+    referrals: list[dict] | None = None,
+    referral_transfers: list[dict] | None = None,
+    extra_tallies: dict[str, dict[str, float]] | None = None,
+    referrer_successions: list[dict] | None = None,
+) -> tuple[dict[str, float], dict[str, int]]:
+    """(scores by recruiter key, uid map incl. entity accounts) — what referrer_weights turns
+    into the vector. Split out (2026-11-09) so the entity's recruiter accounts can be credited
+    their part (scoring.referrer_account_parts) from the same numbers.
+
+    § referrer mechanism (mecid 1) — PURE rebuild, the auditor's mirror of
     the validator's referrer vector. Pipeline:
 
         valid_referral_pairs (same gate as the in-band bonus era)
@@ -435,7 +457,7 @@ def referrer_weights_from_journal(
     orig = scoring.valid_referral_pairs(referrals or [])
     pairs = scoring.apply_referral_transfers(orig, referral_transfers or [])
     if not pairs:
-        return {config.BURN_UID: 1.0}
+        return {}, uid_by_hotkey
     # A recruiter that is an entity account is paid through its entity's UID.
     uid_by_hotkey = entity.with_accounts(uid_by_hotkey, {r for r, _ in pairs})
 
@@ -462,7 +484,7 @@ def referrer_weights_from_journal(
 
     if not config.referrer_multicomp_active(now):
         scores = scoring.referrer_scores(pairs, lf_tally, withheld_recruits=withheld)
-        return scoring.referrer_weights(scores, uid_by_hotkey)
+        return scores, uid_by_hotkey
 
     # Multi-competition era. Each competition is normalized over its OWN FULL
     # field, not over the recruits — a recruit's credit has to mean "this much
@@ -476,7 +498,7 @@ def referrer_weights_from_journal(
     shares = scoring.referrer_shares(config.comp_weights_as_of(now))
     blended = scoring.blended_recruit_tallies(tallies, shares)
     scores = scoring.referrer_scores(pairs, blended, withheld_recruits=withheld)
-    return scoring.referrer_weights(scores, uid_by_hotkey)
+    return scores, uid_by_hotkey
 
 
 def combined_weights_from_journal(

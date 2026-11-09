@@ -297,3 +297,26 @@ def test_single_call_batch_root_is_the_call_hash():
     from sn89_signals import entity
     pt = b'{"x":1}'
     assert entity.batch_root([pt]) == hashlib.sha256(pt).hexdigest()
+
+def test_referrer_account_parts_divide_the_entity_uid(armed, monkeypatch):
+    """Two recruiter accounts on one entity UID: their parts sum to that UID's referrer weight,
+    in proportion to each one's score (2026-11-09, recruiters moved at the LF cutover)."""
+    from sn89_signals import scoring
+    monkeypatch.setattr(config, "MINER_EMISSION_CAP", 1.0)
+    r1, r2 = f"{ENT}_1", f"{ENT}_2"
+    lead = config.REFERRAL_MIN_LEAD_BLOCKS
+    refs = [{"recruiter_hk": r1, "recruit_hk": "X", "commit_block": 1, "recruit_reg_block": 1 + lead},
+            {"recruiter_hk": r2, "recruit_hk": "Y", "commit_block": 1, "recruit_reg_block": 1 + lead},
+            {"recruiter_hk": "Q", "recruit_hk": "Z", "commit_block": 1, "recruit_reg_block": 1 + lead}]
+    sigs = (_lf_signals("X", "BTCUSD", 30, 10) + _lf_signals("Y", "ETHUSD", 20, 8)
+            + _lf_signals("Z", "SOLUSD", 30, 10))
+    meta = _meta(r1, r2, "Q", "X", "Y", "Z")
+    uids = {ENT: 5, "Q": 4, "X": 7, "Y": 8, "Z": 9}
+    kw = dict(referrals=refs, extra_tallies={"hf": {}, "closers": {}})
+    w = replay.referrer_weights_from_journal(sigs, meta, uids, NOW, **kw)
+    scores, ruids = replay.referrer_scores_from_journal(sigs, meta, uids, NOW, **kw)
+    assert scoring.referrer_weights(scores, ruids) == w
+    parts = scoring.referrer_account_parts(scores, ruids, NOW)
+    assert set(parts) == {r1, r2}
+    assert sum(parts.values()) == pytest.approx(w[5])
+    assert parts[r1] > parts[r2] > 0

@@ -652,6 +652,24 @@ class Validator:
         except Exception as e:  # noqa: BLE001
             print(f"  ! entity split not written: {e}")
 
+    def _write_referrer_split(self, scores, uids, now):
+        """Append each entity account's part of this cycle's referrer vector, in the
+        entity-split line shape ({"ts", "split": {entity: {"uid", "accounts"}}}).
+        Never raises: bookkeeping must not stop weight setting."""
+        try:
+            parts = scoring.referrer_account_parts(scores, uids, now)
+            split = {}
+            for acct, w in parts.items():
+                ent = entity.parse(acct)[0]
+                d = split.setdefault(ent, {"uid": uids.get(acct), "markets": 0.0, "accounts": {}})
+                d["accounts"][acct] = w
+            os.makedirs(os.path.dirname(config.ENTITY_REFERRER_SPLIT_PATH), exist_ok=True)
+            with open(config.ENTITY_REFERRER_SPLIT_PATH, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps({"ts": int(now), "split": split},
+                                    separators=(",", ":")) + "\n")
+        except Exception as e:  # noqa: BLE001
+            print(f"  ! referrer split not written: {e}")
+
     def _void(self, commit_hex: str, reason: str, strike: bool):
         self.db.execute(
             "UPDATE signals SET status='void', void_reason=? WHERE commit_hex=?",
@@ -1273,12 +1291,14 @@ class Validator:
                                 print(f"  ! referrer: Closers tallies "
                                       f"unavailable, its share drops this "
                                       f"cycle: {e}")
-                        hw = replay.referrer_weights_from_journal(
+                        rscores, ruids = replay.referrer_scores_from_journal(
                             sig_rows, meta, uid_by_hotkey, now,
                             referrals=referral_rows,
                             referral_transfers=transfer_rows,
                             extra_tallies=extra,
                             referrer_successions=succession_rows)
+                        hw = scoring.referrer_weights(rscores, ruids)
+                        self._write_referrer_split(rscores, ruids, now)
                     else:
                         # merge-era parking: all-burn while the split ramps.
                         # Committing the HF vector here would DOUBLE-pay HF.
