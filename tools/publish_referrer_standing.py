@@ -80,6 +80,19 @@ def load_successions(db_path):
         con.close()
 
 
+def load_migrations(db_path):
+    """sn89mig account migrations. Missing on a pre-cutover DB, not an error."""
+    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        return [{"from_hk": f, "to_hk": t, "commit_block": cb, "commit_unix": cu}
+                for f, t, cb, cu in con.execute(
+                    "SELECT from_hk, to_hk, commit_block, commit_unix FROM account_migrations")]
+    except sqlite3.OperationalError:
+        return []
+    finally:
+        con.close()
+
+
 def competition_tallies(sig_rows, meta, uid_by_hotkey, now):
     """{competition: {hotkey: raw tally}} over the FULL field of each.
 
@@ -131,6 +144,14 @@ def main() -> int:
     import bittensor as bt
     mg = bt.Subtensor(NETWORK).metagraph(NETUID)
     uid_by_hotkey = {hk: i for i, hk in enumerate(mg.hotkeys)}
+    # LF cutover (2026-11-09): migrated hotkeys score under their entity accounts and lose their
+    # UID for scoring, exactly as neurons/validator.py _apply_lf_cutover does. Without this the page
+    # kept paying recruiters on their old UIDs while the chain paid their accounts on UID 39.
+    migrations = load_migrations(config.DB_PATH)
+    if migrations:
+        sig_rows, meta, moved = replay.apply_account_migrations(
+            sig_rows, meta, migrations, load_successions(config.DB_PATH), now)
+        uid_by_hotkey = {h: u for h, u in uid_by_hotkey.items() if h not in moved}
 
     orig_pairs = scoring.valid_referral_pairs(referrals)
     pairs = scoring.apply_referral_transfers(orig_pairs, transfers)
@@ -218,11 +239,17 @@ def main() -> int:
     payable = chain_slice > 0
     field_day = float(pools_tao.get("referrers_field") or 0.0)
 
+    # Several entity accounts share UID 39; each row shows its own part of that UID's weight.
+    acct_parts = scoring.referrer_account_parts(scores, uid_by_hotkey, now)
+
     rows = []
     for recruiter in sorted(by_recruiter):
         uid = uid_by_hotkey.get(recruiter)
         score = float(scores.get(recruiter, 0.0))
-        share = float(weights.get(uid, 0.0)) if uid is not None else 0.0
+        if entity.parse(recruiter) is not None:
+            share = float(acct_parts.get(recruiter, 0.0))
+        else:
+            share = float(weights.get(uid, 0.0)) if uid is not None else 0.0
         recruits = []
         for c in sorted(by_recruiter[recruiter]):
             t = tally.get(c)
