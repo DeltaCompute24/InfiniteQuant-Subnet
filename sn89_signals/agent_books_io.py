@@ -764,7 +764,7 @@ def build_live(results: dict, now_ms: int) -> dict:
             "week_active_buckets": r["open_week_buckets"],
             # additive detail
             "unrealised": unr, "ath_eod": r["ath"],
-            "elim_floor": r["ath"] * (1 - ab.RULES_V1["elim_dd"]),
+            "elim_floor": r["ath"] * (1 - ab.elim_dd_at(ab.next_day_end_ms(now_ms), ab.RULES_V1)),
             "week_gain_so_far": max(0.0, x - r["hwm"] + min(0.0, unr)),
             "declared": r["declared"],
             "position_detail": r["positions"],
@@ -795,7 +795,8 @@ def build_trades(results: dict, now_ms: int) -> dict:
         out[acct] = {
             "v": 1, "account": acct, "as_of_ms": int(now_ms),
             "equity": eq, "balance": r["balance"], "unrealised": unr, "hwm": r["hwm"],
-            "ath_eod": r["ath"], "elim_floor": r["ath"] * (1 - ab.RULES_V1["elim_dd"]),
+            "ath_eod": r["ath"],
+            "elim_floor": r["ath"] * (1 - ab.elim_dd_at(ab.next_day_end_ms(now_ms), ab.RULES_V1)),
             "eliminated_at_ms": r["eliminated_at_ms"],
             "week_gain_so_far": max(0.0, x - r["hwm"] + min(0.0, unr)),
             "week_active_buckets": r["open_week_buckets"],

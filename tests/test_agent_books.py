@@ -234,6 +234,49 @@ def test_elimination_measured_from_ath_not_start():
     assert res["eliminated_at_ms"] == MON + 2 * D
 
 
+# ── the 3% wall from 2026-11-16 00:00 UTC ───────────────────────────────────
+CUT = ab.ELIM_DD_V2_FROM_S * 1000            # a Monday 00:00 UTC
+assert ab.week_start_ms(CUT) == CUT
+
+
+def _dd_book_at(day0, drop_frac):
+    t0 = day0 + H
+    p1 = 100.0 * (1 - drop_frac / 0.25)
+    ticks = [tick("BTCUSD", t0 + 3000, 100.0), tick("BTCUSD", t0 + 2 * H, p1)]
+    return run([rc(t0, {"BTCUSD": 0.25})], ticks, start=day0, end=day0 + 3 * D)
+
+
+def test_elim_dd_at_switches_at_cutover():
+    assert ab.elim_dd_at(CUT - 1, ab.RULES_V1) == 0.08
+    assert ab.elim_dd_at(CUT, ab.RULES_V1) == 0.03
+    assert ab.next_day_end_ms(CUT - 1) == CUT
+    assert ab.next_day_end_ms(CUT) == CUT + D
+
+
+def test_3pct_wall_after_cutover():
+    assert _dd_book_at(CUT, 0.0299)["eliminated_at_ms"] is None
+    assert _dd_book_at(CUT, 0.03)["eliminated_at_ms"] is None          # strict rule
+    assert _dd_book_at(CUT, 0.0301)["eliminated_at_ms"] == CUT + D
+
+
+def test_day_end_before_cutover_keeps_8pct():
+    # 5% down at the day end of 11-14 (before the cutover): survives under 8%.
+    res = _dd_book_at(CUT - 2 * D, 0.05)
+    assert res["daily"][0]["eliminated"] is False
+    # Still 5% below its all-time high at 11-16 00:00, the first day end under 3%: eliminated.
+    assert res["eliminated_at_ms"] == CUT
+
+
+def test_book_started_before_cutover_uses_3pct_after_it():
+    # A replay that starts before the date applies the wall from the date on (all-time high kept).
+    t0 = CUT - 3 * D + H
+    ticks = [tick("BTCUSD", t0 + 3000, 100.0),
+             tick("BTCUSD", t0 + 2 * H, 120.0),              # EOD 1.05: new high
+             tick("BTCUSD", CUT + 2 * H, 107.0)]             # first day end under 3%: ~1.0175
+    res = run([rc(t0, {"BTCUSD": 0.25})], ticks, start=CUT - 3 * D, end=CUT + 3 * D)
+    assert res["eliminated_at_ms"] == CUT + D
+
+
 def test_no_fills_after_elimination():
     t0 = MON + H
     ticks = [tick("BTCUSD", t0 + 3000, 100.0), tick("BTCUSD", t0 + 2 * H, 50.0),

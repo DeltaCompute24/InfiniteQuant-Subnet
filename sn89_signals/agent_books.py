@@ -62,6 +62,10 @@ ELIMINATION
   book is eliminated at that instant: everything closes at the day-end mid (fee charged),
   no further fills, and no payout for the week in which it happened or any later week.
   Exactly an 8% drawdown survives (the rule is strict `<`).
+  From ELIM_DD_V2_FROM_S (2026-11-16 00:00 UTC, Whit 2026-11-10) the wall is 3%: a day end
+  at or after that instant eliminates when EOD equity < 0.97 × the same all-time EOD high
+  (the high is NOT reset at the cutover). Keyed on each day end's own time, so a replay that
+  starts before the date applies it from the date on. elim_dd_at() is the one statement.
 
 ACTIVITY
   A week (Monday 00:00 UTC to the next Monday) is ACTIVE when the book had at least one
@@ -128,6 +132,20 @@ RULES_V1 = MappingProxyType({
 BOOK_RULES_HISTORY: tuple = ((0, RULES_V1),)
 
 
+# 3% drawdown wall (Whit 2026-11-10): what an algo has to hold to on an IQ account it is
+# copied onto at full size. Keyed on the day end's own time (same reason as the exit reserve
+# below), measured from the unchanged all-time EOD high.
+ELIM_DD_V2 = 0.03
+ELIM_DD_V2_FROM_S = 1794787200        # 2026-11-16 00:00 UTC
+
+
+def elim_dd_at(t_ms: int, rules) -> float:
+    """The elimination drawdown in force at the day end t_ms."""
+    if int(t_ms) >= ELIM_DD_V2_FROM_S * 1000:
+        return ELIM_DD_V2
+    return float(rules["elim_dd"])
+
+
 # Exit reserve (Whit 2026-11-06, Mahmoud's feedback): a book at the daily cap could not close a
 # position until 00:00 UTC. Keyed on the receipt's own time, not the replay's start, so a replay
 # that starts before the date still applies it from the date on. Reductions are bounded by the
@@ -177,6 +195,11 @@ def week_start_ms(t_ms: int) -> int:
 
 def day_start_ms(t_ms: int) -> int:
     return (int(t_ms) // DAY_MS) * DAY_MS
+
+
+def next_day_end_ms(t_ms: int) -> int:
+    """The next UTC day end after t: the day end at which the floor is next checked."""
+    return day_start_ms(t_ms) + DAY_MS
 
 
 def bucket_of(t_ms: int) -> int:
@@ -378,7 +401,6 @@ def replay_book(account: str, receipts: list, ticks: list, universe: dict, *,
     fee_tbl = rules["fee_bps"]
     fee_default = float(rules["fee_bps_default"])
     delay = int(rules["fill_delay_ms"])
-    elim_mult = 1.0 - float(rules["elim_dd"])
     eps = float(rules["elim_eps"])
     basis = rules["hwm_basis"]
     if basis not in ("balance", "equity"):
@@ -418,7 +440,7 @@ def replay_book(account: str, receipts: list, ticks: list, universe: dict, *,
                     if q:
                         book.carry += float(carry_fn(pair, q * book.marks[pair], b_ms))
             eod = book.equity()
-            elim = eod < ath * elim_mult - eps
+            elim = eod < ath * (1.0 - elim_dd_at(b_ms, rules)) - eps
             daily.append({"t_ms": b_ms, "eod_equity": eod, "ath": ath, "eliminated": elim})
             series.append((b_ms, eod))
             if elim:
