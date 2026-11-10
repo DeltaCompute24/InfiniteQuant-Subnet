@@ -730,10 +730,19 @@ SIGNALS_ENTITY_HOTKEYS: frozenset = frozenset({
 LF_MIGRATION_FROM_UNIX = int(os.getenv("SN89_LF_MIGRATION_FROM", "1794182400"))  # 2026-11-09T00:00:00Z
 LF_BOND_FROM_UNIX = int(os.getenv("SN89_LF_BOND_FROM", "1794182400"))  # 2026-11-09T00:00:00Z
 LF_BOND_MIN_ALPHA = float(os.getenv("SN89_LF_BOND_MIN_ALPHA", "1000"))
+# Lowered to 500 alpha per UID from the 2026-11-11 snapshot (Whit, 2026-11-10). As-of, so the
+# Nov 9 and Nov 10 snapshots replay at 1,000.
+LF_BOND_MIN_ALPHA_V2 = float(os.getenv("SN89_LF_BOND_MIN_ALPHA_V2", "500"))
+LF_BOND_V2_FROM_UNIX = int(os.getenv("SN89_LF_BOND_V2_FROM", "1794355200"))  # 2026-11-11T00:00:00Z
 
 
 def lf_bond_active(t_unix: float) -> bool:
     return bool(LF_BOND_FROM_UNIX) and t_unix >= LF_BOND_FROM_UNIX
+
+
+def lf_bond_min_alpha(day_unix: float) -> float:
+    """Alpha per LF UID required at the snapshot of the UTC day starting `day_unix`."""
+    return LF_BOND_MIN_ALPHA_V2 if day_unix >= LF_BOND_V2_FROM_UNIX else LF_BOND_MIN_ALPHA
 
 
 # Where OUR validator appends each weight cycle's entity split (replay.entity_split), read

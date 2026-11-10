@@ -80,6 +80,10 @@ def test_one_hotkey_per_account():
 def test_config_dates():
     assert config.LF_MIGRATION_FROM_UNIX == config.LF_BOND_FROM_UNIX == 1794182400
     assert config.LF_BOND_MIN_ALPHA == 1000.0
+    # 500 alpha per UID from the 2026-11-11 snapshot; Nov 9 and Nov 10 stay at 1,000
+    assert config.lf_bond_min_alpha(1794182400) == 1000.0
+    assert config.lf_bond_min_alpha(1794268800) == 1000.0
+    assert config.lf_bond_min_alpha(1794355200) == 500.0
     assert config.lf_bond_active(1794182400) and not config.lf_bond_active(1794182399)
 
 

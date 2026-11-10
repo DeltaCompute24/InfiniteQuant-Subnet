@@ -327,7 +327,7 @@ class Validator:
             out = []
             for ck, hks in by_ck.items():
                 a = self.ch.alpha_for_coldkey(ck, snap)
-                ok = a / len(hks) >= config.LF_BOND_MIN_ALPHA
+                ok = a / len(hks) >= config.lf_bond_min_alpha(day)
                 out += [(day, hk, ck, a, len(hks), int(ok)) for hk in hks]
             self.db.executemany("INSERT OR REPLACE INTO lf_bonds VALUES (?,?,?,?,?,?)", out)
             self.db.commit()
