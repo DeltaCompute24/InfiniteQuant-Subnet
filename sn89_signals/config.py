@@ -730,6 +730,18 @@ SIGNALS_ENTITY_HOTKEYS: frozenset = frozenset({
 LF_MIGRATION_FROM_UNIX = int(os.getenv("SN89_LF_MIGRATION_FROM", "1794182400"))  # 2026-11-09T00:00:00Z
 LF_BOND_FROM_UNIX = int(os.getenv("SN89_LF_BOND_FROM", "1794182400"))  # 2026-11-09T00:00:00Z
 LF_BOND_MIN_ALPHA = float(os.getenv("SN89_LF_BOND_MIN_ALPHA", "1000"))
+# FOLLOW calls (Whit, 2026-11-11): a hosted account's call placed by IQ's follow feature carries the
+# comment "iq-follow:<id>" and is a copy BY DESIGN. From this cycle time those calls are left out of
+# copy forensics (never marked as copies, never make their account a repeat copier, never act as
+# leaders). Only entity accounts qualify: their calls are committed by IQ's multiplexer, so the tag
+# cannot be forged; a self-hosted miner writes its own comment and gets no exemption. Gated on the
+# cycle's `now`, so replays of earlier cycles are unchanged.
+FOLLOW_EXEMPT_FROM_UNIX = int(os.getenv("SN89_FOLLOW_EXEMPT_FROM", "1794430800"))  # 2026-11-11T21:00:00Z
+FOLLOW_TAG = "iq-follow:"
+
+
+def follow_exempt_active(now_unix: float) -> bool:
+    return bool(FOLLOW_EXEMPT_FROM_UNIX) and now_unix >= FOLLOW_EXEMPT_FROM_UNIX
 # Lowered to 500 alpha per UID from the 2026-11-11 snapshot (Whit, 2026-11-10). As-of, so the
 # Nov 9 and Nov 10 snapshots replay at 1,000.
 LF_BOND_MIN_ALPHA_V2 = float(os.getenv("SN89_LF_BOND_MIN_ALPHA_V2", "500"))

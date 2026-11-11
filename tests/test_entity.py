@@ -320,3 +320,42 @@ def test_referrer_account_parts_divide_the_entity_uid(armed, monkeypatch):
     assert set(parts) == {r1, r2}
     assert sum(parts.values()) == pytest.approx(w[5])
     assert parts[r1] > parts[r2] > 0
+
+
+def _follow_rows(hk, leader, n_win, n_loss, tag, start=NOW - 42 * HOUR):
+    """Leader self-hosted calls and an entity follower copying each one at the same T0."""
+    out, t = [], start
+    for i in range(n_win + n_loss):
+        st = "won" if i < n_win else "lost"
+        lp = Signal(trade_pair="BTCUSD", direction="LONG", tp_bps=150, sl_bps=150, ts_miner=0,
+                    hotkey=leader, asset_class="crypto")
+        fp = Signal(trade_pair="BTCUSD", direction="LONG", tp_bps=150, sl_bps=150, ts_miner=0,
+                    hotkey=hk, asset_class="crypto", comment=f"{tag}{1000 + i}")
+        out.append({"commit_hex": f"{leader}-{i}", "hotkey": leader, "t0_unix": t, "status": st,
+                    "plaintext": lp.canonical_bytes().decode()})
+        out.append({"commit_hex": f"{hk}-{i}", "hotkey": hk, "t0_unix": t + 5, "status": st,
+                    "plaintext": fp.canonical_bytes().decode()})
+        t += HOUR
+    return out
+
+
+def test_follow_calls_are_exempt_from_copy_forensics(armed, monkeypatch):
+    """Whit 2026-11-11: a hosted account's iq-follow call is a copy by design. With the exemption
+    on, an entity follower that copies every call earns like any miner; off, it is a flagged copier.
+    A self-hosted miner with the same tag gets no exemption (the tag is forgeable there)."""
+    monkeypatch.setattr(config, "MINER_EMISSION_CAP", 1.0)
+    fol = f"{ENT}_5"
+    rows = _follow_rows(fol, "L", 30, 10, "iq-follow:")
+    meta = _meta("L", fol)
+    uids = {"L": 1, ENT: 5}
+    monkeypatch.setattr(config, "FOLLOW_EXEMPT_FROM_UNIX", 0)
+    off = replay.weights_from_journal(rows, meta, uids, NOW)
+    monkeypatch.setattr(config, "FOLLOW_EXEMPT_FROM_UNIX", 1)
+    on = replay.weights_from_journal(rows, meta, uids, NOW)
+    assert on.get(5, 0) > off.get(5, 0)
+    # self-hosted follower with the same tag: not exempt
+    rows2 = _follow_rows("F2", "L", 30, 10, "iq-follow:")
+    w2 = replay.weights_from_journal(rows2, _meta("L", "F2"), {"L": 1, "F2": 2}, NOW)
+    monkeypatch.setattr(config, "FOLLOW_EXEMPT_FROM_UNIX", 0)
+    w2_off = replay.weights_from_journal(rows2, _meta("L", "F2"), {"L": 1, "F2": 2}, NOW)
+    assert w2.get(2, 0) == w2_off.get(2, 0)

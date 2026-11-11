@@ -146,8 +146,17 @@ def weights_from_journal(
     copy_rows: list[scoring.GradedRow] = []
     rows_by_commit: dict[str, scoring.GradedRow] = {}
     cutoff = now - config.COPY_WINDOW_S
+    follow_commits: set = set()
+    if config.follow_exempt_active(now):
+        for s in signals:
+            pt = s.get("plaintext")
+            if pt and config.FOLLOW_TAG in pt and is_account(s["hotkey"]):
+                if (Signal.from_bytes(pt.encode()).comment or "").startswith(config.FOLLOW_TAG):
+                    follow_commits.add(s["commit_hex"])   # a copy by design, not forensics
     for s in signals:
         if s["status"] == "void" or not s.get("plaintext") or s["t0_unix"] < cutoff:
+            continue
+        if s["commit_hex"] in follow_commits:
             continue
         sig = Signal.from_bytes(s["plaintext"].encode())
         gr = scoring.GradedRow(
@@ -198,6 +207,8 @@ def weights_from_journal(
         for s in signals:
             if s["hotkey"] == hk and s["status"] in ("won", "lost") and row_ok(s):
                 cp = is_copy_by_commit.get(s["commit_hex"], bool(s.get("is_copy", 0)))
+                if s["commit_hex"] in follow_commits:
+                    cp = False
                 # 4th element = journaled resolution time (exit_at_ms -> seconds).
                 # qualified_wins needs it to build a CAUSAL as-of window; without
                 # it every row falls back to legacy treatment. None is honest here
