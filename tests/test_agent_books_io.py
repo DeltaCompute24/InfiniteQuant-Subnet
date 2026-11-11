@@ -423,3 +423,44 @@ def test_publish_weeks_copies_with_sha_and_index(tmp_path):
     idx = json.loads((dst / "index.json").read_text())
     assert idx == {"weeks": [{"week": "2026-11-02", "file": "agent-books-week-2026-11-02.json",
                               "sha256": sha}]}
+
+
+# ── runner countersignature (phase 3) ────────────────────────────────────────
+def _runner_c(kp, r, sha="ab" * 32, wm=1794407400000, state="cd" * 32):
+    c = {"seq": r["seq"], "t_recv_ms": r["t_recv_ms"], "algo_sha256": sha,
+         "watermark_ms": wm, "state_hash": state, "runner_hk": kp.ss58_address}
+    c["runner_sig"] = kp.sign(ab.runner_signing_bytes(r, c)).hex()
+    return c
+
+
+def test_runner_countersignature_required_from_the_flag(monkeypatch):
+    from bittensor_wallet import Keypair
+    runner = Keypair.create_from_uri("//Bob")
+    other = Keypair.create_from_uri("//Charlie")
+    flag_ms = MON + 10 * H
+    monkeypatch.setattr(config, "AGENT_RUNNER_FROM_UNIX", flag_ms // 1000)
+    hks = frozenset({runner.ss58_address})
+    n = N0 + 7
+    before = rcpt(n, 1, flag_ms - 1000, {"BTCUSD": 0.1})          # no commitment, before flag
+    good = rcpt(n, 2, flag_ms + 1000, {"BTCUSD": 0.2})
+    missing = rcpt(n, 3, flag_ms + 2000, {"BTCUSD": 0.0})          # hand order: no commitment
+    stranger = rcpt(n, 4, flag_ms + 3000, {"ETHUSD": 0.1})
+    tampered = rcpt(n, 5, flag_ms + 4000, {"ETHUSD": 0.2})
+    cs = [_runner_c(runner, good), _runner_c(other, stranger),
+          dict(_runner_c(runner, tampered), algo_sha256="ef" * 32)]
+    comm = abio.runner_commitments((str(n), json.dumps(c)) for c in cs)
+    keep, drops = abio.filter_runner([before, good, missing, stranger, tampered], comm,
+                                     hotkeys=hks)
+    assert [r["seq"] for r in keep] == [1, 2]
+    assert drops == {"bad_runner_sig": 1, "no_runner_commitment": 1, "runner_not_allowed": 1}
+    monkeypatch.setattr(config, "AGENT_RUNNER_FROM_UNIX", 0)
+    keep, drops = abio.filter_runner([before, good, missing], {}, hotkeys=hks)
+    assert len(keep) == 3 and drops == {}
+
+
+def test_runner_lines_from_urls_follow_the_index():
+    pages = {"https://x/books/index.json": json.dumps({"books": {str(N0 + 1): {}}}),
+             f"https://x/books/{N0 + 1}.runner.jsonl": '{"seq":1,"runner_sig":"aa"}\n'}
+    got = list(abio.iter_url_runner(["https://x/books/index.json"], pages.get))
+    assert got == [(str(N0 + 1), '{"seq":1,"runner_sig":"aa"}')]
+    assert abio.runner_commitments(got)[(str(N0 + 1), 1)]["runner_sig"] == "aa"

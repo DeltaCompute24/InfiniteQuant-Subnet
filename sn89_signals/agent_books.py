@@ -216,6 +216,16 @@ def receipt_signing_bytes(receipt: dict) -> bytes:
             + hf.canonical_json(receipt.get("targets") or {}).encode())
 
 
+AGENT_RUNNER_DOMAIN = b"SN89-AGENT-RUNNER-v1|"
+
+
+def runner_signing_bytes(receipt: dict, c: dict) -> bytes:
+    """What the book runner countersigns: the receipt's signing bytes plus the run's commitment
+    (algorithm hash, data watermark, book-state hash). Same bytes as the intake signer."""
+    return (AGENT_RUNNER_DOMAIN + receipt_signing_bytes(receipt)
+            + f"|{c['algo_sha256']}|{int(c['watermark_ms'])}|{c['state_hash']}".encode())
+
+
 def receipt_order_key(r: dict):
     return (int(r["t_recv_ms"]), str(r["account"]), int(r["seq"]))
 

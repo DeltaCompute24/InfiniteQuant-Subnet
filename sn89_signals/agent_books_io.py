@@ -192,6 +192,111 @@ def load_receipts(lines, verify=sr25519_verify, entities=None) -> tuple[list, di
     return rs, merge_drops(d1, d2)
 
 
+# ── runner countersignature (phase 3) ────────────────────────────────────────
+_HEX64 = set("0123456789abcdef")
+
+
+def _hex64(x) -> bool:
+    return isinstance(x, str) and len(x) == 64 and set(x) <= _HEX64
+
+
+def runner_commitments(items) -> dict:
+    """(book n, line) pairs from <n>.runner.jsonl files -> {(n, seq): commitment}. A later line
+    for the same (n, seq) replaces an earlier one only if the earlier was not countersigned."""
+    out: dict = {}
+    for n, line in items:
+        if isinstance(line, bytes):
+            line = line.decode("utf-8", "replace")
+        try:
+            c = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(c, dict) or not _is_int(c.get("seq")):
+            continue
+        k = (str(n), int(c["seq"]))
+        if k not in out or not out[k].get("runner_sig"):
+            out[k] = c
+    return out
+
+
+def iter_dir_runner(path: str):
+    """(n, line) for every line of every <n>.runner.jsonl under `path`."""
+    try:
+        names = sorted(n for n in os.listdir(path) if n.endswith(".runner.jsonl"))
+    except OSError:
+        return
+    for name in names:
+        n = name.split(".", 1)[0]
+        if not n.isdigit():
+            continue
+        try:
+            with open(os.path.join(path, name), encoding="utf-8") as fh:
+                for line in fh:
+                    yield n, line
+        except OSError:
+            continue
+
+
+def iter_url_runner(urls, fetch):
+    """(n, line) from the published <n>.runner.jsonl next to each per-account <n>.jsonl URL
+    (an index.json is expanded first)."""
+    for u in urls:
+        if u.endswith("index.json"):
+            txt = fetch(u)
+            if txt is None:
+                continue
+            try:
+                idx = json.loads(txt)
+            except ValueError:
+                continue
+            yield from iter_url_runner(index_urls(u, idx), fetch)
+            continue
+        base, _, name = u.rpartition("/")
+        n = name[:-len(".jsonl")] if name.endswith(".jsonl") else ""
+        if not n.isdigit():
+            continue
+        txt = fetch(f"{base}/{n}.runner.jsonl")
+        for line in (txt or "").splitlines():
+            yield n, line
+
+
+def runner_check(r: dict, c: dict | None, verify=sr25519_verify, hotkeys=None) -> str | None:
+    """None when receipt r is validly countersigned by commitment c, else the drop reason."""
+    if c is None:
+        return "no_runner_commitment"
+    hks = config.AGENT_RUNNER_HOTKEYS if hotkeys is None else hotkeys
+    if c.get("runner_hk") not in hks:
+        return "runner_not_allowed"
+    if (not _hex64(c.get("algo_sha256")) or not _hex64(c.get("state_hash"))
+            or not _is_int(c.get("watermark_ms")) or c["watermark_ms"] < 0
+            or not isinstance(c.get("runner_sig"), str)):
+        return "bad_runner_commitment"
+    try:
+        ok = verify(c["runner_hk"], ab.runner_signing_bytes(r, c), c["runner_sig"])
+    except (ValueError, TypeError):
+        ok = False
+    return None if ok else "bad_runner_sig"
+
+
+def filter_runner(receipts: list, commitments: dict, verify=sr25519_verify,
+                  hotkeys=None) -> tuple[list, dict]:
+    """Drop every receipt that needs a runner countersignature (config.agent_runner_required)
+    and lacks a valid one. Receipts before the flag pass unchanged."""
+    keep, drops = [], {}
+    for r in receipts:
+        if not config.agent_runner_required(r["t_recv_ms"]):
+            keep.append(r)
+            continue
+        p = entity.parse(r["account"])
+        c = commitments.get((str(p[1]), int(r["seq"]))) if p else None
+        why = runner_check(r, c, verify, hotkeys)
+        if why:
+            drops[why] = drops.get(why, 0) + 1
+            continue
+        keep.append(r)
+    return keep, dict(sorted(drops.items()))
+
+
 class AgentReceiptIndex:
     """Incremental reader of the intake's books/*.jsonl for the HF anchor publisher:
     each refresh() reads only bytes appended since the last one (a file that shrank is

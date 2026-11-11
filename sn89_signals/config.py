@@ -1623,6 +1623,22 @@ AGENT_BOOKS_GRANDFATHERED: dict = {
 }
 
 
+# RUNNER COUNTERSIGNATURE (SN89-AGENT-BOOK-RUNNER-SPEC.md phase 3; Whit 2026-11-11 "immediately").
+# A book receipt received at or after AGENT_RUNNER_FROM counts only when the book runner
+# countersigned it: a commitment line {seq, algo_sha256, watermark_ms, state_hash, runner_hk,
+# runner_sig} in the book's <n>.runner.jsonl, signed by one of AGENT_RUNNER_HOTKEYS over
+# agent_books.runner_signing_bytes. That is how a validator checks an algorithm made the order
+# without seeing the code. Earlier receipts are unaffected. 0 = off.
+AGENT_RUNNER_FROM_UNIX = int(os.getenv("SN89_AGENT_RUNNER_FROM", "1794434400"))   # 2026-11-11 22:00 UTC
+AGENT_RUNNER_HOTKEYS = frozenset(h.strip() for h in os.getenv(
+    "SN89_AGENT_RUNNER_HOTKEYS", "5CkSGbDFxumX4fK8dtLPujMjXtPpRJaLFxmUKcsMTN6H2f97").split(",")
+    if h.strip())
+
+
+def agent_runner_required(t_recv_ms: int) -> bool:
+    return AGENT_RUNNER_FROM_UNIX > 0 and int(t_recv_ms) >= AGENT_RUNNER_FROM_UNIX * 1000
+
+
 def agent_books_active(t_unix: float) -> bool:
     return AGENT_BOOKS_FROM_UNIX > 0 and t_unix >= AGENT_BOOKS_FROM_UNIX
 

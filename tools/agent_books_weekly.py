@@ -90,6 +90,18 @@ def load_receipts(args) -> tuple[list, dict]:
             yield from abio.iter_url_lines(urls, fetch_text)
     verify = (lambda hk, m, s: True) if args.no_verify_sig else abio.sr25519_verify
     rs, d1 = abio.verified_receipts(lines(), verify=verify)
+    # phase 3: from config.AGENT_RUNNER_FROM a receipt needs the book runner's countersignature
+    def runner_lines():
+        if args.receipts_dir:
+            yield from abio.iter_dir_runner(args.receipts_dir)
+        urls = list(args.receipts_url or [])
+        if not urls and config.AGENT_BOOKS_RECEIPTS_URLS:
+            urls = [u.strip() for u in config.AGENT_BOOKS_RECEIPTS_URLS.split(",") if u.strip()]
+        if urls:
+            yield from abio.iter_url_runner(urls, fetch_text)
+    if config.AGENT_RUNNER_FROM_UNIX:
+        rs, d_run = abio.filter_runner(rs, abio.runner_commitments(runner_lines()), verify=verify)
+        d1 = abio.merge_drops(d1, d_run)
     d2 = {}
     if args.require_anchor:
         rs, d2 = abio.filter_anchored(rs, load_anchor_windows(args.anchor_dir))
