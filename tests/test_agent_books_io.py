@@ -464,3 +464,15 @@ def test_runner_lines_from_urls_follow_the_index():
     got = list(abio.iter_url_runner(["https://x/books/index.json"], pages.get))
     assert got == [(str(N0 + 1), '{"seq":1,"runner_sig":"aa"}')]
     assert abio.runner_commitments(got)[(str(N0 + 1), 1)]["runner_sig"] == "aa"
+
+
+def test_annotate_closes_reports_the_move_from_entry():
+    fills = [{"pair": "BTCUSD", "dq": 2.0, "px": 100.0}, {"pair": "BTCUSD", "dq": 2.0, "px": 110.0},
+             {"pair": "BTCUSD", "dq": -1.0, "px": 115.5}, {"pair": "BTCUSD", "dq": -3.0, "px": 99.75},
+             {"pair": "ETHUSD", "dq": -1.0, "px": 50.0}, {"pair": "ETHUSD", "dq": 2.0, "px": 45.0}]
+    out = abio.annotate_closes(fills)
+    assert "move_pct" not in out[0] and "move_pct" not in out[1]
+    assert out[2]["entry_px"] == pytest.approx(105.0) and out[2]["move_pct"] == pytest.approx(10.0)
+    assert out[3]["move_pct"] == pytest.approx(-5.0)
+    assert out[5]["entry_px"] == 50.0 and out[5]["move_pct"] == pytest.approx(10.0)  # short closed + flipped
+    assert "move_pct" not in fills[2]                                                # inputs untouched

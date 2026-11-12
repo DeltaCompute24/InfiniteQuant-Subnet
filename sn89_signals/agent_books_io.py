@@ -882,6 +882,32 @@ TRADES_MAX_FILLS = 500
 TRADES_MAX_POINTS = 2000
 
 
+def annotate_closes(fills: list) -> list:
+    """Copies of `fills` (one book, time order) where each fill that reduces or closes a position
+    carries `entry_px` (the position's average entry before it) and `move_pct` (the price move from
+    that entry to this fill, positive when it favoured the position). Display only."""
+    pos: dict = {}
+    out = []
+    for f in fills:
+        g = dict(f)
+        q0, avg = pos.get(f["pair"], (0.0, 0.0))
+        dq, px = float(f["dq"]), float(f["px"])
+        q1 = q0 + dq
+        if q0 and (q0 > 0) != (dq > 0) and avg:
+            g["entry_px"] = avg
+            g["move_pct"] = (px / avg - 1.0) * (1 if q0 > 0 else -1) * 100.0
+        if abs(q1) < 1e-12:
+            pos[f["pair"]] = (0.0, 0.0)
+        elif q0 == 0 or (q0 > 0) != (q1 > 0):
+            pos[f["pair"]] = (q1, px)                       # opened or flipped: new entry
+        elif (q0 > 0) == (dq > 0):
+            pos[f["pair"]] = (q1, (avg * abs(q0) + px * abs(dq)) / abs(q1))
+        else:
+            pos[f["pair"]] = (q1, avg)                      # partial reduce keeps the entry
+        out.append(g)
+    return out
+
+
 def build_trades(results: dict, now_ms: int) -> dict:
     """{account: doc} for the IQ Terminal's read-only agent book view (2026-11-04): the latest
     fills (each with the receipt `seq` that asked for it), open positions with entry and mark,
@@ -909,7 +935,7 @@ def build_trades(results: dict, now_ms: int) -> dict:
             "positions": {p: {"qty": v["qty"], "avg": v["avg"], "mark": v["mark"],
                               "lev": (v["qty"] * v["mark"] / eq) if eq else 0.0}
                           for p, v in r["positions"].items()},
-            "fills": r["fills"][-TRADES_MAX_FILLS:], "fills_total": len(r["fills"]),
+            "fills": annotate_closes(r["fills"])[-TRADES_MAX_FILLS:], "fills_total": len(r["fills"]),
             "series": series}
     return out
 
