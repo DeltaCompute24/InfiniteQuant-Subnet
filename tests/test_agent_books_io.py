@@ -171,7 +171,7 @@ def test_thin_replay_equals_full_replay(seed):
     got = abio.replay_all(rs, abio.PairIndex(thin), UNI, start_ms=MON, end_ms=end)
     for acct in sorted(got):
         full = ab.replay_book(acct, rs, ticks, UNI, start_ms=MON, end_ms=end)
-        assert got[acct] == full, acct
+        assert _scored(got[acct]) == _scored(full), acct
     assert any(got[a]["fills"] for a in got)
 
 
@@ -186,7 +186,25 @@ def test_thin_replay_exact_through_elimination():
     acct = f"{ENT}_{N0 + 50}"
     full = ab.replay_book(acct, rs, ticks, UNI, start_ms=MON, end_ms=end)
     assert full["eliminated_at_ms"] is not None
-    assert got[acct] == full
+    assert _scored(got[acct]) == _scored(full)
+
+
+def _scored(r):
+    """Everything but the display-only max_dd, which depends on how many marks it sees."""
+    return {k: v for k, v in r.items() if k != "max_dd"}
+
+
+@pytest.mark.parametrize("seed", [1, 2])
+def test_thin_with_extremes_sees_the_full_max_drawdown(seed):
+    ticks, receipts = _world(seed)
+    end = MON + 7 * D
+    rs = [r for r in receipts if r["t_recv_ms"] < end]
+    thin, _ = abio.load_thin_range(MON, end, rs, UNI, _reader(ticks), extremes_ms=1)
+    got = abio.replay_all(rs, abio.PairIndex(thin), UNI, start_ms=MON, end_ms=end, keep_all=True)
+    for acct in sorted(got):
+        full = ab.replay_book(acct, rs, ticks, UNI, start_ms=MON, end_ms=end)
+        assert _scored(got[acct]) == _scored(full), acct
+        assert got[acct]["max_dd"] == pytest.approx(full["max_dd"], abs=1e-12), acct
 
 
 def test_thin_cache_roundtrip_and_invalidation(tmp_path):
@@ -476,3 +494,17 @@ def test_annotate_closes_reports_the_move_from_entry():
     assert out[3]["move_pct"] == pytest.approx(-5.0)
     assert out[5]["entry_px"] == 50.0 and out[5]["move_pct"] == pytest.approx(10.0)  # short closed + flipped
     assert "move_pct" not in fills[2]                                                # inputs untouched
+
+
+def test_max_drawdown_tracks_unrealised_lows():
+    """Display-only lifetime max drawdown: an open position's intraday low counts even if the
+    book recovers before any fill or day end."""
+    uni = {"BTCUSD": "crypto"}
+    t0 = MON + 3600_000
+    rs = [rcpt(N0 + 1, 1, t0, {"BTCUSD": 0.25})]
+    ticks = [{"a": "BTCUSD", "t": t0 + 5000 + i * 1000, "b": p - 0.5, "k": p + 0.5, "p": p}
+             for i, p in enumerate([100.0, 100.0, 80.0, 100.0, 110.0])]
+    r = ab.replay_book(f"{ENT}_{N0 + 1}", rs, ticks, uni, start_ms=MON, end_ms=t0 + 60_000,
+                       half_spread_bps={"BTCUSD": 0.0})
+    assert 0.04 < r["max_dd"] < 0.06          # 0.25x on a 20% drop is ~5%
+    assert r["equity"] > 1.0                  # recovered: current drawdown would read 0

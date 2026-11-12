@@ -513,7 +513,7 @@ def window_lines_local(src_dir: str, w: int):
 
 
 def thin_day(day_ms: int, receipts: list, pairs: set, read_window, rules=None,
-             until_ms: int | None = None) -> tuple[list, list]:
+             until_ms: int | None = None, extremes_ms: int = 0) -> tuple[list, list]:
     """One streaming pass over the tick shards of UTC day [day_ms, day_ms + 1d).
 
     Keeps exactly what any book can read during that day:
@@ -530,6 +530,9 @@ def thin_day(day_ms: int, receipts: list, pairs: set, read_window, rules=None,
     read and not reported missing.
     Including a tick a book does not need never changes its replay (it is a real tick and
     every read still sees the latest real tick before it), so one union serves every book.
+    `extremes_ms` > 0 also keeps, per relevant pair and bucket of that length, the ticks with
+    the lowest and highest mid: what the display-only lifetime max drawdown needs to see an open
+    position's intraday low (live board only; fills and payouts are unchanged by extra ticks).
     """
     rules = rules or ab.book_rules_as_of(day_ms / 1000)
     delay = _fill_delay(rules)
@@ -549,6 +552,7 @@ def thin_day(day_ms: int, receipts: list, pairs: set, read_window, rules=None,
     seen: set = set()
     missing: list = []
     order = 0
+    ext: dict = {}             # (pair, bucket) -> [(mid, order, tick) low, high]
     w = day_ms
     stop = end if until_ms is None else min(end, int(until_ms))
     while w < stop:
@@ -608,10 +612,27 @@ def thin_day(day_ms: int, receipts: list, pairs: set, read_window, rules=None,
             for o, tk in go:
                 last[tk["a"]] = (o, tk)
                 seen.add(tk["a"])
+                if extremes_ms:
+                    try:
+                        m = float(tk["p"]) if "p" in tk else (float(tk["b"]) + float(tk["k"])) / 2
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                    key = (tk["a"], tk["t"] // extremes_ms)
+                    e = ext.get(key)
+                    if e is None:
+                        ext[key] = [(m, o, tk), (m, o, tk)]
+                    else:
+                        if m < e[0][0]:
+                            e[0] = (m, o, tk)
+                        if m > e[1][0]:
+                            e[1] = (m, o, tk)
             i = j
         w += WINDOW_MS
     for o, tk in last.values():
         keep[o] = tk
+    for lo, hi in ext.values():
+        keep[lo[1]] = lo[2]
+        keep[hi[1]] = hi[2]
     return [keep[o] for o in sorted(keep)], missing
 
 
@@ -628,8 +649,10 @@ class PairIndex:
 
 
 def book_ticks(account_receipts: list, idx: PairIndex, universe: dict, *, start_ms: int,
-               end_ms: int, rules=None) -> list:
-    """The exact tick slice one book's replay reads, from the union thin."""
+               end_ms: int, rules=None, keep_all: bool = False) -> list:
+    """The exact tick slice one book's replay reads, from the union thin. keep_all: every thin
+    tick of the book's pairs (live board, for the display-only max drawdown); extra real ticks
+    never change fills or equity at fills, day ends or weeks."""
     rules = rules or ab.book_rules_as_of(start_ms / 1000)
     delay = _fill_delay(rules)
     pairs = sorted(p for p in touched_pairs(account_receipts, universe) if p in idx.t)
@@ -668,11 +691,14 @@ def book_ticks(account_receipts: list, idx: PairIndex, universe: dict, *, start_
         b += ab.DAY_MS
     for p in pairs:
         add_before(p, end_ms + 1)
+    if keep_all:
+        for p in pairs:
+            sel.update(idx.i[p])
     return [idx.ticks[n] for n in sorted(sel) if int(idx.ticks[n]["t"]) <= end_ms]
 
 
 def replay_all(receipts: list, idx: PairIndex, universe: dict, *, start_ms: int, end_ms: int,
-               rules=None) -> dict:
+               rules=None, keep_all: bool = False) -> dict:
     """{account: agent_books.replay_book result}, each over its own exact slice."""
     by_acct: dict = {}
     for r in receipts:
@@ -680,19 +706,22 @@ def replay_all(receipts: list, idx: PairIndex, universe: dict, *, start_ms: int,
     out = {}
     for acct in sorted(by_acct):
         rs = by_acct[acct]
-        tk = book_ticks(rs, idx, universe, start_ms=start_ms, end_ms=end_ms, rules=rules)
+        tk = book_ticks(rs, idx, universe, start_ms=start_ms, end_ms=end_ms, rules=rules,
+                        keep_all=keep_all)
         out[acct] = ab.replay_book(acct, rs, tk, universe, start_ms=start_ms, end_ms=end_ms,
                                    rules=rules, ticks_sorted=True)
     return out
 
 
 # ── day thin cache ───────────────────────────────────────────────────────────
-def thin_digest(day_receipts: list, pairs) -> str:
+def thin_digest(day_receipts: list, pairs, extremes_ms: int = 0) -> str:
     """What a day's thin depends on: the receipts whose fill can be eligible in the day
-    and the set of pairs any book has touched by the day's end."""
+    and the set of pairs any book has touched by the day's end (and extremes_ms, if set)."""
     root = ab.receipts_root(day_receipts) if day_receipts else "00" * 32
-    return hashlib.sha256(hf.canonical_json({"pairs": sorted(pairs), "root": root}).encode()
-                          ).hexdigest()
+    doc = {"pairs": sorted(pairs), "root": root}
+    if extremes_ms:
+        doc["extremes_ms"] = int(extremes_ms)
+    return hashlib.sha256(hf.canonical_json(doc).encode()).hexdigest()
 
 
 def thin_cache_path(cache_dir: str, day_ms: int) -> str:
@@ -722,7 +751,7 @@ def write_thin_cache(path: str, digest: str, ticks: list, missing: list) -> None
 
 def load_thin_range(start_ms: int, end_ms: int, receipts: list, universe: dict,
                     read_window, cache_dir: str | None = None, final_before_ms: int = 0,
-                    rules=None) -> tuple[list, list]:
+                    rules=None, extremes_ms: int = 0) -> tuple[list, list]:
     """Thin ticks for every UTC day overlapping [start_ms, end_ms). A day is cached when
     it ends at or before `final_before_ms` (its shards are final); the cache is keyed on
     thin_digest, so a late receipt or a newly touched pair recomputes the day."""
@@ -740,12 +769,13 @@ def load_thin_range(start_ms: int, end_ms: int, receipts: list, universe: dict,
             pairs.update(p for p in (rs[k].get("targets") or {}) if p in universe)
             k += 1
         day_rs = rs[bisect.bisect_left(times, d - delay):k]
-        digest = thin_digest(day_rs, pairs)
+        digest = thin_digest(day_rs, pairs, extremes_ms)
         cacheable = bool(cache_dir) and end <= final_before_ms
         hit = read_thin_cache(thin_cache_path(cache_dir, d), digest) if cacheable else None
         if hit is None:
             ticks, miss = thin_day(d, day_rs, set(pairs), read_window, rules=rules,
-                                   until_ms=end_ms if end_ms < end else None)
+                                   until_ms=end_ms if end_ms < end else None,
+                                   extremes_ms=extremes_ms)
             if cacheable:
                 write_thin_cache(thin_cache_path(cache_dir, d), digest, ticks, miss)
         else:
@@ -873,7 +903,8 @@ def build_live(results: dict, now_ms: int) -> dict:
             "week_gain_so_far": max(0.0, x - r["hwm"] + min(0.0, unr)),
             "declared": r["declared"],
             "position_detail": r["positions"],
-            "fills": len(r["fills"]), "refused": len(r["refused"])}
+            "fills": len(r["fills"]), "refused": len(r["refused"]),
+            "max_dd": r.get("max_dd", 0.0)}
     return {"v": 1, "as_of_ms": int(now_ms), "week_start": ab.week_start_ms(now_ms),
             "books": books}
 

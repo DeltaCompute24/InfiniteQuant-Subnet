@@ -506,6 +506,17 @@ def replay_book(account: str, receipts: list, ticks: list, universe: dict, *,
                 declared[p] = v
             pending.setdefault(p, []).append((int(r["t_recv_ms"]) + delay, v, seq))
 
+    # Lifetime max drawdown, display only (2026-11-12): deepest fall of mark-to-market equity below
+    # its running peak (the start counts as 1.0), checked on every tick of a held pair and every fill.
+    # Nothing scores or pays from it; elimination stays on day-end equity.
+    dd = {"peak": 1.0, "max": 0.0}
+
+    def track(e):
+        if e > dd["peak"]:
+            dd["peak"] = e
+        elif dd["peak"] > 0:
+            dd["max"] = max(dd["max"], 1.0 - e / dd["peak"])
+
     def on_tick(t):
         pair = t["a"]
         if pair not in universe:
@@ -515,6 +526,8 @@ def replay_book(account: str, receipts: list, ticks: list, universe: dict, *,
         book.marks[pair] = mid
         if eliminated_at is not None:
             return
+        if book.qty.get(pair):
+            track(book.equity())
         q = pending.get(pair)
         if not q or q[0][0] > tms:
             return
@@ -535,6 +548,7 @@ def replay_book(account: str, receipts: list, ticks: list, universe: dict, *,
             book.qty[pair] = 0.0
         week_fill_buckets.add(bucket_of(tms))
         e_after = book.equity()
+        track(e_after)
         fills.append({"t_ms": tms, "pair": pair, "dq": dq, "px": px, "target": target,
                       "equity": e_after, "seq": seq})
         series.append((tms, e_after))
@@ -576,7 +590,7 @@ def replay_book(account: str, receipts: list, ticks: list, universe: dict, *,
             "equity": book.equity(), "balance": book.balance(),
             "unrealised": book.unrealised(), "ath": ath, "positions": positions,
             "declared": dict(sorted(declared.items())),
-            "open_week_buckets": len(week_fill_buckets)}
+            "open_week_buckets": len(week_fill_buckets), "max_dd": dd["max"]}
 
 
 def replay_books(receipts: list, ticks: list, universe: dict, *, start_ms: int,

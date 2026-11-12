@@ -176,13 +176,17 @@ def replay(args, receipts: list, end_ms: int, now_ms: int):
     universe = abio.book_universe_through(end_ms / 1000)
     rs = [r for r in receipts if int(r["t_recv_ms"]) < end_ms]
     t0 = time.time()
+    # --live also keeps per-minute high/low ticks for the display-only lifetime max drawdown;
+    # separate cache, so the weekly freeze's thin set is exactly what it was.
+    live = bool(getattr(args, "live", False))
     ticks, missing = abio.load_thin_range(
         epoch, end_ms, rs, universe, make_reader(args.tick_src, args.tick_url),
-        cache_dir=os.path.join(args.out, "thin"),
-        final_before_ms=now_ms - config.AGENT_BOOKS_FREEZE_DELAY_S * 1000)
+        cache_dir=os.path.join(args.out, "thin-x" if live else "thin"),
+        final_before_ms=now_ms - config.AGENT_BOOKS_FREEZE_DELAY_S * 1000,
+        extremes_ms=60_000 if live else 0)
     t1 = time.time()
     results = abio.replay_all(rs, abio.PairIndex(ticks), universe, start_ms=epoch,
-                              end_ms=end_ms)
+                              end_ms=end_ms, keep_all=live)
     _log(f"epoch {abio.week_label(epoch)} → {end_ms}: {len(rs)} receipts, "
          f"{len(results)} books, {len(ticks)} thin ticks, {len(missing)} missing windows; "
          f"ticks {t1 - t0:.1f}s, replay {time.time() - t1:.1f}s")
