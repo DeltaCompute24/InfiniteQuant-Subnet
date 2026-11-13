@@ -79,24 +79,33 @@ def make_reader(tick_src: str, tick_url: str):
     return read
 
 
+def receipt_urls(args) -> list:
+    """--receipts-url when given; else config.AGENT_BOOKS_RECEIPTS_URLS, but only when there is no
+    local receipts dir (the intake host reads its own files and never fetches its own URL)."""
+    urls = list(args.receipts_url or [])
+    if not urls and config.AGENT_BOOKS_RECEIPTS_URLS and not local_receipts(args):
+        urls = [u.strip() for u in config.AGENT_BOOKS_RECEIPTS_URLS.split(",") if u.strip()]
+    return urls
+
+
+def local_receipts(args) -> bool:
+    return bool(args.receipts_dir) and os.path.isdir(args.receipts_dir)
+
+
 def load_receipts(args) -> tuple[list, dict]:
+    urls = receipt_urls(args)
+
     def lines():
-        if args.receipts_dir:
+        if local_receipts(args):
             yield from abio.iter_dir_lines(args.receipts_dir)
-        urls = list(args.receipts_url or [])
-        if not urls and config.AGENT_BOOKS_RECEIPTS_URLS:
-            urls = [u.strip() for u in config.AGENT_BOOKS_RECEIPTS_URLS.split(",") if u.strip()]
         if urls:
             yield from abio.iter_url_lines(urls, fetch_text)
     verify = (lambda hk, m, s: True) if args.no_verify_sig else abio.sr25519_verify
     rs, d1 = abio.verified_receipts(lines(), verify=verify)
     # phase 3: from config.AGENT_RUNNER_FROM a receipt needs the book runner's countersignature
     def runner_lines():
-        if args.receipts_dir:
+        if local_receipts(args):
             yield from abio.iter_dir_runner(args.receipts_dir)
-        urls = list(args.receipts_url or [])
-        if not urls and config.AGENT_BOOKS_RECEIPTS_URLS:
-            urls = [u.strip() for u in config.AGENT_BOOKS_RECEIPTS_URLS.split(",") if u.strip()]
         if urls:
             yield from abio.iter_url_runner(urls, fetch_text)
     if config.AGENT_RUNNER_FROM_UNIX:

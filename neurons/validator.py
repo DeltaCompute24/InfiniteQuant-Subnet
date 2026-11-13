@@ -1168,6 +1168,13 @@ class Validator:
             agentbook_shares = None
             if config.agent_books_active(now):
                 try:
+                    why = agent_books_io.ensure_week_async(now)
+                    if why == "started":
+                        print("  · agentbook: freezing the paid week from public data in the "
+                              "background (~7 min); the share burns until it lands")
+                except Exception as e:  # noqa: BLE001 — a failed freeze only delays the share
+                    print(f"  ! agentbook self-freeze failed to start: {e}")
+                try:
                     agentbook_shares = agent_books_io.cycle_shares(now)
                     vectors["agentbook"] = agent_books_io.agentbook_vector(
                         agentbook_shares, uid_by_hotkey)

@@ -1590,7 +1590,9 @@ def agent_comp_active(t_unix: float) -> bool:
 # (agent_books_io.pay_week_start_ms), so the first payment starts at FROM + 7d + 8h; before
 # that there is no week to pay and the share burns. combine() still ignores the vector until
 # COMP_WEIGHTS_HISTORY gives `agentbook` a share, so the flag alone never moves emission.
-AGENT_BOOKS_FROM_UNIX = int(os.getenv("SN89_AGENT_BOOKS_FROM", "0"))
+# Default = the mainnet arm (2026-11-03 01:10 UTC). It was 0 here and set only in our own
+# unit, so every other validator treated the competition as off and burned its share.
+AGENT_BOOKS_FROM_UNIX = int(os.getenv("SN89_AGENT_BOOKS_FROM", "1793766600"))
 # A week may be frozen once every tick window in it is final: FREEZE delay = HF
 # GRADE_ABANDON_S. It is PAID from the PAY delay, 2 h later, so the Monday 06:05 freeze (and
 # its 07:05 retry) has landed before any validator looks for the file.
@@ -1601,7 +1603,10 @@ AGENT_BOOKS_DIR = os.getenv("SN89_AGENT_BOOKS_DIR", os.path.expanduser("~/.sn89/
 # the same lines (comma-separated URLs, or one URL ending in index.json listing them).
 AGENT_BOOKS_RECEIPTS_DIR = os.getenv("SN89_AGENT_BOOKS_RECEIPTS_DIR",
                                      "/opt/iq-platform/data/live/sn89-agent/books")
-AGENT_BOOKS_RECEIPTS_URLS = os.getenv("SN89_AGENT_BOOKS_RECEIPTS_URLS", "")
+# The public receipts are the default source for any validator without the local dir
+# (agent_books_weekly.receipt_urls); set the env to "" to read only a local dir.
+AGENT_BOOKS_RECEIPTS_PUBLIC = "https://partner.infinitequant.app/sn89/agent/books/index.json"
+AGENT_BOOKS_RECEIPTS_URLS = os.getenv("SN89_AGENT_BOOKS_RECEIPTS_URLS", AGENT_BOOKS_RECEIPTS_PUBLIC)
 # Live book state for the intake (refuses receipts of an eliminated book) and the hosted
 # droplet (an algo reads its own book). Written by tools/agent_books_weekly.py --live.
 AGENT_BOOKS_LIVE_PATH = os.getenv("SN89_AGENT_BOOKS_LIVE_PATH",

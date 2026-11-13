@@ -58,6 +58,7 @@ import hashlib
 import json
 import math
 import os
+import sys
 
 from . import agent_books as ab
 from . import config, entity, hf
@@ -1023,6 +1024,50 @@ def agentbook_vector(shares: dict | None, uid_map: dict, burn_uid: int = None) -
             uid = burn
         out[uid] = out.get(uid, 0.0) + s
     return out or None
+
+
+SELF_FREEZE_RETRY_S = 3600
+
+
+def ensure_week_async(now_unix: float, out_dir: str | None = None, receipts_dir: str | None = None,
+                      spawn=None) -> str | None:
+    """A validator that holds no local receipts (everyone but the intake host) freezes the week
+    it pays itself, from the public receipts and ticks, in a background process so weight setting
+    never waits for it (~7 min of tick fetches). Started at most once an hour per week, and never
+    when the frozen file exists. Returns why it did nothing, or "started"."""
+    if not config.agent_books_active(now_unix):
+        return "inactive"
+    ws = pay_week_start_ms(now_unix)
+    if ws < epoch_ms():
+        return "no_week"
+    out = out_dir or config.AGENT_BOOKS_DIR
+    rdir = config.AGENT_BOOKS_RECEIPTS_DIR if receipts_dir is None else receipts_dir
+    if rdir and os.path.isdir(rdir):
+        return "local_receipts"          # the intake host freezes on its own timer
+    if os.path.exists(week_file_path(out, ws)):
+        return "frozen"
+    os.makedirs(out, exist_ok=True)
+    mark = os.path.join(out, f".freeze-{week_label(ws)}.started")
+    try:
+        with open(mark, encoding="utf-8") as fh:
+            if now_unix - float(fh.read().strip()) < SELF_FREEZE_RETRY_S:
+                return "running"
+    except (OSError, ValueError):
+        pass
+    with open(mark, "w", encoding="utf-8") as fh:
+        fh.write(str(int(now_unix)))
+    tool = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "tools", "agent_books_weekly.py")
+    argv = [sys.executable, tool, "--week", week_label(ws), "--out", out, "--receipts-dir", "",
+            "--live-out", os.path.join(out, "agent-books-live.json"), "--trades-dir", ""]
+    if spawn is not None:
+        spawn(argv)
+        return "started"
+    import subprocess
+    with open(os.path.join(out, "freeze.log"), "a", encoding="utf-8") as log:
+        subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                         start_new_session=True, cwd=os.path.dirname(os.path.dirname(tool)))
+    return "started"
 
 
 def cycle_shares(now_unix: float, out_dir: str | None = None) -> dict | None:

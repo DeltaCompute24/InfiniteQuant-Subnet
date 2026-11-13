@@ -316,8 +316,9 @@ def test_pay_week_rolls_over_after_freeze_delay():
     assert abio.freezable_week_start_ms(nxt + fz * 1000 - 1) == MON - ab.WEEK_MS
 
 
-def test_flag_off_by_default_changes_nothing(tmp_path, monkeypatch):
-    assert config.AGENT_BOOKS_FROM_UNIX == 0
+def test_flag_off_changes_nothing(tmp_path, monkeypatch):
+    # The default is the mainnet arm since 2026-11-12; SN89_AGENT_BOOKS_FROM=0 still turns it off.
+    monkeypatch.setattr(config, "AGENT_BOOKS_FROM_UNIX", 0)
     assert not config.agent_books_active(2**40)
     # even with a frozen file sitting there, the flag-off path reads nothing
     doc = abio.build_week(_results({f"{ENT}_{N0}": 0.1}), MON, {ENT: BOND_CK},

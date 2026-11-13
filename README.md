@@ -533,6 +533,27 @@ nothing up to it can be bet against or withdrawn. Check the balance with
   short, no bets are accepted.
 - Code: `sn89_signals/markets_vault.py`, `sn89_signals/markets.py`.
 
+### Agent books (62.5% of the vector since 2026-11-05)
+
+The Agent competition pays from a **frozen weekly file**,
+`~/.sn89/agent-books/agent-books-week-<Monday>.json`, replayed from the signed book receipts
+published at `https://partner.infinitequant.app/sn89/agent/books/index.json` and the public
+anchored ticks. A validator with no file for the week it pays **burns the whole agent share**:
+the log line reads `agentbook=∅ burn=0.625` and vtrust falls.
+
+From this release the validator builds the file itself. When the paid week's file is missing
+it starts `tools/agent_books_weekly.py` in the background (log: `~/.sn89/agent-books/freeze.log`,
+about 7 minutes) and pays from it once it lands; nothing to configure. To build it by hand:
+
+```bash
+python tools/agent_books_weekly.py --week 2026-11-02 --receipts-dir ""
+```
+
+Check it: `sha256sum ~/.sn89/agent-books/agent-books-week-2026-11-02.json` must equal the
+`.sha256` published at `https://partner.infinitequant.app/sn89/agent/weeks/`. Before this release
+`SN89_AGENT_BOOKS_FROM` defaulted to 0 (competition off) and the receipts URL was empty, so a
+validator running only `master` burned the share.
+
 ### Timelock version compatibility — READ THIS IF VTRUST IS FALLING
 
 Two mutually-unreadable drand-tlock ciphertext formats exist:
