@@ -402,7 +402,22 @@ def test_live_state_shape_agreed_with_intake():
                 "week_active_buckets"} <= set(bk)
         assert all(isinstance(v, float) for v in bk["positions"].values())
         assert sum(abs(v) for v in bk["positions"].values()) < 1.2
+        for p, d in bk["position_detail"].items():
+            assert {"qty", "avg", "mark", "opened_ms", "last_fill_ms", "last_fill_seq"} <= set(d)
+            assert d["opened_ms"] <= d["last_fill_ms"] <= end
     json.dumps(doc, allow_nan=False)
+
+
+def test_fill_marks_open_add_reduce_close_flip():
+    f = lambda t, p, dq, seq, target=1.0: {"t_ms": t, "pair": p, "dq": dq, "seq": seq,
+                                           "target": target}
+    fills = [f(10, "BTC", 1.0, 1), f(20, "BTC", 0.5, 2), f(30, "BTC", -0.45, 3),   # open, add, reduce
+             f(40, "ETH", -2.0, 4), f(50, "ETH", 0.0, 5, 0.0),                    # open, close
+             f(60, "SOL", 1.0, 6), f(70, "SOL", -3.0, 7)]                         # open, flip
+    m = abio.fill_marks(fills)
+    assert m["BTC"] == {"opened_ms": 10, "last_fill_ms": 30, "last_fill_seq": 3}
+    assert "ETH" not in m
+    assert m["SOL"] == {"opened_ms": 70, "last_fill_ms": 70, "last_fill_seq": 7}
 
 
 def test_trades_doc_for_terminal():

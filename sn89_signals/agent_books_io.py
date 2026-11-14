@@ -880,6 +880,30 @@ def dumps_week(doc: dict) -> bytes:
             + "\n").encode()
 
 
+def fill_marks(fills: list) -> dict:
+    """{PAIR: {"opened_ms", "last_fill_ms", "last_fill_seq"}} for every pair a book still holds
+    after `fills` (one book, time order). opened_ms is the fill that opened the position or
+    flipped its side; last_fill_ms / last_fill_seq are the latest fill and the receipt seq it
+    filled. A book algo compares last_fill_seq with the seq the intake returned for its receipt
+    to know the replay has filled it."""
+    qty: dict = {}
+    out: dict = {}
+    for f in fills:
+        p = f["pair"]
+        q0 = qty.get(p, 0.0)
+        q1 = 0.0 if f.get("target") == 0.0 else q0 + float(f["dq"])
+        qty[p] = q1
+        if q1 == 0.0:
+            out.pop(p, None)
+            continue
+        m = out.get(p)
+        if m is None or q0 == 0.0 or (q0 > 0) != (q1 > 0):
+            m = out[p] = {"opened_ms": int(f["t_ms"])}
+        m["last_fill_ms"] = int(f["t_ms"])
+        m["last_fill_seq"] = int(f["seq"]) if f.get("seq") is not None else None
+    return out
+
+
 def build_live(results: dict, now_ms: int) -> dict:
     """Current book state per account. Shape agreed with the intake and the hosted droplet
     (2026-11-03): {"as_of_ms", "books": {account: {"positions": {PAIR: lev}, "equity",
@@ -892,6 +916,7 @@ def build_live(results: dict, now_ms: int) -> dict:
         eq = r["equity"]
         unr = r["unrealised"]
         x = r["balance"] + unr if ab.RULES_V1["hwm_basis"] == "equity" else r["balance"]
+        marks = fill_marks(r["fills"])
         books[acct] = {
             "positions": {p: ((v["qty"] * v["mark"] / eq) if eq else 0.0)
                           for p, v in r["positions"].items()},
@@ -903,7 +928,11 @@ def build_live(results: dict, now_ms: int) -> dict:
             "elim_floor": r["ath"] * (1 - ab.elim_dd_at(ab.next_day_end_ms(now_ms), ab.RULES_V1)),
             "week_gain_so_far": max(0.0, x - r["hwm"] + min(0.0, unr)),
             "declared": r["declared"],
-            "position_detail": r["positions"],
+            # qty is signed units, avg the average entry, mark the latest mid; the fill marks
+            # say when the position opened / last filled and which receipt seq filled last.
+            "position_detail": {p: {**v, **marks.get(p, {})} for p, v in r["positions"].items()},
+            "last_fill_seq": max((int(f["seq"]) for f in r["fills"] if f.get("seq") is not None),
+                                 default=None),
             "fills": len(r["fills"]), "refused": len(r["refused"]),
             "max_dd": r.get("max_dd", 0.0)}
     return {"v": 1, "as_of_ms": int(now_ms), "week_start": ab.week_start_ms(now_ms),
