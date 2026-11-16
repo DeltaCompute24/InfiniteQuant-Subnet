@@ -813,7 +813,7 @@ def registry_as_of(journal: dict, block: int, grandfathered: dict | None = None)
                 cur = row["bond_coldkey"]
         if cur:
             out[hk] = cur
-    gf = config.AGENT_BOOKS_GRANDFATHERED if grandfathered is None else grandfathered
+    gf = config.grandfathered_as_of(block) if grandfathered is None else grandfathered
     out.update(gf)
     return dict(sorted(out.items()))
 

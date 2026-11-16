@@ -544,3 +544,10 @@ def test_max_drawdown_tracks_unrealised_lows():
                        half_spread_bps={"BTCUSD": 0.0})
     assert 0.04 < r["max_dd"] < 0.06          # 0.25x on a 20% drop is ~5%
     assert r["equity"] > 1.0                  # recovered: current drawdown would read 0
+
+
+def test_grandfathered_bond_coldkey_follows_block():
+    ent = "5Hdvy1Msc9Su6U7kcJQRFnc39NNVumAcPnqFLoHqZ4Uix6g3"
+    assert abio.registry_as_of({}, 9_491_809)[ent].startswith("5FjFwQuT")
+    assert abio.registry_as_of({}, 9_491_810)[ent].startswith("5HCC5ENq")
+    assert abio.registry_as_of({}, 9_515_288)[ent].startswith("5HCC5ENq")

@@ -1619,13 +1619,35 @@ AGENT_BOOKS_TRADES_DIR = os.getenv("SN89_AGENT_BOOKS_TRADES_DIR",
 # commitment (the entity's one commitment slot also carries LF batches and Markets oracle
 # anchors, so a registration commit would be overwritten within minutes). Registration only:
 # the bond itself is still checked every week like anyone else's.
-AGENT_BOOKS_GRANDFATHERED: dict = {
-    # IQ entity (UID 39) -> the IQ Fund LP coldkey iq_fund_sn89 (Whit 2026-11-04: "use the IQ Fund LP
-    # 89 alpha holdings"; 44,798.41 alpha on 89 at block 9,430,160, staked to UID 0). Before that it
-    # was the subnet owner coldkey 5Dc5NmEU...; nothing was ever paid under it (first pay 11-09).
-    "5Hdvy1Msc9Su6U7kcJQRFnc39NNVumAcPnqFLoHqZ4Uix6g3":
-        "5FjFwQuTGDmWMpbJmKunET2y1wAiXW8Fi12VkRYTUWTGYpVK",
+AGENT_BOOKS_GRANDFATHERED_HISTORY: dict = {
+    # IQ entity (UID 39). Each row is (from_block, bond_coldkey); the row in force at the
+    # snapshot block applies. 5Dc5NmEU... (subnet owner) first, nothing ever paid under it.
+    # From 2026-11-04: the IQ Fund LP coldkey iq_fund_sn89 5FjFwQuT... (Whit: "use the IQ Fund
+    # LP 89 alpha holdings"). From block 9,491,810 (2026-11-12): 40,100 alpha moved onto the
+    # entity owner coldkey 5HCC5ENq... staked on the entity hotkey, so the bond is read there.
+    "5Hdvy1Msc9Su6U7kcJQRFnc39NNVumAcPnqFLoHqZ4Uix6g3": [
+        (0, "5FjFwQuTGDmWMpbJmKunET2y1wAiXW8Fi12VkRYTUWTGYpVK"),
+        (9_491_810, "5HCC5ENqaQa38uuVWxeqdpMP9dYbgebjVGtJdSShSKv4mGZH"),
+    ],
 }
+
+
+def grandfathered_as_of(block: int | None = None) -> dict:
+    """{entity_hk: bond_coldkey} from AGENT_BOOKS_GRANDFATHERED_HISTORY at `block`
+    (None = the latest row)."""
+    out = {}
+    for hk, rows in AGENT_BOOKS_GRANDFATHERED_HISTORY.items():
+        cur = None
+        for frm, ck in sorted(rows):
+            if block is None or int(frm) <= int(block):
+                cur = ck
+        if cur:
+            out[hk] = cur
+    return out
+
+
+# Current mapping, for callers without a block.
+AGENT_BOOKS_GRANDFATHERED: dict = grandfathered_as_of(None)
 
 
 # RUNNER COUNTERSIGNATURE (SN89-AGENT-BOOK-RUNNER-SPEC.md phase 3; Whit 2026-11-11 "immediately").
