@@ -904,6 +904,35 @@ def fill_marks(fills: list) -> dict:
     return out
 
 
+FILLS_TODAY_MAX = 200
+
+
+def fills_today(fills: list, now_ms: int) -> tuple[list, int]:
+    """(rows, entries) for one book's fills (time order) in the UTC day of now_ms. Each row is
+    {"seq", "pair", "t_ms", "target", "dq", "px", "entry"}; `entry` is true when the fill opened
+    the pair from flat or flipped its side. `entries` counts those fills: what actually entered
+    today, where receipts_today counts accepted receipts. The rows keep the newest
+    FILLS_TODAY_MAX; `entries` counts the whole day."""
+    day0 = ab.day_start_ms(now_ms)
+    qty: dict = {}
+    rows, entries = [], 0
+    for f in fills:
+        p = f["pair"]
+        q0 = qty.get(p, 0.0)
+        q1 = 0.0 if f.get("target") == 0.0 else q0 + float(f["dq"])
+        qty[p] = q1
+        if int(f["t_ms"]) > now_ms:
+            break
+        if int(f["t_ms"]) < day0:
+            continue
+        entry = q1 != 0.0 and (q0 == 0.0 or (q0 > 0) != (q1 > 0))
+        entries += entry
+        rows.append({"seq": int(f["seq"]) if f.get("seq") is not None else None, "pair": p,
+                     "t_ms": int(f["t_ms"]), "target": f.get("target"), "dq": float(f["dq"]),
+                     "px": float(f["px"]) if f.get("px") is not None else None, "entry": entry})
+    return rows[-FILLS_TODAY_MAX:], entries
+
+
 def build_live(results: dict, now_ms: int) -> dict:
     """Current book state per account. Shape agreed with the intake and the hosted droplet
     (2026-11-03): {"as_of_ms", "books": {account: {"positions": {PAIR: lev}, "equity",
@@ -917,6 +946,7 @@ def build_live(results: dict, now_ms: int) -> dict:
         unr = r["unrealised"]
         x = r["balance"] + unr if ab.RULES_V1["hwm_basis"] == "equity" else r["balance"]
         marks = fill_marks(r["fills"])
+        today = fills_today(r["fills"], now_ms)
         books[acct] = {
             "positions": {p: ((v["qty"] * v["mark"] / eq) if eq else 0.0)
                           for p, v in r["positions"].items()},
@@ -933,6 +963,8 @@ def build_live(results: dict, now_ms: int) -> dict:
             "position_detail": {p: {**v, **marks.get(p, {})} for p, v in r["positions"].items()},
             "last_fill_seq": max((int(f["seq"]) for f in r["fills"] if f.get("seq") is not None),
                                  default=None),
+            # today's fills (UTC): what filled, by which receipt seq, and how many were entries
+            "fills_today": today[0], "entries_today": today[1],
             "fills": len(r["fills"]), "refused": len(r["refused"]),
             "max_dd": r.get("max_dd", 0.0)}
     return {"v": 1, "as_of_ms": int(now_ms), "week_start": ab.week_start_ms(now_ms),

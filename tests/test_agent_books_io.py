@@ -405,6 +405,8 @@ def test_live_state_shape_agreed_with_intake():
         for p, d in bk["position_detail"].items():
             assert {"qty", "avg", "mark", "opened_ms", "last_fill_ms", "last_fill_seq"} <= set(d)
             assert d["opened_ms"] <= d["last_fill_ms"] <= end
+        assert isinstance(bk["entries_today"], int) and isinstance(bk["fills_today"], list)
+        assert bk["entries_today"] == sum(r["entry"] for r in bk["fills_today"])
     json.dumps(doc, allow_nan=False)
 
 
@@ -418,6 +420,24 @@ def test_fill_marks_open_add_reduce_close_flip():
     assert m["BTC"] == {"opened_ms": 10, "last_fill_ms": 30, "last_fill_seq": 3}
     assert "ETH" not in m
     assert m["SOL"] == {"opened_ms": 70, "last_fill_ms": 70, "last_fill_seq": 7}
+
+
+def test_fills_today_counts_entries_not_receipts():
+    day = 86_400_000
+    f = lambda t, p, dq, seq, target=1.0: {"t_ms": t, "pair": p, "dq": dq, "seq": seq,
+                                           "target": target, "px": 100.0}
+    fills = [f(day - 10, "BTC", 1.0, 1),                     # yesterday: open
+             f(day + 10, "BTC", 0.5, 2),                     # today: add, not an entry
+             f(day + 20, "ETH", -2.0, 3),                    # today: entry
+             f(day + 30, "ETH", 0.0, 4, 0.0),                # today: close
+             f(day + 40, "SOL", 1.0, 5), f(day + 50, "SOL", -3.0, 6)]   # entry, flip = entry
+    rows, n = abio.fills_today(fills, day + 60)
+    assert n == 3
+    assert [r["seq"] for r in rows] == [2, 3, 4, 5, 6]
+    assert [r["entry"] for r in rows] == [False, True, False, True, True]
+    assert abio.fills_today(fills, day - 1) == ([{"seq": 1, "pair": "BTC", "t_ms": day - 10,
+                                                  "target": 1.0, "dq": 1.0, "px": 100.0,
+                                                  "entry": True}], 1)
 
 
 def test_trades_doc_for_terminal():
