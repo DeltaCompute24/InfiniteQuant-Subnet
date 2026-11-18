@@ -65,6 +65,7 @@ CREATE TABLE IF NOT EXISTS signals (
   status       TEXT NOT NULL DEFAULT 'sealed',
     -- sealed | revealed | void | pending | won | lost | washed
     -- (lost + exit_reason='no_reveal' = forfeit: committed, blob never served)
+    -- (lost + exit_reason='bad_reveal' = forfeit: served blob names another commitment)
   void_reason  TEXT,
   entry_price  REAL,
   outcome_bps  REAL,
@@ -462,14 +463,15 @@ class Validator:
         # retried next loop — the on-chain commitment is durable. Only the main
         # thread touches the DB; workers just do network I/O.
         pending = self.db.execute(
-            "SELECT commit_hex, hotkey, url_tag, batch FROM signals "
+            "SELECT commit_hex, hotkey, url_tag, batch, t0_unix FROM signals "
             "WHERE blob_json IS NULL AND status='sealed'").fetchall()
         if pending:
             ex = concurrent.futures.ThreadPoolExecutor(
                 max_workers=config.BLOB_FETCH_WORKERS)
             futs = {ex.submit(self._find_blob, hk, tag,
-                              entity.BATCH_MAX_BYTES if is_batch else None): commit_hex
-                    for commit_hex, hk, tag, is_batch in pending}
+                              entity.BATCH_MAX_BYTES if is_batch else None,
+                              None if is_batch else t0): commit_hex
+                    for commit_hex, hk, tag, is_batch, t0 in pending}
             done, _ = concurrent.futures.wait(
                 futs, timeout=config.BLOB_FETCH_BUDGET_S)
             for fut in done:
@@ -486,15 +488,29 @@ class Validator:
             ex.shutdown(wait=False, cancel_futures=True)
         self.db.commit()
 
-    def _find_blob(self, hotkey: str, tag: str, max_bytes: int | None = None) -> dict | None:
+    def _find_blob(self, hotkey: str, tag: str, max_bytes: int | None = None,
+                   t0: float | None = None) -> dict | None:
+        """The blob committed under `tag`, or None. With `t0` (the commit block
+        time; single calls only), a blob the relay first stored more than
+        config.BLOB_LATE_S after t0 is ignored, so the row forfeits as a loss."""
         for base in (config.R2_PUBLIC_BASE, *config.R2_EXTRA_BASES):
             if not base:
                 continue
             # bucket listing: {base}/{hotkey}/index.json maintained by the miner
             idx = bucket.fetch(f"{base.rstrip('/')}/{hotkey}/index.json") or {}
+            received = idx.get("received") if isinstance(idx.get("received"), dict) else {}
             for nonce in (idx.get("nonces") or [])[-50:]:
                 url = bucket.blob_url(hotkey, nonce, base=base)
                 if chain.url_tag(url) == tag:
+                    if t0 is not None:
+                        try:
+                            got = float(received.get(nonce))
+                        except (TypeError, ValueError):
+                            got = None
+                        if got is not None and got > float(t0) + config.BLOB_LATE_S:
+                            print(f"  ⊘ late blob {hotkey[:8]}… stored {got - float(t0):.0f}s "
+                                  f"after commit (> {config.BLOB_LATE_S}s) — ignored")
+                            return None
                     # An entity batch carries up to BATCH_MAX_ITEMS timelock blobs (~1.8 KB
                     # each), past the 64 KiB single-blob cap.
                     return (bucket.fetch(url, max_bytes=max_bytes) if max_bytes
@@ -534,6 +550,21 @@ class Validator:
                 continue
             if str(blob.get("owner_pk", "")).lower() != config.OWNER_PK_HEX.lower():
                 self._void(commit_hex, "wrong_owner_pk", strike=True)
+                continue
+            # The blob names the plaintext it carries (crypto.encrypt sets
+            # commit = sha256(pt)). One that names a DIFFERENT commitment than the
+            # on-chain one was built for another plaintext: it is not a timelock
+            # version mismatch and cannot be opened into this call. That is a served
+            # non-reveal, graded like an unserved one (LOST), not voided. Voiding it
+            # let a miner swap in such a blob after watching the price and erase
+            # the loss (549 rows from 28 hotkeys, 2026-11-08..18).
+            named = blob.get("commit")
+            if isinstance(named, str) and named.lower() != str(commit_hex).lower():
+                self.db.execute(
+                    "UPDATE signals SET status='lost', outcome_bps=NULL, "
+                    "exit_reason='bad_reveal' WHERE commit_hex=?", (commit_hex,))
+                print(f"  ⊗ forfeit {commit_hex[:12]}… {hk[:8]}… "
+                      f"blob is for another commitment ⇒ LOST")
                 continue
             sig_bytes = self._drand_sig(rnd)
             if sig_bytes is None:

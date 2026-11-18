@@ -1522,6 +1522,15 @@ COMP_WEIGHTS = comp_weights_as_of(2**62)   # current-era shares (latest entry)
 BLOB_FETCH_DEADLINE_S = float(os.getenv("SN89_BLOB_FETCH_DEADLINE_S", "8"))
 BLOB_FETCH_WORKERS = int(os.getenv("SN89_BLOB_FETCH_WORKERS", "8"))
 BLOB_FETCH_BUDGET_S = float(os.getenv("SN89_BLOB_FETCH_BUDGET_S", "20"))
+# A blob must be on the relay before the call's outcome can be watched. The relay
+# records when it first stored each blob ("received" in {hotkey}/index.json, write-once),
+# and a blob first stored more than BLOB_LATE_S after the commit block is ignored: the
+# row then has no blob and takes the forfeit loss (forfeit_unrevealed). Without this the
+# reveal delay is an option: commit, watch the price, upload the real blob only if the
+# call won. Honest uploads land before the commit (max +12s over 15,683 calls measured
+# 2026-10-01..11-18). A blob with no recorded receive time (a host that does not publish
+# one) is accepted as before. Entity batches are exempt.
+BLOB_LATE_S = int(os.getenv("SN89_BLOB_LATE_S", "120"))
 
 # Commitment-history scan (audit #5). When on, ingest also scans the blocks
 # since the last poll so a commitment a miner OVERWROTE before any validator
