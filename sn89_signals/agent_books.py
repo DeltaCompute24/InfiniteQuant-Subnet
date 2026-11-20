@@ -91,6 +91,8 @@ POOL
   loss never nets against another's gain (the gain floor is per account, like SN8 entity
   subaccounts). Σ paid == 0 -> {} and the share burns. An entity whose bond is below
   ENTITY_MIN_ALPHA at the weekly snapshot is paid nothing that week.
+  From RULES_V2 (weeks starting 2026-11-23) that is the SHORT-TERM half only: half the pool
+  pays 90-day performance weighted by track length, see RULES_V2 and blended_weights().
 """
 from __future__ import annotations
 
@@ -132,6 +134,35 @@ RULES_V1 = MappingProxyType({
 })
 
 BOOK_RULES_HISTORY: tuple = ((0, RULES_V1),)
+
+# ── RULES_V2: short-term + long-term pool (Whit 2026-11-20) ──────────────────
+# Half the pool pays last week's HWM gain exactly as V1. The other half pays 90-day
+# performance, scaled by how long the account has traded, so one lucky week no longer
+# earns what three steady months earn and a new account cannot take the long-term half.
+#   R      = EOD equity at week end / EOD equity at the window start - 1
+#            (window = the LT_WINDOW_DAYS before week end, or from the first fill if later)
+#   DD     = max peak-to-trough drop of daily EOD equity over the same window
+#   score  = max(0, R) x min(R / max(DD, LT_DD_FLOOR), LT_CALMAR_CAP)
+#   w      = clamp((days since first fill - LT_RAMP_FREE_DAYS) /
+#                  (LT_RAMP_FULL_DAYS - LT_RAMP_FREE_DAYS), 0, 1)
+# An account must also have been ACTIVE in at least LT_MIN_ACTIVE_FRAC of its weeks in the
+# window, and not be eliminated. Long-term slice of account i = LT_SHARE x w_i x score_i /
+# sum(score). The unearned rest, LT_SHARE x sum((1 - w) x score) / sum(score), is added to the
+# short-term pool (never burned). See blended_weights().
+# In force for every week that starts at or after V2_FROM_S (Monday 2026-11-23 00:00 UTC). The
+# first V2 week is frozen and paid from Monday 2026-11-30.
+RULES_V2 = MappingProxyType({**RULES_V1, "v": 2,
+    "lt_share": 0.5,
+    "lt_window_days": 90,
+    "lt_dd_floor": 0.01,
+    "lt_calmar_cap": 10.0,
+    "lt_ramp_free_days": 7,
+    "lt_ramp_full_days": 90,
+    "lt_min_active_frac": 0.5,
+})
+V2_FROM_S = 1795392000              # 2026-11-23 00:00 UTC (Whit 2026-11-20)
+if V2_FROM_S is not None:
+    BOOK_RULES_HISTORY = BOOK_RULES_HISTORY + ((V2_FROM_S, RULES_V2),)
 
 
 # 3% drawdown wall (Whit 2026-11-10): what an algo has to hold to on an IQ account it is
@@ -715,3 +746,85 @@ def entity_weights(books_by_entity: dict, shares: dict) -> dict:
         if s > 0:
             out[ent] = s
     return out
+
+def long_term_inputs(result: dict, week_start: int, rules) -> dict:
+    """{"score", "w", "R", "dd", "days", "active_frac"} for one replay_book result at the end of
+    the week starting week_start. score/w are 0 when the account is not eligible."""
+    end = int(week_start) + WEEK_MS
+    out = {"score": 0.0, "w": 0.0, "R": 0.0, "dd": 0.0, "days": 0.0, "active_frac": 0.0}
+    fills = result.get("fills") or []
+    if not fills:
+        return out
+    first = int(fills[0]["t_ms"])
+    if first >= end:
+        return out
+    elim = result.get("eliminated_at_ms")
+    if elim is not None and int(elim) <= end:
+        return out
+    days = (end - first) / DAY_MS
+    out["days"] = days
+    lo = max(end - int(rules["lt_window_days"]) * DAY_MS, day_start_ms(first))
+    eod = [(int(d["t_ms"]), float(d["eod_equity"])) for d in result.get("daily") or []
+           if lo <= int(d["t_ms"]) <= end]
+    if len(eod) < 2:
+        return out
+    base = eod[0][1]
+    if base <= 0:
+        return out
+    R = eod[-1][1] / base - 1.0
+    peak, dd = eod[0][1], 0.0
+    for _, e in eod:
+        peak = max(peak, e)
+        if peak > 0:
+            dd = max(dd, 1.0 - e / peak)
+    wk = [x for x in result.get("weeks") or []
+          if int(x["week_start_ms"]) + WEEK_MS > lo and int(x["week_start_ms"]) < end
+          and int(x["week_start_ms"]) + WEEK_MS > first]
+    frac = (sum(1 for x in wk if x["active"]) / len(wk)) if wk else 0.0
+    span = float(rules["lt_ramp_full_days"]) - float(rules["lt_ramp_free_days"])
+    w = min(1.0, max(0.0, (days - float(rules["lt_ramp_free_days"])) / span))
+    out.update({"R": R, "dd": dd, "active_frac": frac, "w": w})
+    if R > 0 and frac >= float(rules["lt_min_active_frac"]):
+        calmar = min(R / max(dd, float(rules["lt_dd_floor"])), float(rules["lt_calmar_cap"]))
+        out["score"] = R * calmar
+    if not all(math.isfinite(out[k]) for k in out):
+        return {k: 0.0 for k in out}
+    return out
+
+
+def blended_weights(paid_by_entity: dict, lt_by_entity: dict, entity_bond_alpha: dict | None,
+                    rules) -> dict:
+    """RULES_V2 pool split. paid_by_entity = {entity: {account: weekly paid}} (as V1);
+    lt_by_entity = {entity: {account: long_term_inputs()}}. -> {account: share}, sum 1.
+
+    Short-term pool = (1 - lt_share) + the unearned long-term part, split pro rata on paid.
+    Long-term slice of an account = lt_share x w x score / sum(score).
+    No paid gain anywhere: the whole pool goes to the long-term earners, pro rata.
+    Nothing earned at all: {} and the share burns, as in V1."""
+    st = weekly_weights(paid_by_entity, entity_bond_alpha, rules)
+    elig = set()
+    for ent in sorted(set(paid_by_entity) | set(lt_by_entity)):
+        if entity_bond_alpha is None or entity_eligible(entity_bond_alpha.get(ent, 0.0), rules):
+            elig.add(ent)
+    sc: dict = {}
+    for ent in sorted(lt_by_entity):
+        if ent not in elig:
+            continue
+        for acct in sorted(lt_by_entity[ent]):
+            x = lt_by_entity[ent][acct]
+            s, w = float(x.get("score", 0.0)), float(x.get("w", 0.0))
+            if math.isfinite(s) and s > 0 and math.isfinite(w):
+                sc[acct] = (s, min(1.0, max(0.0, w)))
+    tot = sum(sc[a][0] for a in sorted(sc))
+    L = float(rules["lt_share"])
+    lt = {a: L * sc[a][1] * sc[a][0] / tot for a in sorted(sc)} if tot > 0 else {}
+    lt = {a: v for a, v in lt.items() if v > 0}
+    if not st:
+        s = sum(lt[a] for a in sorted(lt))
+        return {a: lt[a] / s for a in sorted(lt)} if s > 0 else {}
+    st_pool = 1.0 - sum(lt[a] for a in sorted(lt))
+    out = {a: st_pool * st[a] for a in sorted(st)}
+    for a in sorted(lt):
+        out[a] = out.get(a, 0.0) + lt[a]
+    return {a: out[a] for a in sorted(out) if out[a] > 0}
+

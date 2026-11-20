@@ -606,3 +606,86 @@ def test_replay_exit_past_cap_refused_before_the_date():
     r = _replay_cap(day)
     assert [w for _r, w in r["refused"] if w == "day_cap"] == ["day_cap"]
     assert r["declared"] == {"BTCUSD": 0.1}
+
+
+# ── RULES_V2: short-term + long-term pool (Whit 2026-11-20) ─────────────────
+R2 = ab.RULES_V2
+
+
+def _lt_result(first_ms, eods, weeks_active=None, elim=None, week_end=None):
+    """Synthetic replay result: one fill at first_ms, daily EODs from first_ms's day."""
+    d0 = ab.day_start_ms(first_ms) + ab.DAY_MS
+    daily = [{"t_ms": ab.day_start_ms(first_ms), "eod_equity": 1.0}] + [
+        {"t_ms": d0 + i * ab.DAY_MS, "eod_equity": e} for i, e in enumerate(eods)]
+    wks = [{"week_start_ms": ab.week_start_ms(first_ms) + i * ab.WEEK_MS, "active": a}
+           for i, a in enumerate(weeks_active or [True] * 20)]
+    return {"fills": [{"t_ms": first_ms}], "daily": daily, "weeks": wks, "eliminated_at_ms": elim}
+
+
+def test_v2_in_force_from_monday_2026_11_23():
+    assert ab.V2_FROM_S == 1795392000 == ab.week_start_ms(1795392000 * 1000) // 1000
+    assert ab.book_rules_as_of(ab.V2_FROM_S - 1) is ab.RULES_V1
+    assert ab.book_rules_as_of(ab.V2_FROM_S) is ab.RULES_V2
+    assert R2["v"] == 2 and R2["lt_share"] == 0.5
+    # V2 changes the pool split only: every replay rule is V1's
+    assert {k: v for k, v in R2.items() if not k.startswith("lt_") and k != "v"} == \
+        {k: v for k, v in ab.RULES_V1.items() if k != "v"}
+
+
+def test_lt_new_account_earns_no_long_term():
+    ws = MON + 10 * ab.WEEK_MS
+    r = _lt_result(ws + 1 * D, [1.0 + 0.01 * i for i in range(6)])
+    x = ab.long_term_inputs(r, ws, R2)
+    assert x["days"] < 7 and x["w"] == 0.0 and x["score"] > 0
+
+
+def test_lt_ramp_full_at_90_days_and_drawdown_floor():
+    ws = MON + 20 * ab.WEEK_MS
+    first = ws + ab.WEEK_MS - 100 * D
+    eods = [1.0] * 99 + [1.06]                    # +6%, no drawdown -> floor 1% -> Calmar 6
+    x = ab.long_term_inputs(_lt_result(first, eods), ws, R2)
+    assert x["w"] == 1.0
+    assert x["R"] == pytest.approx(0.06, abs=1e-9)
+    assert x["score"] == pytest.approx(0.06 * 6.0)
+
+
+def test_lt_idle_low_drawdown_book_does_not_win():
+    ws = MON + 20 * ab.WEEK_MS
+    first = ws + ab.WEEK_MS - 100 * D
+    idle = ab.long_term_inputs(_lt_result(first, [1.0] * 99 + [1.004]), ws, R2)
+    real = ab.long_term_inputs(_lt_result(first, [1.0] * 50 + [0.98] * 49 + [1.06]), ws, R2)
+    assert real["dd"] == pytest.approx(0.02)
+    assert real["score"] > idle["score"]
+
+
+def test_lt_inactive_or_eliminated_or_losing_scores_zero():
+    ws = MON + 20 * ab.WEEK_MS
+    first = ws + ab.WEEK_MS - 100 * D
+    up = [1.0] * 99 + [1.05]
+    assert ab.long_term_inputs(_lt_result(first, up, weeks_active=[False] * 20), ws, R2)["score"] == 0
+    assert ab.long_term_inputs(_lt_result(first, up, elim=first + 50 * D), ws, R2)["score"] == 0
+    assert ab.long_term_inputs(_lt_result(first, [0.99] * 100), ws, R2)["score"] == 0
+
+
+def test_blended_unearned_long_term_goes_to_short_term_not_burned():
+    paid = {"E1": {"a": 0.02}, "E2": {"b": 0.02}}
+    lt = {"E1": {"a": {"score": 1.0, "w": 1.0}}, "E2": {"b": {"score": 1.0, "w": 0.0}}}
+    w = ab.blended_weights(paid, lt, None, R2)
+    # long half: a earns 0.5 * 1 * 1/2 = 0.25; b's 0.25 is unearned -> short pool 0.75 split 50/50
+    assert w == {"a": pytest.approx(0.25 + 0.375), "b": pytest.approx(0.375)}
+    assert sum(w.values()) == pytest.approx(1.0)
+
+
+def test_blended_all_new_accounts_is_v1():
+    paid = {"E1": {"a": 0.03}, "E2": {"b": 0.01}}
+    lt = {"E1": {"a": {"score": 2.0, "w": 0.0}}, "E2": {"b": {"score": 1.0, "w": 0.0}}}
+    assert ab.blended_weights(paid, lt, None, R2) == pytest.approx(ab.weekly_weights(paid, None))
+
+
+def test_blended_no_weekly_gain_pays_long_term_earners_and_bond_gate_applies():
+    paid = {"E1": {"a": 0.0}, "E2": {"b": 0.0}}
+    lt = {"E1": {"a": {"score": 1.0, "w": 1.0}}, "E2": {"b": {"score": 3.0, "w": 0.5}}}
+    w = ab.blended_weights(paid, lt, None, R2)
+    assert w == {"a": pytest.approx(0.125 / 0.3125), "b": pytest.approx(0.1875 / 0.3125)}
+    assert ab.blended_weights(paid, lt, {"E1": 40_000}, R2) == {"a": pytest.approx(1.0)}
+    assert ab.blended_weights({"E1": {"a": 0.0}}, {}, None, R2) == {}

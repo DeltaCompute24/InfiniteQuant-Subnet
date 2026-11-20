@@ -846,6 +846,7 @@ def build_week(results: dict, week_start: int, registry: dict, bonds: dict,
     the pool burns."""
     rules = rules or ab.book_rules_as_of(week_start / 1000)
     books_by_entity: dict = {}
+    lt_by_entity: dict = {}
     rows: dict = {}
     for acct in sorted(results):
         ent = entity.parse(acct)[0]
@@ -857,9 +858,16 @@ def build_week(results: dict, week_start: int, registry: dict, bonds: dict,
         rows[acct] = {"entity": ent, "gain": _f(gain), "paid": _f(paid), "active": active,
                       "eliminated": elim, "share": 0.0}
         books_by_entity.setdefault(ent, {})[acct] = paid
+        if int(rules["v"]) >= 2:                        # RULES_V2 long-term half
+            lt = ab.long_term_inputs(results[acct], week_start, rules)
+            rows[acct]["lt"] = {k: _f(v) for k, v in sorted(lt.items())}
+            lt_by_entity.setdefault(ent, {})[acct] = lt
     ents = sorted(set(books_by_entity) | set(registry))
     gate = {e: (float(bonds.get(e, 0.0)) if e in registry else 0.0) for e in ents}
-    shares = ab.weekly_weights(books_by_entity, gate, rules)
+    if int(rules["v"]) >= 2:
+        shares = ab.blended_weights(books_by_entity, lt_by_entity, gate, rules)
+    else:
+        shares = ab.weekly_weights(books_by_entity, gate, rules)
     for a, s in shares.items():
         rows[a]["share"] = _f(s)
     entities = {e: {"registered": e in registry, "bond_coldkey": registry.get(e),

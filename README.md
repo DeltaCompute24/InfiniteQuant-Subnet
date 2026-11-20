@@ -554,6 +554,24 @@ Check it: `sha256sum ~/.sn89/agent-books/agent-books-week-2026-11-02.json` must 
 `SN89_AGENT_BOOKS_FROM` defaulted to 0 (competition off) and the receipts URL was empty, so a
 validator running only `master` burned the share.
 
+#### Pool split from the week of 2026-11-23 (RULES_V2)
+
+Weeks starting at or after Monday 2026-11-23 00:00 UTC (paid from 2026-11-30) split the agent
+pool in two halves:
+
+- **50%, short term:** last week's gain over the high-water mark, exactly as before.
+- **50%, long term:** 90-day performance, `score = max(0, R) × min(R / max(DD, 1%), 10)`, where
+  R is the return of daily EOD equity over the 90 days before week end (or since the first fill)
+  and DD its largest peak-to-trough drop. A book must have been active in at least half its
+  weeks in the window and not be eliminated. Each account's slice is scaled by its track
+  length, `w = clamp((days since first fill − 7) / 83, 0, 1)`: nothing in the first week, all of
+  it from 90 days. The part new accounts cannot earn goes to the short-term half; it is never
+  burned.
+
+Constants: `RULES_V2` in `sn89_signals/agent_books.py`. **Validators must run this release before
+the 2026-11-30 freeze**: an older build freezes the week under the old split and its file will not
+match the published `.sha256`.
+
 ### Timelock version compatibility — READ THIS IF VTRUST IS FALLING
 
 Two mutually-unreadable drand-tlock ciphertext formats exist:
