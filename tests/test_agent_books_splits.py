@@ -108,3 +108,12 @@ def test_trade_history_entry_is_split_adjusted(monkeypatch):
     out = abio.annotate_closes(fills)
     assert out[1]["entry_px"] == pytest.approx(100.0)
     assert out[1]["move_pct"] == pytest.approx(1.0)
+
+
+def test_max_dd_skips_empty_book_tick():
+    t0 = MON + H
+    ticks = [tick("BTCUSD", t0 + 3000, 100.0),
+             {"a": "BTCUSD", "t": t0 + 9000, "p": 193.0, "b": 92.0, "k": 294.0},
+             tick("BTCUSD", t0 + 12000, 100.0)]
+    res = run([rc(t0, {"BTCUSD": -0.25})], ticks)
+    assert res["max_dd"] == pytest.approx(0.0)

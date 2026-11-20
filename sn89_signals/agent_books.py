@@ -321,6 +321,17 @@ def _sorted_ticks(ticks) -> list:
     return sorted(ticks, key=hf.tick_order_key)
 
 
+def _quote_sane(tick: dict) -> bool:
+    """False when the tick carries a bid or ask more than QUOTE_MAX_DEV from its `p` (from
+    QUOTE_SANITY_FROM_MS). Such a tick's `p` can be the mid of an empty book: right after the SNDK
+    split it printed 193 between a 92.58 bid and a 294.23 ask."""
+    b, k = tick.get("b"), tick.get("k")
+    if b is None or k is None or int(tick.get("t", 0)) < QUOTE_SANITY_FROM_MS:
+        return True
+    p = float(tick["p"])
+    return abs(float(b) - p) <= QUOTE_MAX_DEV * p and abs(float(k) - p) <= QUOTE_MAX_DEV * p
+
+
 def _quote(tick: dict, half_spread_bps: float):
     """(bid, ask, mid) for a tick. Real quote when it is usable, else mid ± half-spread."""
     p = float(tick["p"])
@@ -530,6 +541,7 @@ def replay_book(account: str, receipts: list, ticks: list, universe: dict, *,
 
     # Lifetime max drawdown, display only (2026-11-12): deepest fall of mark-to-market equity below
     # its running peak (the start counts as 1.0), checked on every tick of a held pair and every fill.
+    # From QUOTE_SANITY_FROM_MS a tick that fails _quote_sane() is not checked (2026-11-20).
     # Nothing scores or pays from it; elimination stays on day-end equity.
     dd = {"peak": 1.0, "max": 0.0}
     split_i: dict = {}
@@ -565,7 +577,7 @@ def replay_book(account: str, receipts: list, ticks: list, universe: dict, *,
         book.marks[pair] = mid
         if eliminated_at is not None:
             return
-        if book.qty.get(pair):
+        if book.qty.get(pair) and _quote_sane(t):     # display-only drawdown skips broken quotes
             track(book.equity())
         q = pending.get(pair)
         if not q or q[0][0] > tms:
