@@ -541,9 +541,20 @@ def replay_book(account: str, receipts: list, ticks: list, universe: dict, *,
 
     # Lifetime max drawdown, display only (2026-11-12): deepest fall of mark-to-market equity below
     # its running peak (the start counts as 1.0), checked on every tick of a held pair and every fill.
-    # From QUOTE_SANITY_FROM_MS a tick that fails _quote_sane() is not checked (2026-11-20).
+    # From QUOTE_SANITY_FROM_MS a tick that fails _quote_sane() is not checked and does not set
+    # the marks the check uses (2026-11-20); the book's own marks (equity, fills, EOD) are unchanged.
     # Nothing scores or pays from it; elimination stays on day-end equity.
     dd = {"peak": 1.0, "max": 0.0}
+    dmarks: dict = {}            # display-only marks: set only from ticks that pass _quote_sane()
+
+    def dd_equity():
+        u = 0.0
+        for pair in sorted(book.qty):
+            q = book.qty[pair]
+            if q:
+                u += q * (dmarks.get(pair, book.marks[pair]) - book.avg[pair])
+        return book.balance() + u
+
     split_i: dict = {}
 
     def apply_splits(pair, tms):
@@ -558,6 +569,8 @@ def replay_book(account: str, receipts: list, ticks: list, universe: dict, *,
                 book.avg[pair] = book.avg[pair] / r
             if pair in book.marks:
                 book.marks[pair] = book.marks[pair] / r
+            if pair in dmarks:
+                dmarks[pair] = dmarks[pair] / r
             i += 1
         split_i[pair] = i
 
@@ -575,10 +588,13 @@ def replay_book(account: str, receipts: list, ticks: list, universe: dict, *,
         apply_splits(pair, tms)
         bid, ask, mid = _quote(t, hs.get(pair, hs_default))
         book.marks[pair] = mid
+        sane = _quote_sane(t)
+        if sane:
+            dmarks[pair] = mid
         if eliminated_at is not None:
             return
-        if book.qty.get(pair) and _quote_sane(t):     # display-only drawdown skips broken quotes
-            track(book.equity())
+        if book.qty.get(pair) and sane:     # display-only drawdown skips broken quotes
+            track(dd_equity())
         q = pending.get(pair)
         if not q or q[0][0] > tms:
             return
@@ -599,7 +615,7 @@ def replay_book(account: str, receipts: list, ticks: list, universe: dict, *,
             book.qty[pair] = 0.0
         week_fill_buckets.add(bucket_of(tms))
         e_after = book.equity()
-        track(e_after)
+        track(dd_equity())
         fills.append({"t_ms": tms, "pair": pair, "dq": dq, "px": px, "target": target,
                       "equity": e_after, "seq": seq})
         series.append((tms, e_after))
@@ -624,6 +640,8 @@ def replay_book(account: str, receipts: list, ticks: list, universe: dict, *,
         elif t["a"] in universe:
             apply_splits(t["a"], tms)
             book.marks[t["a"]] = _quote(t, hs.get(t["a"], hs_default))[2]
+            if _quote_sane(t):
+                dmarks[t["a"]] = book.marks[t["a"]]
     while next_b <= end_ms:
         while ri < len(rs) and int(rs[ri]["t_recv_ms"]) < next_b:
             accept(rs[ri])

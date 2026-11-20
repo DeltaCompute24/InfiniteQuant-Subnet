@@ -117,3 +117,13 @@ def test_max_dd_skips_empty_book_tick():
              tick("BTCUSD", t0 + 12000, 100.0)]
     res = run([rc(t0, {"BTCUSD": -0.25})], ticks)
     assert res["max_dd"] == pytest.approx(0.0)
+
+
+def test_max_dd_ignores_a_broken_mark_left_behind():
+    t0 = MON + H
+    ticks = [tick("BTCUSD", t0 + 3000, 100.0), tick("NVDAUSD", t0 + 3000, 100.0),
+             {"a": "BTCUSD", "t": t0 + 9000, "p": 193.0, "b": 92.0, "k": 294.0},
+             tick("NVDAUSD", t0 + 10000, 100.0)]          # sane tick of another held pair
+    res = run([rc(t0, {"BTCUSD": -0.25, "NVDAUSD": 0.1})], ticks)
+    assert res["max_dd"] == pytest.approx(0.0)
+    assert res["equity"] == pytest.approx(1.0 - 0.0025 * 93.0)   # payout marks unchanged
