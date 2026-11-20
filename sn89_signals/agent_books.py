@@ -44,6 +44,8 @@ FILL
   tick shards carry `b`, `k` and `p` on every row (Hyperliquid for crypto/metals/equities,
   Polygon quotes for FX), so the bid/ask path is the normal one. A tick without a usable
   quote (missing, non-positive, or crossed) falls back to `p ± half_spread_bps[pair]`.
+  From QUOTE_SANITY_FROM_MS a quote whose bid or ask is more than QUOTE_MAX_DEV from `p` is
+  also unusable. A stock split in SPLITS rescales a held position at its effective instant.
   If two accepted receipts for one pair are both eligible at the same tick, the later one
   wins and the pair fills once.
 
@@ -144,6 +146,24 @@ def elim_dd_at(t_ms: int, rules) -> float:
     if int(t_ms) >= ELIM_DD_V2_FROM_S * 1000:
         return ELIM_DD_V2
     return float(rules["elim_dd"])
+
+
+# Corporate actions (Whit 2026-11-20). Sandisk split 8-for-1; Hyperliquid repriced SNDK from
+# ~753 to ~92 between its last pre-split tick (2026-11-19 21:02:55 UTC) and its first
+# split-adjusted tick (2026-11-20 01:07:25 UTC), and the replay read that as an 88% move.
+# At the effective instant a held position's quantity is multiplied by the ratio and its entry
+# and mark divided by it, so its value is unchanged. The instant must sit where the pair has
+# no ticks. {pair: ((effective_ms, ratio), ...)} in time order.
+SPLITS = {
+    "SNDKUSD": ((1795132800000, 8.0),),         # 2026-11-20 00:00 UTC, 8-for-1
+}
+
+# Quote sanity (Whit 2026-11-20): a tick's bid/ask is used only when both sit within
+# QUOTE_MAX_DEV of its `p`; otherwise the fill falls back to p +/- half-spread. The first
+# split-adjusted SNDK tick carried the pre-split book (753.23/753.25) beside p 92.58.
+# Keyed on the tick's own time.
+QUOTE_SANITY_FROM_MS = 1794787200000          # 2026-11-16 00:00 UTC
+QUOTE_MAX_DEV = 0.02
 
 
 # Exit reserve (Whit 2026-11-06, Mahmoud's feedback): a book at the daily cap could not close a
@@ -308,7 +328,9 @@ def _quote(tick: dict, half_spread_bps: float):
     if b is not None and k is not None:
         b, k = float(b), float(k)
         if b > 0 and k > 0 and b <= k:
-            return b, k, p
+            if (int(tick.get("t", 0)) < QUOTE_SANITY_FROM_MS
+                    or (abs(b - p) <= QUOTE_MAX_DEV * p and abs(k - p) <= QUOTE_MAX_DEV * p)):
+                return b, k, p
     h = p * float(half_spread_bps) / 1e4
     return p - h, p + h, p
 
@@ -510,6 +532,22 @@ def replay_book(account: str, receipts: list, ticks: list, universe: dict, *,
     # its running peak (the start counts as 1.0), checked on every tick of a held pair and every fill.
     # Nothing scores or pays from it; elimination stays on day-end equity.
     dd = {"peak": 1.0, "max": 0.0}
+    split_i: dict = {}
+
+    def apply_splits(pair, tms):
+        acts = SPLITS.get(pair)
+        if not acts:
+            return
+        i = split_i.get(pair, 0)
+        while i < len(acts) and acts[i][0] <= tms:
+            r = float(acts[i][1])
+            if book.qty.get(pair):
+                book.qty[pair] = book.qty[pair] * r
+                book.avg[pair] = book.avg[pair] / r
+            if pair in book.marks:
+                book.marks[pair] = book.marks[pair] / r
+            i += 1
+        split_i[pair] = i
 
     def track(e):
         if e > dd["peak"]:
@@ -522,6 +560,7 @@ def replay_book(account: str, receipts: list, ticks: list, universe: dict, *,
         if pair not in universe:
             return
         tms = int(t["t"])
+        apply_splits(pair, tms)
         bid, ask, mid = _quote(t, hs.get(pair, hs_default))
         book.marks[pair] = mid
         if eliminated_at is not None:
@@ -571,6 +610,7 @@ def replay_book(account: str, receipts: list, ticks: list, universe: dict, *,
         if tms >= start_ms:
             on_tick(t)
         elif t["a"] in universe:
+            apply_splits(t["a"], tms)
             book.marks[t["a"]] = _quote(t, hs.get(t["a"], hs_default))[2]
     while next_b <= end_ms:
         while ri < len(rs) and int(rs[ri]["t_recv_ms"]) < next_b:

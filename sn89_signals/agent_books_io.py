@@ -980,9 +980,18 @@ def annotate_closes(fills: list) -> list:
     carries `entry_px` (the position's average entry before it) and `move_pct` (the price move from
     that entry to this fill, positive when it favoured the position). Display only."""
     pos: dict = {}
+    split_i: dict = {}
     out = []
     for f in fills:
         g = dict(f)
+        acts = ab.SPLITS.get(f["pair"]) or ()
+        i = split_i.get(f["pair"], 0)
+        while i < len(acts) and acts[i][0] <= int(f["t_ms"]):   # same rescale as the replay
+            q, av = pos.get(f["pair"], (0.0, 0.0))
+            if q:
+                pos[f["pair"]] = (q * float(acts[i][1]), av / float(acts[i][1]))
+            i += 1
+        split_i[f["pair"]] = i
         q0, avg = pos.get(f["pair"], (0.0, 0.0))
         dq, px = float(f["dq"]), float(f["px"])
         q1 = q0 + dq
