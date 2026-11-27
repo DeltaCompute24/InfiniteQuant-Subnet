@@ -650,10 +650,13 @@ class PairIndex:
 
 
 def book_ticks(account_receipts: list, idx: PairIndex, universe: dict, *, start_ms: int,
-               end_ms: int, rules=None, keep_all: bool = False) -> list:
+               end_ms: int, rules=None, keep_all: bool = False,
+               keep_from_ms: int | None = None, keep_before: int = 50) -> list:
     """The exact tick slice one book's replay reads, from the union thin. keep_all: every thin
     tick of the book's pairs (live board, for the display-only max drawdown); extra real ticks
-    never change fills or equity at fills, day ends or weeks."""
+    never change fills or equity at fills, day ends or weeks. keep_from_ms (with keep_all):
+    every thin tick only AFTER keep_from_ms, plus the last `keep_before` ticks of each pair at
+    or before it, for a replay whose drawdown is seeded at keep_from_ms (replay_book dd_seed)."""
     rules = rules or ab.book_rules_as_of(start_ms / 1000)
     delay = _fill_delay(rules)
     pairs = sorted(p for p in touched_pairs(account_receipts, universe) if p in idx.t)
@@ -692,25 +695,35 @@ def book_ticks(account_receipts: list, idx: PairIndex, universe: dict, *, start_
         b += ab.DAY_MS
     for p in pairs:
         add_before(p, end_ms + 1)
-    if keep_all:
+    if keep_all and keep_from_ms is None:
         for p in pairs:
             sel.update(idx.i[p])
+    elif keep_all:
+        for p in pairs:
+            T, I = idx.t[p], idx.i[p]
+            k = bisect.bisect_right(T, keep_from_ms)
+            sel.update(I[max(0, k - keep_before):])
     return [idx.ticks[n] for n in sorted(sel) if int(idx.ticks[n]["t"]) <= end_ms]
 
 
 def replay_all(receipts: list, idx: PairIndex, universe: dict, *, start_ms: int, end_ms: int,
-               rules=None, keep_all: bool = False) -> dict:
-    """{account: agent_books.replay_book result}, each over its own exact slice."""
+               rules=None, keep_all: bool = False, dd_seeds: dict | None = None,
+               dd_mark_ms: int | None = None) -> dict:
+    """{account: agent_books.replay_book result}, each over its own exact slice.
+    dd_seeds {account: (c_ms, peak, max)} (with keep_all): that book's ticks are every tick only
+    after c_ms and its display drawdown is seeded there; dd_mark_ms is passed through."""
     by_acct: dict = {}
     for r in receipts:
         by_acct.setdefault(r["account"], []).append(r)
     out = {}
     for acct in sorted(by_acct):
         rs = by_acct[acct]
+        seed = (dd_seeds or {}).get(acct) if keep_all else None
         tk = book_ticks(rs, idx, universe, start_ms=start_ms, end_ms=end_ms, rules=rules,
-                        keep_all=keep_all)
+                        keep_all=keep_all, keep_from_ms=int(seed[0]) if seed else None)
         out[acct] = ab.replay_book(acct, rs, tk, universe, start_ms=start_ms, end_ms=end_ms,
-                                   rules=rules, ticks_sorted=True)
+                                   rules=rules, ticks_sorted=True, dd_seed=seed,
+                                   dd_mark_ms=dd_mark_ms)
     return out
 
 

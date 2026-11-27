@@ -178,6 +178,52 @@ def _atomic_write(path: str, data: bytes) -> None:
     os.replace(tmp, path)
 
 
+DD_CKPT_VERSION = 1
+HOUR_MS = 3_600_000
+
+
+def _dd_hash(acct_receipts: list, c_ms: int) -> str:
+    """What a book's display drawdown through c_ms depends on besides sealed ticks: its receipts
+    received by then, the split table and the checkpoint format."""
+    h = hashlib.sha256(f"v{DD_CKPT_VERSION}|{c_ms}|{sorted(ab.SPLITS.items())!r}".encode())
+    for r in sorted(acct_receipts, key=ab.receipt_order_key):
+        if int(r["t_recv_ms"]) <= c_ms:
+            h.update(json.dumps(r, sort_keys=True, separators=(",", ":")).encode())
+    return h.hexdigest()
+
+
+def _dd_seeds(path: str, rs: list, mark_ms: int) -> dict:
+    """{account: (c_ms, peak, max)} from the last live run's checkpoint, for books whose receipts
+    through the checkpoint are unchanged. A missing or unreadable file seeds nothing (full replay)."""
+    try:
+        with open(path) as fh:
+            ck = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    c = int(ck.get("c_ms") or 0)
+    if ck.get("v") != DD_CKPT_VERSION or not c or c > mark_ms:
+        return {}
+    by: dict = {}
+    for r in rs:
+        by.setdefault(r["account"], []).append(r)
+    out = {}
+    for acct, row in (ck.get("books") or {}).items():
+        if acct in by and row.get("h") == _dd_hash(by[acct], c):
+            out[acct] = (c, float(row["peak"]), float(row["max"]))
+    return out
+
+
+def _dd_save(path: str, rs: list, results: dict, mark_ms: int) -> None:
+    by: dict = {}
+    for r in rs:
+        by.setdefault(r["account"], []).append(r)
+    books = {a: {"peak": res["dd_mark"]["peak"], "max": res["dd_mark"]["max"],
+                 "h": _dd_hash(by.get(a, []), mark_ms)}
+             for a, res in sorted(results.items()) if res.get("dd_mark")}
+    _atomic_write(path, (json.dumps({"v": DD_CKPT_VERSION, "c_ms": mark_ms, "books": books},
+                                    sort_keys=True, separators=(",", ":")) + "\n").encode())
+
+
 def replay(args, receipts: list, end_ms: int, now_ms: int):
     epoch = monday_ms(args.epoch) if args.epoch else abio.epoch_ms()
     if not config.AGENT_BOOKS_FROM_UNIX and not args.epoch:
@@ -194,11 +240,22 @@ def replay(args, receipts: list, end_ms: int, now_ms: int):
         final_before_ms=now_ms - config.AGENT_BOOKS_FREEZE_DELAY_S * 1000,
         extremes_ms=60_000 if live else 0)
     t1 = time.time()
+    seeds, mark_ms, ck_path = {}, None, None
+    if live:
+        # Display-only max drawdown rolled forward from a checkpoint on sealed ticks (2026-11-27):
+        # every-tick replay only after the checkpoint instead of from the epoch (was ~300 s a run
+        # and growing; a run past the unit's 280 s timeout froze the board for 21 h on 11-26).
+        mark_ms = (now_ms - config.AGENT_BOOKS_FREEZE_DELAY_S * 1000) // HOUR_MS * HOUR_MS
+        ck_path = os.path.join(args.out, "live-dd.json")
+        seeds = _dd_seeds(ck_path, rs, mark_ms)
     results = abio.replay_all(rs, abio.PairIndex(ticks), universe, start_ms=epoch,
-                              end_ms=end_ms, keep_all=live)
+                              end_ms=end_ms, keep_all=live, dd_seeds=seeds, dd_mark_ms=mark_ms)
+    if live:
+        _dd_save(ck_path, rs, results, mark_ms)
     _log(f"epoch {abio.week_label(epoch)} → {end_ms}: {len(rs)} receipts, "
          f"{len(results)} books, {len(ticks)} thin ticks, {len(missing)} missing windows; "
-         f"ticks {t1 - t0:.1f}s, replay {time.time() - t1:.1f}s")
+         f"ticks {t1 - t0:.1f}s, replay {time.time() - t1:.1f}s"
+         + (f", drawdown seeded {len(seeds)}/{len(results)}" if live else ""))
     return epoch, results, missing
 
 

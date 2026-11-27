@@ -457,7 +457,8 @@ def _check_receipt(r: dict, declared: dict, universe: dict, rules) -> str | None
 
 def replay_book(account: str, receipts: list, ticks: list, universe: dict, *,
                 start_ms: int, end_ms: int, rules=None, half_spread_bps: dict | None = None,
-                carry_fn=None, ticks_sorted: bool = False) -> dict:
+                carry_fn=None, ticks_sorted: bool = False, dd_seed: tuple | None = None,
+                dd_mark_ms: int | None = None) -> dict:
     """Replay one book over [start_ms, end_ms].
 
     receipts: this account's receipts (others are ignored).
@@ -468,6 +469,14 @@ def replay_book(account: str, receipts: list, ticks: list, universe: dict, *,
            day end for each open pair (v1: None, carry not modelled).
     Returns a dict with fills, refusals, no-ops, daily EOD rows, weekly rows, the equity
     series (one point per fill and per day end) and eliminated_at_ms.
+
+    dd_seed=(c_ms, peak, max) / dd_mark_ms: incremental display-only max drawdown (2026-11-27).
+    With a seed, the drawdown is not tracked on ticks at or before c_ms; it starts from the
+    seeded peak/max, which a previous run computed over every tick through c_ms. The caller
+    then only needs every tick of the book's pairs AFTER c_ms (plus the last ticks before it,
+    so the display marks match). dd_mark_ms records {"peak","max"} after the last tick at or
+    before it, as "dd_mark", for the next run to seed from. Neither changes fills, equity,
+    day ends, weeks or elimination; both default off.
     """
     rules = rules or book_rules_as_of(start_ms / 1000)
     hs = half_spread_bps or {}
@@ -576,6 +585,8 @@ def replay_book(account: str, receipts: list, ticks: list, universe: dict, *,
     # the marks the check uses (2026-11-20); the book's own marks (equity, fills, EOD) are unchanged.
     # Nothing scores or pays from it; elimination stays on day-end equity.
     dd = {"peak": 1.0, "max": 0.0}
+    dd_on = [dd_seed is None]
+    dd_mark = None
     dmarks: dict = {}            # display-only marks: set only from ticks that pass _quote_sane()
 
     def dd_equity():
@@ -606,6 +617,8 @@ def replay_book(account: str, receipts: list, ticks: list, universe: dict, *,
         split_i[pair] = i
 
     def track(e):
+        if not dd_on[0]:
+            return
         if e > dd["peak"]:
             dd["peak"] = e
         elif dd["peak"] > 0:
@@ -651,12 +664,23 @@ def replay_book(account: str, receipts: list, ticks: list, universe: dict, *,
                       "equity": e_after, "seq": seq})
         series.append((tms, e_after))
 
+    def dd_gates(tms):
+        nonlocal dd_mark
+        if not dd_on[0] and tms > int(dd_seed[0]):
+            dd["peak"] = max(dd["peak"], float(dd_seed[1]))
+            dd["max"] = max(dd["max"], float(dd_seed[2]))
+            dd_on[0] = True
+        if dd_mark_ms is not None and dd_mark is None and tms > dd_mark_ms:
+            dd_mark = dict(dd)
+
     next_b = day_start_ms(start_ms) + DAY_MS
     ri = 0
     for t in tk:
         tms = int(t["t"])
         if tms > end_ms:
             break
+        if dd_seed is not None or dd_mark_ms is not None:
+            dd_gates(tms)
         while next_b <= tms and next_b <= end_ms:
             while ri < len(rs) and int(rs[ri]["t_recv_ms"]) < next_b:
                 accept(rs[ri])
@@ -683,9 +707,12 @@ def replay_book(account: str, receipts: list, ticks: list, universe: dict, *,
         accept(rs[ri])
         ri += 1
 
+    if dd_seed is not None or dd_mark_ms is not None:
+        dd_gates(2 ** 62)
     positions = {p: {"qty": book.qty[p], "avg": book.avg[p], "mark": book.marks[p]}
                  for p in sorted(book.qty) if book.qty[p]}
-    return {"account": account, "fills": fills, "refused": refused, "noops": noops,
+    extra = {"dd_mark": dd_mark} if dd_mark_ms is not None else {}
+    return {**extra, "account": account, "fills": fills, "refused": refused, "noops": noops,
             "daily": daily, "weeks": weeks, "series": series,
             "eliminated_at_ms": eliminated_at, "hwm": hwm,
             "equity": book.equity(), "balance": book.balance(),

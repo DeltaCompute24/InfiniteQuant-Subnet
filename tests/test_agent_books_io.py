@@ -207,6 +207,37 @@ def test_thin_with_extremes_sees_the_full_max_drawdown(seed):
         assert got[acct]["max_dd"] == pytest.approx(full["max_dd"], abs=1e-12), acct
 
 
+@pytest.mark.parametrize("seed", [1, 2, 3])
+@pytest.mark.parametrize("cut_h", [5, 30, 77, 150])
+def test_seeded_max_drawdown_equals_full(seed, cut_h):
+    """Live board (2026-11-27): drawdown checkpointed at C, then every-tick replay only after C,
+    must give the same max_dd as every tick from the start, and leave scored fields unchanged."""
+    ticks, receipts = _world(seed)
+    end = MON + 7 * D
+    C = MON + cut_h * H
+    rs = [r for r in receipts if r["t_recv_ms"] < end]
+    thin, _ = abio.load_thin_range(MON, end, rs, UNI, _reader(ticks), extremes_ms=1)
+    idx = abio.PairIndex(thin)
+    full = abio.replay_all(rs, idx, UNI, start_ms=MON, end_ms=end, keep_all=True, dd_mark_ms=C)
+    seeds = {a: (C, r["dd_mark"]["peak"], r["dd_mark"]["max"]) for a, r in full.items()}
+    inc = abio.replay_all(rs, idx, UNI, start_ms=MON, end_ms=end, keep_all=True, dd_seeds=seeds)
+    for acct in sorted(full):
+        want = {k: v for k, v in _scored(full[acct]).items() if k != "dd_mark"}
+        assert _scored(inc[acct]) == want, acct
+        assert inc[acct]["max_dd"] == pytest.approx(full[acct]["max_dd"], abs=1e-12), acct
+
+
+def test_dd_mark_off_by_default_and_scoring_unchanged():
+    ticks, receipts = _world(5)
+    end = MON + 7 * D
+    rs = [r for r in receipts if r["t_recv_ms"] < end]
+    acct = sorted({r["account"] for r in rs})[0]
+    a = ab.replay_book(acct, rs, ticks, UNI, start_ms=MON, end_ms=end)
+    b = ab.replay_book(acct, rs, ticks, UNI, start_ms=MON, end_ms=end, dd_mark_ms=MON + 40 * H)
+    assert "dd_mark" not in a and "dd_mark" in b
+    assert a == {k: v for k, v in b.items() if k != "dd_mark"}
+
+
 def test_thin_cache_roundtrip_and_invalidation(tmp_path):
     ticks, receipts = _world(11)
     end = MON + 7 * D
